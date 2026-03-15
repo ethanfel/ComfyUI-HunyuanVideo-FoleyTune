@@ -3,7 +3,11 @@
 # This line makes the 'hunyuanvideo_foley' sub-directory importable by your nodes.py
 import sys
 import os
+import warnings
+from pydantic.warnings import UnsupportedFieldAttributeWarning
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+warnings.filterwarnings("ignore", category=UnsupportedFieldAttributeWarning)
 
 # This line imports the node mappings from your nodes.py file
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS

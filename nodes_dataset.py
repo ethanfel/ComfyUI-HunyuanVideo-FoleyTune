@@ -1137,12 +1137,13 @@ class FoleyDatasetBrowser:
        {
          "prompt": "description",
          "clips_dir": "/path/to/frames",
-         "audio_dir": "/path/to/cleaned",
+         "raw_audio_dir": "/path/to/raw/audio",
+         "audio_dir": "/path/to/cleaned/audio",
          "features_dir": "/path/to/features",
          "clips": ["clip_001", "clip_002"]
        }
-       Only clips_dir is required. audio_dir defaults to clips_dir,
-       features_dir defaults to clips_dir/features.
+       All dirs are independent. audio_dir and raw_audio_dir default
+       to clips_dir if omitted. features_dir defaults to clips_dir/features.
        Audio extension auto-detected (.flac then .wav).
 
     For formats 1 and 2, base paths derive:
@@ -1167,13 +1168,14 @@ class FoleyDatasetBrowser:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "INT")
-    RETURN_NAMES = ("video_path", "audio_path", "frames_dir", "npz_path", "prompt", "max_index")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "INT")
+    RETURN_NAMES = ("video_path", "raw_audio_dir", "audio_clean", "frames_dir", "npz_path", "prompt", "max_index")
     OUTPUT_TOOLTIPS = (
         "path + '.mp4'",
-        "path + '.wav'  (or features/name.wav)",
-        "path  (image-sequence directory)",
-        "features/name.npz  (pre-extracted features)",
+        "raw_audio_dir folder path — wire to Foley Dataset Loader",
+        "audio_dir/name.flac or .wav  (cleaned audio per clip)",
+        "clips_dir/name  (image-sequence directory)",
+        "features_dir/name.npz  (pre-extracted features)",
         "Text prompt / label for this clip",
         "count - 1 — wire to a primitive INT's max to constrain the index widget",
     )
@@ -1202,6 +1204,7 @@ class FoleyDatasetBrowser:
         entries = []
         default_prompt = ""
         clips_dir = None
+        raw_audio_dir = None
         audio_dir = None
         features_dir = None
 
@@ -1209,6 +1212,7 @@ class FoleyDatasetBrowser:
             # Compact format
             default_prompt = data.get("prompt", data.get("label", ""))
             clips_dir = Path(data["clips_dir"]) if "clips_dir" in data else None
+            raw_audio_dir = Path(data["raw_audio_dir"]) if "raw_audio_dir" in data else clips_dir
             audio_dir = Path(data["audio_dir"]) if "audio_dir" in data else clips_dir
             if "features_dir" in data:
                 features_dir = Path(data["features_dir"])
@@ -1257,21 +1261,24 @@ class FoleyDatasetBrowser:
         video_path = base + ".mp4" if not p_base.suffix else base
         frames_dir = str(p_base) if not p_base.suffix else str(p_base.with_suffix(""))
 
-        # Audio: use audio_dir if set, otherwise derive from base
-        if audio_dir:
-            audio_base = audio_dir / name
-        else:
-            audio_base = p_base
+        def _find_audio(base_dir, stem, prefer_flac=True):
+            """Auto-detect .flac or .wav in base_dir."""
+            if base_dir:
+                ab = base_dir / stem
+            else:
+                ab = p_base
+            exts = (".flac", ".wav") if prefer_flac else (".wav", ".flac")
+            for ext in exts:
+                candidate = ab.with_suffix(ext)
+                if candidate.exists():
+                    return str(candidate)
+            return str(ab.with_suffix(exts[0]))
 
-        # Auto-detect .flac or .wav
-        audio_path = ""
-        for ext in (".flac", ".wav"):
-            candidate = audio_base.with_suffix(ext)
-            if candidate.exists():
-                audio_path = str(candidate)
-                break
-        if not audio_path:
-            audio_path = str(audio_base.with_suffix(".wav"))
+        # Raw audio dir: just the folder path for Dataset Loader
+        raw_dir_str = str(raw_audio_dir) if raw_audio_dir else str(clips_dir or p_base.parent)
+
+        # Cleaned audio: per-clip file path from audio_dir
+        audio_clean = _find_audio(audio_dir, name, prefer_flac=True)
 
         # NPZ: use features_dir if set, otherwise derive from base
         if features_dir:
@@ -1281,11 +1288,11 @@ class FoleyDatasetBrowser:
 
         print(
             f"[FoleyDatasetBrowser] [{index}/{count - 1}]  prompt='{prompt}'  "
-            f"base={base}",
+            f"clean={audio_clean}",
             flush=True,
         )
 
-        return (video_path, audio_path, frames_dir, npz_path, prompt, count - 1)
+        return (video_path, raw_dir_str, audio_clean, frames_dir, npz_path, prompt, count - 1)
 
 
 # ─── Node Mappings ───────────────────────────────────────────────────────────

@@ -32,25 +32,28 @@ Add LoRA fine-tuning to HunyuanVideo-Foley for video-to-audio generation. Port t
 
 ### 1. Foley Feature Extractor
 
-Caches features for training. One clip per execution, auto-incremented naming.
+Caches visual + text features for training. One clip per execution, auto-incremented naming.
+Audio is **not** processed here — it is handled by the Dataset Saver after audio cleaning.
 
 **Inputs:**
-- `HUNYUAN_DEPS` — provides SigLIP2, Synchformer, CLAP, DAC models
+- `HUNYUAN_DEPS` — provides SigLIP2, Synchformer, CLAP models
 - `IMAGE` — video frames
-- `AUDIO` — paired audio
 - `prompt` — text description
-- `frame_rate` — source video FPS
-- `duration` — clip duration (0 = auto from audio)
-- `cache_dir` — output directory for .npz + audio files
+- `frame_rate` — source video FPS (used only if duration=0)
+- `duration` — clip duration in seconds (default **8.0s** — Foley generates 8s audio)
+- `cache_dir` — output directory for .npz files
 - `name` — base filename for auto-increment (e.g., "gunshot" -> gunshot_001.npz)
 
+> **Important:** Always set `duration=8.0` explicitly. The auto-detect (`total_frames / frame_rate`)
+> gives wrong results when the video fps doesn't match the `frame_rate` input (e.g., 30fps video
+> with frame_rate=25 computes 9.6s instead of 8.0s). This causes misaligned visual features
+> that break audio-video sync during training.
+
 **Process:**
-1. Extract SigLIP2 features at 8fps, 512x512 -> `[1, N_clip, 768]`
-2. Extract Synchformer features at 25fps, 224x224 -> `[1, N_sync, 768]`
-3. Encode text via CLAP -> `[1, 768]`
-4. Encode audio via DAC encoder -> `[1, 128, T]` latents
-5. Save all to .npz with metadata (prompt, duration, fps)
-6. Copy/save audio file alongside with matching stem
+1. Extract SigLIP2 features at 8fps, 512x512 -> `[1, 64, 768]` (for 8s)
+2. Extract Synchformer features at 25fps, 224x224 -> `[1, 192, 768]` (for 8s)
+3. Encode text via CLAP -> `[1, N_text, 768]`
+4. Save all to .npz with metadata (prompt, duration, fps)
 
 **Caching:** SHA256 hash-based dedup to skip reprocessing identical inputs.
 
@@ -104,22 +107,48 @@ Core training node. Blocks the queue during training.
 SingleStreamBlock Conv1d layers excluded initially (Linear-only targeting).
 
 **Training Loop (Flow Matching):**
+
+**CRITICAL — Sigma convention must match the scheduler:**
+
+The `FlowMatchDiscreteScheduler` uses `x(sigma) = sigma * noise + (1-sigma) * data`,
+with sigma going from 1 (noise) to 0 (data) during generation. The training must match:
+
 ```
 1. Load cached .npz features + DAC-encoded latents
-2. Sample timestep t ~ configured distribution
-3. Sample noise x0 ~ N(0, I)
-4. Interpolate: xt = (1-t)*x0 + t*x1
-5. Forward: v_pred = foley_model(xt, t, clip_feat, sync_feat, text_feat)
-6. Loss: MSE(v_pred, x1 - x0)
+2. Sample timestep t ~ configured distribution (t in [0, 1])
+3. Sample noise x0 ~ N(0, I), let x1 = target data
+4. Interpolate: xt = t*x0 + (1-t)*x1     (t=1 → noise, t=0 → data)
+5. Forward: v_pred = foley_model(xt, t*1000, clip_feat, sync_feat, text_feat)
+6. Loss: MSE(v_pred, x0 - x1)            (velocity = noise - data)
 7. Backward through LoRA params only
 8. AdamW step (beta1=0.9, beta2=0.95) + gradient clipping (max_norm=1.0)
 ```
 
+> **Note:** The raw MSE loss appears flat (~1.3) throughout training. This is normal
+> for flow matching — the loss is dominated by the irreducible stochastic variance
+> of the velocity target. The actual learning signal is a tiny fraction of the total.
+> Use eval spectrograms and spectral metrics (LSD, MCD, per-band correlation)
+> to track training progress, not the raw loss value.
+
+**Eval Sample Generation (CFG required):**
+
+The base model was trained with classifier-free guidance dropout and **requires CFG
+at inference** to produce coherent audio. Eval samples use the same approach as the
+main inference pipeline:
+
+1. Create unconditional embeddings via `model.get_empty_clip_sequence()` / `get_empty_sync_sequence()` + zero text
+2. Double the batch: `torch.cat([uncond, cond])` for all features
+3. Run model once, split output: `v_uncond, v_cond = v_pred.chunk(2)`
+4. Apply guidance: `v = v_uncond + cfg_scale * (v_cond - v_uncond)` (default cfg_scale=5.0)
+
+Without CFG, the model produces pure noise regardless of training quality.
+
 **Outputs:**
 - Checkpoints: `adapter_step00500.pt`, `adapter_final.pt`
 - Metadata: `meta.json`
-- Loss curves: `loss_raw.png`, `loss_smoothed.png`
-- Eval samples: `samples/step_00500.wav`, etc.
+- Loss curve: `loss.png`
+- Eval samples + spectrograms: `samples/step_00000.wav` (pre-training baseline), `samples/step_00500.wav`, etc.
+- Spectral metrics: `metrics_history.json` (saved incrementally at each checkpoint)
 - Returns: `HUNYUAN_MODEL` with LoRA applied
 
 ### 3. Foley LoRA Loader
@@ -282,3 +311,39 @@ Optimized for maximum quality on high-VRAM hardware:
 | timestep_mode | logit_normal | 0.2-0.3 dB lower loss floor |
 | lr | 1e-4 | Proven across AudioLDM and SelVA |
 | grad_accum | 1 | No need with 96 GB |
+
+## Technical Notes (from first sweep, 2026-04-11)
+
+### DAC Codec Details
+- **Encoder rates:** `[2, 4, 8, 8]` → **hop length = 512**
+- 8s @ 48kHz = 384,000 samples → 750 latent frames
+- Continuous mode: `encode()` returns `DiagonalGaussianDistribution`, call `.sample()`
+
+### ComfyUI Integration
+- ComfyUI wraps node execution in `torch.inference_mode()` — must exit with
+  `with torch.inference_mode(False), torch.enable_grad():` for training
+- Live loss curve preview: `comfy.utils.ProgressBar` + `pbar.update_absolute(step, total, ("JPEG", pil_image, 800))`
+- No `torchaudio` — use `soundfile` for I/O and `soxr` for resampling (avoids torchcodec/FFmpeg dependency)
+
+### Training Quality Indicators
+- **Raw MSE loss is NOT informative** — appears flat at ~1.3 due to flow matching noise floor
+- **Track these instead:**
+  - Eval spectrograms (visual comparison to reference)
+  - Spectral convergence (normalized Frobenius distance, lower = better)
+  - Per-band correlation (higher = better, negative = bad)
+  - Mel cepstral distortion (lower = better)
+  - CLAP similarity (cosine sim between generated audio and text prompt)
+
+### First Sweep Results (baseline_r64, 49 clips × 2 augmentations = 99 training pairs)
+
+| Metric | Step 500 | Step 1000 | Trend |
+|--------|----------|-----------|-------|
+| Loss (MSE) | 1.329 | 1.305 | flat (expected) |
+| Spectral convergence | 3.21 | 2.15 | -33% |
+| MCD | 33.8 | 33.4 | down |
+| Per-band correlation | -0.12 | +0.01 | improving |
+| HF energy ratio | 0.056 | 0.015 | normalizing |
+| Temporal variance | 2.93 | 1.97 | tightening |
+
+Step 0 (base model) eval sounds like generic audio. By step 500, temporal structure
+matches reference. By step 1000, spectral characteristics are converging.

@@ -641,10 +641,17 @@ class FoleyLoRATrainer:
         logger.info(f"Training complete: {elapsed_total:.0f}s, final loss: {np.mean(losses[-100:]):.4f}")
         logger.info(f"Adapter saved to {final_path}")
 
+        # Save to ComfyUI temp dir for inline node preview
+        temp_dir = folder_paths.get_temp_directory()
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_file = f"lora_loss_curve.png"
+        loss_img.save(os.path.join(temp_dir, temp_file))
+
         # Return model with LoRA active (on CPU for ComfyUI pipeline)
         model.eval()
         model.to(mm.unet_offload_device())
-        return (model, loss_curve_tensor)
+        return {"ui": {"images": [{"filename": temp_file, "subfolder": "", "type": "temp"}]},
+                "result": (model, loss_curve_tensor)}
 
 
 # --- Node 3: LoRA Loader ----------------------------------------------------
@@ -983,14 +990,21 @@ class FoleyLoRAScheduler:
             with open(summary_path, "w") as f:
                 json.dump(summary, f, indent=2, default=str)
 
-        # Generate comparison chart
+        # Generate comparison chart and save to temp for inline preview
         curve_data = [{"id": eid, "loss_history": lh} for eid, lh in all_loss_histories.items()]
         comparison_img = _draw_comparison_curves(curve_data)
         comparison_img.save(str(output_root / "loss_comparison.png"))
         comparison_tensor = _pil_to_tensor(comparison_img)
 
+        # Save to ComfyUI temp dir for inline node preview
+        temp_dir = folder_paths.get_temp_directory()
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_file = f"lora_sweep_comparison_{sweep_name}.png"
+        comparison_img.save(os.path.join(temp_dir, temp_file))
+
         logger.info(f"Sweep complete: {len(results)} experiments")
-        return (str(summary_path), comparison_tensor)
+        return {"ui": {"images": [{"filename": temp_file, "subfolder": "", "type": "temp"}]},
+                "result": (str(summary_path), comparison_tensor)}
 
 
 class _SkipExperiment(Exception):

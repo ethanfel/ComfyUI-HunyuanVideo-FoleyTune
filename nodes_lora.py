@@ -537,6 +537,8 @@ class FoleyLoRATrainer:
 
         losses = []
         log_interval = 50
+        remaining = steps - start_step
+        pbar = comfy.utils.ProgressBar(remaining)
 
         logger.info(f"Starting training: {steps} steps, batch {batch_size}, lr {lr}")
         t_start = time.time()
@@ -601,13 +603,22 @@ class FoleyLoRATrainer:
 
             losses.append(loss.item() * grad_accum)
 
-            # Logging
+            # Logging + live preview
             if (step + 1) % log_interval == 0:
                 avg_loss = np.mean(losses[-log_interval:])
                 elapsed = time.time() - t_start
                 logger.info(f"Step {step+1}/{steps} | loss: {avg_loss:.4f} | "
                            f"lr: {scheduler.get_last_lr()[0]:.2e} | "
                            f"elapsed: {elapsed:.0f}s")
+
+                preview_img = _draw_loss_curve(
+                    losses, log_interval, start_step,
+                    smoothed=_smooth_losses(losses),
+                )
+                pbar.update_absolute(
+                    step + 1 - start_step, remaining,
+                    ("JPEG", preview_img, 800),
+                )
 
             # Save checkpoint + eval sample
             if (step + 1) % save_every == 0:
@@ -885,6 +896,7 @@ class FoleyLoRAScheduler:
                     losses = []
                     n_clips = len(dataset)
                     t_start = time.time()
+                    pbar_train = comfy.utils.ProgressBar(config["steps"])
 
                     for step in range(config["steps"]):
                         # Skip flag
@@ -936,6 +948,15 @@ class FoleyLoRAScheduler:
                             logger.info(f"[{exp_id}] Step {step+1}/{config['steps']} | "
                                        f"loss: {avg_loss:.4f} | lr: {lr_sched.get_last_lr()[0]:.2e} | "
                                        f"elapsed: {elapsed:.0f}s")
+
+                            preview_img = _draw_loss_curve(
+                                losses, 50, 0,
+                                smoothed=_smooth_losses(losses),
+                            )
+                            pbar_train.update_absolute(
+                                step + 1, config["steps"],
+                                ("JPEG", preview_img, 800),
+                            )
 
                         if (step + 1) % config["save_every"] == 0:
                             meta = {**config, "steps_completed": step + 1}

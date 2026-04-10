@@ -54,7 +54,6 @@ class FoleyFeatureExtractor:
             "required": {
                 "hunyuan_deps": ("HUNYUAN_DEPS",),
                 "image": ("IMAGE",),
-                "audio": ("AUDIO",),
                 "prompt": ("STRING", {"default": "", "multiline": True}),
                 "frame_rate": ("FLOAT", {"default": 25.0, "min": 1.0, "max": 60.0, "step": 0.1}),
                 "duration": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 30.0, "step": 0.1,
@@ -71,7 +70,7 @@ class FoleyFeatureExtractor:
     CATEGORY = "audio/HunyuanFoley/LoRA"
     OUTPUT_NODE = True
 
-    def extract_features(self, hunyuan_deps, image, audio, prompt, frame_rate, duration,
+    def extract_features(self, hunyuan_deps, image, prompt, frame_rate, duration,
                          cache_dir, name):
         from hunyuanvideo_foley.utils.feature_utils import (
             encode_video_with_siglip2, encode_video_with_sync, encode_text_feat,
@@ -95,15 +94,12 @@ class FoleyFeatureExtractor:
         frames_tchw = frames_bhwc.permute(0, 3, 1, 2)  # [T, C, H, W]
         frames_uint8 = (frames_tchw * 255).clamp(0, 255).to(torch.uint8)
 
-        waveform = audio["waveform"]  # [1, C, L]
-        sample_rate = audio["sample_rate"]
-
-        # Compute duration from audio if not specified
-        if duration <= 0:
-            duration = waveform.shape[-1] / sample_rate
-
         # Resample frames to target FPS for each extractor
         total_frames = frames_uint8.shape[0]
+
+        # Compute duration from video frames if not specified
+        if duration <= 0:
+            duration = total_frames / frame_rate
 
         # SigLIP2: 8fps, 512x512
         siglip2_fps = 8

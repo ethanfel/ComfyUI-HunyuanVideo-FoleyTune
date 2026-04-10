@@ -62,7 +62,11 @@ class FoleyFeatureExtractor:
                 "cache_dir": ("STRING", {"default": ""}),
                 "name": ("STRING", {"default": "clip",
                           "tooltip": "Base name for auto-incremented files (e.g. clip -> clip_001.npz)"}),
-            }
+            },
+            "optional": {
+                "audio_path": ("STRING", {"default": "",
+                               "tooltip": "Source audio file path. If 48kHz, copies instead of re-encoding."}),
+            },
         }
 
     RETURN_TYPES = ("STRING",)
@@ -72,7 +76,7 @@ class FoleyFeatureExtractor:
     OUTPUT_NODE = True
 
     def extract_features(self, hunyuan_deps, image, audio, prompt, frame_rate, duration,
-                         cache_dir, name):
+                         cache_dir, name, audio_path=""):
         from hunyuanvideo_foley.utils.feature_utils import (
             encode_video_with_siglip2, encode_video_with_sync, encode_text_feat,
         )
@@ -164,14 +168,13 @@ class FoleyFeatureExtractor:
             fps=frame_rate,
         )
 
-        # Save audio: if already 48kHz, copy the source file to avoid re-encoding.
-        # Otherwise resample and save as WAV.
-        audio_src = audio.get("path") if isinstance(audio, dict) else None
-        if sample_rate == 48000 and audio_src and Path(audio_src).exists():
+        # Save audio: if source is 48kHz and path provided, copy directly.
+        audio_src = Path(audio_path.strip()) if audio_path and audio_path.strip() else None
+        if sample_rate == 48000 and audio_src and audio_src.exists():
             import shutil
-            ext = Path(audio_src).suffix  # .flac, .wav, etc.
+            ext = audio_src.suffix  # .flac, .wav, etc.
             audio_out_path = cache_dir / f"{name}_{idx:03d}{ext}"
-            shutil.copy2(audio_src, audio_out_path)
+            shutil.copy2(str(audio_src), str(audio_out_path))
             logger.info(f"Copied source audio (48kHz): {audio_src}")
         else:
             wav = waveform.squeeze(0)  # [C, L]

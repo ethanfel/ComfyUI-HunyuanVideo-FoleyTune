@@ -1120,6 +1120,99 @@ class FoleyOutputNormalizer:
         return ({"waveform": wav_out.unsqueeze(0), "sample_rate": sr},)
 
 
+# ─── Node 14: Dataset Browser ───────────────────────────────────────────────
+
+class FoleyDatasetBrowser:
+    """Browse a dataset.json file entry by entry using an integer index.
+
+    Each entry in the JSON is expected to have:
+      - "video_path" : path to the video file (absolute or relative to JSON dir)
+      - "prompt"     : text description of the sound
+
+    Optional keys:
+      - "audio_path" : explicit audio path (if absent, derived from video_path as .wav)
+
+    Outputs STRING paths that wire directly to VHS_LoadVideoPath and
+    Foley Feature Extractor for batch feature extraction.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "dataset_json": ("STRING", {
+                    "default": "",
+                    "tooltip": "Path to a dataset.json file listing video/audio/prompt entries.",
+                }),
+                "index": ("INT", {
+                    "default": 0, "min": 0, "max": 99999, "step": 1,
+                    "tooltip": "Zero-based index of the entry to browse.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "INT")
+    RETURN_NAMES = ("video_path", "audio_path", "npz_path", "prompt", "max_index")
+    OUTPUT_TOOLTIPS = (
+        "Path to the video file",
+        "Path to the audio file (.wav/.flac alongside video, or explicit audio_path)",
+        "Path to .npz features file (if it exists in a features/ subdirectory)",
+        "Text prompt for this clip",
+        "count - 1 — wire to a primitive INT's max to constrain the index widget",
+    )
+    FUNCTION = "browse"
+    CATEGORY = FOLEY_DS_CATEGORY
+    DESCRIPTION = (
+        "Reads a dataset.json and exposes one entry at a time via an integer index. "
+        "Outputs video path, audio path, features path, and prompt. "
+        "Wire video_path to VHS_LoadVideoPath and prompt to Foley Feature Extractor."
+    )
+
+    IS_CHANGED = classmethod(lambda cls, **_: float("nan"))
+
+    def browse(self, dataset_json: str, index: int):
+        import json as _json
+
+        p = Path(dataset_json.strip())
+        if not p.exists():
+            raise FileNotFoundError(f"[FoleyDatasetBrowser] File not found: {p}")
+
+        with p.open("r", encoding="utf-8") as f:
+            data = _json.load(f)
+
+        if not isinstance(data, list) or len(data) == 0:
+            raise ValueError(f"[FoleyDatasetBrowser] Expected a non-empty JSON array in {p}")
+
+        count = len(data)
+        if index >= count:
+            raise IndexError(
+                f"[FoleyDatasetBrowser] index {index} out of range "
+                f"(dataset has {count} entries, last index is {count - 1})"
+            )
+        entry = data[index]
+
+        video_path = entry["video_path"]
+        prompt = entry.get("prompt", "")
+
+        # Audio path: explicit or derived from video
+        if "audio_path" in entry:
+            audio_path = entry["audio_path"]
+        else:
+            audio_path = str(Path(video_path).with_suffix(".wav"))
+
+        # NPZ path: check features/ subdirectory
+        v = Path(video_path)
+        npz_path = str(v.parent / "features" / v.stem) + ".npz"
+
+        print(
+            f"[FoleyDatasetBrowser] [{index}/{count - 1}]  prompt='{prompt}'  "
+            f"video={video_path}",
+            flush=True,
+        )
+
+        return (video_path, audio_path, npz_path, prompt, count - 1)
+
+
 # ─── Node Mappings ───────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
@@ -1136,6 +1229,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyHfSmoother": FoleyHfSmoother,
     "FoleyHarmonicExciter": FoleyHarmonicExciter,
     "FoleyOutputNormalizer": FoleyOutputNormalizer,
+    "FoleyDatasetBrowser": FoleyDatasetBrowser,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1152,4 +1246,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyHfSmoother": "Foley HF Smoother",
     "FoleyHarmonicExciter": "Foley Harmonic Exciter",
     "FoleyOutputNormalizer": "Foley Output Normalizer",
+    "FoleyDatasetBrowser": "Foley Dataset Browser",
 }

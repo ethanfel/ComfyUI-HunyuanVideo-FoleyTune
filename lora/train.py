@@ -16,7 +16,7 @@ import torch.nn.functional as F
 import torchaudio
 from loguru import logger
 
-from .lora import apply_lora, get_lora_state_dict, load_lora, spectral_surgery, FOLEY_TARGET_PRESETS
+from .lora import apply_lora, get_lora_state_dict, get_lora_and_base_state_dict, load_lora, spectral_surgery, FOLEY_TARGET_PRESETS
 from .spectral_metrics import spectral_metrics
 
 
@@ -84,7 +84,7 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16):
         # DAC encode: [1, 1, samples] -> latents
         # NOTE: DAC with continuous=True returns DiagonalGaussianDistribution, not tensor
         with torch.no_grad():
-            audio_input = waveform.unsqueeze(0).to(device=device, dtype=dtype)
+            audio_input = waveform.unsqueeze(0).to(device=device, dtype=torch.float32)
             z_dist, _, _, _, _ = dac_model.encode(audio_input)
             latents = z_dist.sample().cpu().float()  # [1, 128, T]
 
@@ -288,6 +288,9 @@ def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
 
 def save_loss_curve(losses, path, start_step=0, smoothing=0.95):
     """Save raw and smoothed loss curve PNGs."""
+    if not losses:
+        return
+
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -333,7 +336,11 @@ def save_loss_curve(losses, path, start_step=0, smoothing=0.95):
 
 def save_checkpoint(model, optimizer, scheduler, step, meta, path, final=False):
     """Save training checkpoint or final adapter."""
-    state = {"state_dict": get_lora_state_dict(model), "meta": meta}
+    # PiSSA modifies base weights during init — must save them too
+    if meta.get("init_mode") == "pissa":
+        state = {"state_dict": get_lora_and_base_state_dict(model), "meta": meta}
+    else:
+        state = {"state_dict": get_lora_state_dict(model), "meta": meta}
     if not final:
         state["optimizer"] = optimizer.state_dict()
         state["scheduler"] = scheduler.state_dict()

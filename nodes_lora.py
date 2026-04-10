@@ -333,11 +333,14 @@ class FoleyLoRATrainer:
         optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.01)
 
         # -- LR Scheduler --
-        def lr_lambda(step):
-            if step < warmup_steps:
-                return step / max(warmup_steps, 1)
+        # scheduler.step() is called once per grad_accum training steps,
+        # so scale the internal counter back to training steps
+        def lr_lambda(sched_step):
+            actual_step = sched_step * grad_accum
+            if actual_step < warmup_steps:
+                return actual_step / max(warmup_steps, 1)
             if schedule_type == "cosine":
-                progress = (step - warmup_steps) / max(steps - warmup_steps, 1)
+                progress = (actual_step - warmup_steps) / max(steps - warmup_steps, 1)
                 return 0.5 * (1 + np.cos(np.pi * progress))
             return 1.0
 
@@ -376,6 +379,7 @@ class FoleyLoRATrainer:
         logger.info(f"Starting training: {steps} steps, batch {batch_size}, lr {lr}")
         t_start = time.time()
 
+        step = start_step  # default in case loop doesn't execute
         for step in range(start_step, steps):
             # Check for skip flag
             skip_flag = output_path.parent / "skip_current.flag"
@@ -537,8 +541,11 @@ class FoleyLoRALoader:
             use_rslora=use_rslora,
         )
 
-        # Load weights
-        load_lora(model, state_dict)
+        # Load weights — for PiSSA, state_dict includes modified base weights
+        if init_mode == "pissa":
+            model.load_state_dict(state_dict, strict=False)
+        else:
+            load_lora(model, state_dict)
 
         # Apply strength scaling
         if strength != 1.0:
@@ -679,11 +686,13 @@ class FoleyLoRAScheduler:
 
                 optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.01)
 
-                def lr_lambda(step):
-                    if step < config["warmup_steps"]:
-                        return step / max(config["warmup_steps"], 1)
+                _ga = config["grad_accum"]
+                def lr_lambda(sched_step):
+                    actual_step = sched_step * _ga
+                    if actual_step < config["warmup_steps"]:
+                        return actual_step / max(config["warmup_steps"], 1)
                     if config["schedule_type"] == "cosine":
-                        progress = (step - config["warmup_steps"]) / max(config["steps"] - config["warmup_steps"], 1)
+                        progress = (actual_step - config["warmup_steps"]) / max(config["steps"] - config["warmup_steps"], 1)
                         return 0.5 * (1 + np.cos(np.pi * progress))
                     return 1.0
 

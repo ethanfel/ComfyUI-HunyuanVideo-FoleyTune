@@ -114,7 +114,7 @@ def _pil_to_tensor(img):
     return torch.from_numpy(arr).unsqueeze(0)
 
 
-def _draw_loss_curve(losses, log_interval=50, start_step=0, smoothed=None):
+def _draw_loss_curve(losses, log_interval=1, start_step=0, smoothed=None):
     """Render a loss curve as a PIL Image."""
     W, H = 800, 380
     pl, pr, pt, pb = 70, 20, 25, 45
@@ -693,7 +693,7 @@ class FoleyLoRATrainer:
                            f"elapsed: {elapsed:.0f}s")
 
                 preview_img = _draw_loss_curve(
-                    losses, log_interval, start_step,
+                    losses, start_step=start_step,
                     smoothed=_smooth_losses(losses),
                 )
                 pbar.update_absolute(
@@ -746,7 +746,7 @@ class FoleyLoRATrainer:
         save_meta_json(meta, output_path / "meta.json")
         # Draw and save loss curve
         smoothed = _smooth_losses(losses)
-        loss_img = _draw_loss_curve(losses, log_interval=50, start_step=start_step, smoothed=smoothed)
+        loss_img = _draw_loss_curve(losses, start_step=start_step, smoothed=smoothed)
         loss_img.save(str(output_path / "loss.png"))
         loss_curve_tensor = _pil_to_tensor(loss_img)
 
@@ -1072,7 +1072,7 @@ class FoleyLoRAScheduler:
                                        f"elapsed: {elapsed:.0f}s")
 
                             preview_img = _draw_loss_curve(
-                                losses, 50, 0,
+                                losses,
                                 smoothed=_smooth_losses(losses),
                             )
                             pbar_train.update_absolute(

@@ -536,9 +536,29 @@ class FoleyLoRATrainer:
         }
 
         losses = []
+        metrics_history = []  # list of {step, loss, ...spectral metrics}
         log_interval = 50
         remaining = steps - start_step
         pbar = comfy.utils.ProgressBar(remaining)
+
+        # Load reference audio for metrics comparison
+        ref_entry = dataset[0]
+        ref_audio_path = None
+        for ext in (".flac", ".wav", ".ogg"):
+            candidate = Path(data_dir) / f"{ref_entry['name']}{ext}"
+            if candidate.exists():
+                ref_audio_path = candidate
+                break
+        ref_wav_np = None
+        if ref_audio_path:
+            import soundfile as _sf
+            _raw, _sr = _sf.read(str(ref_audio_path))
+            if _raw.ndim > 1:
+                _raw = _raw.mean(axis=1)
+            if _sr != 48000:
+                import soxr as _soxr
+                _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
+            ref_wav_np = _raw
 
         logger.info(f"Starting training: {steps} steps, batch {batch_size}, lr {lr}")
         t_start = time.time()
@@ -626,16 +646,36 @@ class FoleyLoRATrainer:
                 save_checkpoint(model, optimizer, scheduler, step + 1, meta, ckpt_path)
                 _draw_loss_curve(losses, start_step=start_step, smoothed=_smooth_losses(losses)).save(str(output_path / "loss.png"))
 
-                # Generate eval sample
+                # Generate eval sample + compute metrics
                 model.eval()
                 wav, sr = generate_eval_sample(
                     model, hunyuan_deps.dac_model, dataset[0], device, dtype,
                 )
+                wav_mono = wav.squeeze()
                 wav_t = torch.from_numpy(wav)
                 if wav_t.ndim == 1:
                     wav_t = wav_t.unsqueeze(0)
                 _save_wav(samples_path / f"step_{step+1:05d}.wav", wav_t, sr)
+
+                # Spectral metrics
+                sm = spectral_metrics(wav_mono, sr)
+                step_metrics = {"step": step + 1, "loss": float(np.mean(losses[-log_interval:])), **sm}
+                if ref_wav_np is not None:
+                    rm = reference_metrics(wav_mono, ref_wav_np, sr)
+                    step_metrics.update(rm)
+                metrics_history.append(step_metrics)
+
+                logger.info(f"Step {step+1} metrics: "
+                           f"LSD={step_metrics.get('log_spectral_distance_db', 0):.2f}dB  "
+                           f"MCD={step_metrics.get('mel_cepstral_distortion', 0):.2f}  "
+                           f"HF={step_metrics.get('hf_energy_ratio', 0):.3f}  "
+                           f"SC={step_metrics.get('spectral_convergence', 0):.3f}")
                 model.train()
+
+        # Save metrics history
+        if metrics_history:
+            with open(output_path / "metrics_history.json", "w") as f:
+                json.dump(metrics_history, f, indent=2)
 
         # -- Save final --
         final_path = output_path / "adapter_final.pt"
@@ -894,9 +934,26 @@ class FoleyLoRAScheduler:
                     np.random.seed(config["seed"])
 
                     losses = []
+                    metrics_history = []
                     n_clips = len(dataset)
                     t_start = time.time()
                     pbar_train = comfy.utils.ProgressBar(config["steps"])
+
+                    # Load reference audio for metrics
+                    ref_entry = dataset[0]
+                    ref_wav_np = None
+                    for ext in (".flac", ".wav", ".ogg"):
+                        candidate = Path(data_dir) / f"{ref_entry['name']}{ext}"
+                        if candidate.exists():
+                            import soundfile as _sf
+                            _raw, _sr = _sf.read(str(candidate))
+                            if _raw.ndim > 1:
+                                _raw = _raw.mean(axis=1)
+                            if _sr != 48000:
+                                import soxr as _soxr
+                                _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
+                            ref_wav_np = _raw
+                            break
 
                     for step in range(config["steps"]):
                         # Skip flag
@@ -964,22 +1021,33 @@ class FoleyLoRAScheduler:
                             save_checkpoint(model, optimizer, lr_sched, step + 1, meta, ckpt_path)
                             _draw_loss_curve(losses, smoothed=_smooth_losses(losses)).save(str(exp_dir / "loss.png"))
 
-                            # Generate eval audio sample
+                            # Generate eval audio sample + compute metrics
                             samples_dir = exp_dir / "samples"
                             samples_dir.mkdir(exist_ok=True)
                             model.eval()
                             wav, sr = generate_eval_sample(
                                 model, hunyuan_deps.dac_model, dataset[0], device, dtype,
                             )
+                            wav_mono = wav.squeeze()
                             wav_t = torch.from_numpy(wav)
                             if wav_t.ndim == 1:
                                 wav_t = wav_t.unsqueeze(0)
                             _save_wav(samples_dir / f"step_{step+1:05d}.wav", wav_t, sr)
+
+                            sm = spectral_metrics(wav_mono, sr)
+                            step_metrics = {"step": step + 1, "loss": float(np.mean(losses[-50:])), **sm}
+                            if ref_wav_np is not None:
+                                rm = reference_metrics(wav_mono, ref_wav_np, sr)
+                                step_metrics.update(rm)
+                            metrics_history.append(step_metrics)
                             model.train()
 
-                            logger.info(f"[{exp_id}] Checkpoint step {step+1}: "
-                                       f"loss={np.mean(losses[-50:]):.4f}, "
-                                       f"sample saved")
+                            logger.info(f"[{exp_id}] Step {step+1}: "
+                                       f"loss={step_metrics['loss']:.4f}  "
+                                       f"LSD={step_metrics.get('log_spectral_distance_db', 0):.2f}dB  "
+                                       f"MCD={step_metrics.get('mel_cepstral_distortion', 0):.2f}  "
+                                       f"HF={step_metrics.get('hf_energy_ratio', 0):.3f}  "
+                                       f"SC={step_metrics.get('spectral_convergence', 0):.3f}")
 
                     # Save final
                     meta = {**config, "steps_completed": config["steps"]}
@@ -990,16 +1058,21 @@ class FoleyLoRAScheduler:
                     loss_img = _draw_loss_curve(losses, smoothed=smoothed)
                     loss_img.save(str(exp_dir / "loss.png"))
 
-                    # Save loss history for comparison chart
+                    # Save loss + metrics history
                     with open(exp_dir / "loss_history.json", "w") as f:
                         json.dump(losses, f)
+                    if metrics_history:
+                        with open(exp_dir / "metrics_history.json", "w") as f:
+                            json.dump(metrics_history, f, indent=2)
                     all_loss_histories[exp_id] = losses
 
                     elapsed = time.time() - t_start
+                    final_metrics = metrics_history[-1] if metrics_history else {}
                     exp_result.update({
                         "status": "completed",
                         "final_loss": float(np.mean(losses[-100:])),
                         "min_loss": float(min(losses)),
+                        "final_metrics": final_metrics,
                         "adapter_path": str(final_path),
                         "duration_seconds": elapsed,
                     })

@@ -26,7 +26,7 @@ from .lora.train import (
     prepare_dataset, sample_timesteps, flow_matching_loss,
     generate_eval_sample, save_checkpoint, save_meta_json,
 )
-from .lora.spectral_metrics import spectral_metrics, reference_metrics
+from .lora.spectral_metrics import spectral_metrics, reference_metrics, clap_similarity
 from PIL import Image, ImageDraw
 
 
@@ -1030,6 +1030,9 @@ class FoleyLoRAEvaluator:
                     ref_wav = torchaudio.functional.resample(ref_wav, ref_sr, 48000)
                 ref_wav_np = ref_wav.mean(dim=0).numpy()  # mono
                 ref_m = spectral_metrics(ref_wav_np, 48000)
+                prompt = entry.get("prompt", "")
+                if prompt:
+                    ref_m["clap_similarity"] = clap_similarity(ref_wav_np, 48000, prompt, device)
                 ref_metrics_list.append(ref_m)
                 # Save reference
                 _save_wav(ref_dir / f"{entry['name']}.wav", ref_wav.mean(dim=0, keepdim=True), 48000)
@@ -1082,6 +1085,13 @@ class FoleyLoRAEvaluator:
                 )
                 wav_mono = wav.squeeze()
                 sm = spectral_metrics(wav_mono, sr)
+
+                # CLAP similarity: does the generated audio match the prompt?
+                prompt = entry.get("prompt", "")
+                if prompt:
+                    cs = clap_similarity(wav_mono, sr, prompt, device)
+                    sm["clap_similarity"] = cs
+
                 clip_metrics_list.append(sm)
 
                 wav_path = adapter_dir / f"{entry['name']}.wav"

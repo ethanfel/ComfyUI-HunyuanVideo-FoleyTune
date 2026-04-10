@@ -2,6 +2,7 @@
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 def spectral_metrics(wav: np.ndarray, sr: int) -> dict:
@@ -92,8 +93,8 @@ def reference_metrics(gen_wav: np.ndarray, ref_wav: np.ndarray, sr: int) -> dict
 
     n_frames = 1 + (min_len - n_fft) // hop
     if n_frames < 1:
-        return {"log_spectral_distance_db": 0.0, "mel_cepstral_distortion": 0.0,
-                "per_band_correlation": 0.0}
+        return {"log_spectral_distance_db": 0.0, "spectral_convergence": 0.0,
+                "mel_cepstral_distortion": 0.0, "per_band_correlation": 0.0}
 
     gen_frames = np.stack([gen_wav[i * hop : i * hop + n_fft] * window for i in range(n_frames)])
     ref_frames = np.stack([ref_wav[i * hop : i * hop + n_fft] * window for i in range(n_frames)])
@@ -103,6 +104,9 @@ def reference_metrics(gen_wav: np.ndarray, ref_wav: np.ndarray, sr: int) -> dict
 
     # Log spectral distance
     lsd = float(np.sqrt(np.mean((20 * np.log10(gen_spec) - 20 * np.log10(ref_spec)) ** 2)))
+
+    # Spectral convergence (normalized Frobenius distance)
+    sc = float(np.linalg.norm(ref_spec - gen_spec) / (np.linalg.norm(ref_spec) + 1e-10))
 
     # Mel cepstral distortion (simplified: log-mel space L2)
     n_mels = 80
@@ -136,6 +140,62 @@ def reference_metrics(gen_wav: np.ndarray, ref_wav: np.ndarray, sr: int) -> dict
 
     return {
         "log_spectral_distance_db": lsd,
+        "spectral_convergence": sc,
         "mel_cepstral_distortion": mcd,
         "per_band_correlation": pbc,
     }
+
+
+_clap_full_model = None
+_clap_full_processor = None
+
+
+def _get_clap_full(device="cpu"):
+    """Lazy-load the full ClapModel (audio+text) for similarity scoring."""
+    global _clap_full_model, _clap_full_processor
+    if _clap_full_model is None:
+        from transformers import ClapModel, ClapProcessor
+        _clap_full_model = ClapModel.from_pretrained("laion/larger_clap_general").eval()
+        _clap_full_processor = ClapProcessor.from_pretrained("laion/larger_clap_general")
+    _clap_full_model.to(device)
+    return _clap_full_model, _clap_full_processor
+
+
+def clap_similarity(wav: np.ndarray, sr: int, prompt: str, device="cpu") -> float:
+    """Cosine similarity between CLAP audio embedding and text prompt embedding.
+
+    Args:
+        wav: 1D numpy array (mono, any sample rate — resampled internally to 48kHz)
+        sr: sample rate of wav
+        prompt: text description
+        device: torch device
+
+    Returns:
+        float cosine similarity in [-1, 1], higher = better match
+    """
+    import torchaudio
+
+    model, processor = _get_clap_full(device)
+
+    # Resample to 48kHz if needed
+    wav_t = torch.from_numpy(wav).float().unsqueeze(0)  # [1, L]
+    if sr != 48000:
+        wav_t = torchaudio.functional.resample(wav_t, sr, 48000)
+
+    # Audio embedding
+    audio_inputs = processor(
+        audios=wav_t.squeeze(0).numpy(), sampling_rate=48000,
+        return_tensors="pt"
+    ).to(device)
+    with torch.no_grad():
+        audio_embed = model.get_audio_features(**audio_inputs)  # [1, D]
+
+    # Text embedding
+    text_inputs = processor(
+        text=[prompt], return_tensors="pt", padding=True
+    ).to(device)
+    with torch.no_grad():
+        text_embed = model.get_text_features(**text_inputs)  # [1, D]
+
+    cos_sim = F.cosine_similarity(audio_embed, text_embed, dim=-1)
+    return float(cos_sim.item())

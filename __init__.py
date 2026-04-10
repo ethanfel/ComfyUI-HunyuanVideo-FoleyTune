@@ -11,6 +11,13 @@ warnings.filterwarnings("ignore", category=UnsupportedFieldAttributeWarning)
 
 # This line imports the node mappings from your nodes.py file
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+from .nodes_lora import (
+    NODE_CLASS_MAPPINGS as LORA_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as LORA_NODE_DISPLAY_NAME_MAPPINGS,
+)
+
+NODE_CLASS_MAPPINGS = {**NODE_CLASS_MAPPINGS, **LORA_NODE_CLASS_MAPPINGS}
+NODE_DISPLAY_NAME_MAPPINGS = {**NODE_DISPLAY_NAME_MAPPINGS, **LORA_NODE_DISPLAY_NAME_MAPPINGS}
 
 # This is a Python convention that makes the mappings easily accessible
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']

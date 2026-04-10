@@ -1021,3 +1021,24 @@ def _save_eval_chart(ref_avg, adapter_results, path):
     fig.tight_layout()
     fig.savefig(str(path), dpi=150)
     plt.close(fig)
+
+
+# --- Node Mappings -----------------------------------------------------------
+
+NODE_CLASS_MAPPINGS = {
+    "FoleyFeatureExtractor": FoleyFeatureExtractor,
+    "FoleyLoRATrainer": FoleyLoRATrainer,
+    "FoleyLoRALoader": FoleyLoRALoader,
+    "FoleyLoRAScheduler": FoleyLoRAScheduler,
+    "FoleyLoRAEvaluator": FoleyLoRAEvaluator,
+    "FoleyVAERoundtrip": FoleyVAERoundtrip,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "FoleyFeatureExtractor": "Foley Feature Extractor",
+    "FoleyLoRATrainer": "Foley LoRA Trainer",
+    "FoleyLoRALoader": "Foley LoRA Loader",
+    "FoleyLoRAScheduler": "Foley LoRA Scheduler",
+    "FoleyLoRAEvaluator": "Foley LoRA Evaluator",
+    "FoleyVAERoundtrip": "Foley VAE Roundtrip",
+}

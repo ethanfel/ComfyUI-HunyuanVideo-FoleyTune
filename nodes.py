@@ -29,10 +29,16 @@ if "foley" not in folder_paths.folder_names_and_paths:
 
 # --- Auto-download registry: filename -> (HuggingFace repo, remote filename) ---
 DOWNLOADABLE_MODELS = {
+    # Main model — full precision from Tencent, safetensors/fp8 from phazei
+    "hunyuanvideo_foley.pth": ("Tencent/HunyuanVideo-Foley", "hunyuanvideo_foley.pth"),
     "hunyuanvideo_foley.safetensors": ("phazei/HunyuanVideo-Foley", "hunyuanvideo_foley.safetensors"),
     "hunyuanvideo_foley_fp8_e4m3fn.safetensors": ("phazei/HunyuanVideo-Foley", "hunyuanvideo_foley_fp8_e4m3fn.safetensors"),
     "hunyuanvideo_foley_fp8_e5m2.safetensors": ("phazei/HunyuanVideo-Foley", "hunyuanvideo_foley_fp8_e5m2.safetensors"),
+    # Synchformer — full precision from Tencent, fp16 from phazei
+    "synchformer_state_dict.pth": ("Tencent/HunyuanVideo-Foley", "synchformer_state_dict.pth"),
     "synchformer_state_dict_fp16.safetensors": ("phazei/HunyuanVideo-Foley", "synchformer_state_dict_fp16.safetensors"),
+    # VAE (DAC) — full precision from Tencent, fp16 from phazei
+    "vae_128d_48k.pth": ("Tencent/HunyuanVideo-Foley", "vae_128d_48k.pth"),
     "vae_128d_48k_fp16.safetensors": ("phazei/HunyuanVideo-Foley", "vae_128d_48k_fp16.safetensors"),
 }
 

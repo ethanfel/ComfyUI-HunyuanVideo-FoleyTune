@@ -164,11 +164,20 @@ class FoleyFeatureExtractor:
             fps=frame_rate,
         )
 
-        # Save audio file
-        wav = waveform.squeeze(0)  # [C, L]
-        if sample_rate != 48000:
-            wav = torchaudio.functional.resample(wav, sample_rate, 48000)
-        _save_wav(audio_out_path, wav, 48000)
+        # Save audio: if already 48kHz, copy the source file to avoid re-encoding.
+        # Otherwise resample and save as WAV.
+        audio_src = audio.get("path") if isinstance(audio, dict) else None
+        if sample_rate == 48000 and audio_src and Path(audio_src).exists():
+            import shutil
+            ext = Path(audio_src).suffix  # .flac, .wav, etc.
+            audio_out_path = cache_dir / f"{name}_{idx:03d}{ext}"
+            shutil.copy2(audio_src, audio_out_path)
+            logger.info(f"Copied source audio (48kHz): {audio_src}")
+        else:
+            wav = waveform.squeeze(0)  # [C, L]
+            if sample_rate != 48000:
+                wav = torchaudio.functional.resample(wav, sample_rate, 48000)
+            _save_wav(audio_out_path, wav, 48000)
 
         logger.info(f"Saved features to {npz_path}")
         logger.info(f"  clip_features: {clip_features.shape}, sync_features: {sync_features.shape}")

@@ -29,6 +29,16 @@ from .lora.train import (
 from .lora.spectral_metrics import spectral_metrics, reference_metrics
 
 
+def _save_wav(path, wav_tensor, sr):
+    """Save audio tensor to WAV using soundfile (avoids torchcodec/FFmpeg dependency)."""
+    import soundfile as sf
+    # wav_tensor: [C, L] or [1, C, L]
+    if wav_tensor.ndim == 3:
+        wav_tensor = wav_tensor.squeeze(0)
+    wav_np = wav_tensor.float().numpy().T  # [L, C]
+    sf.write(str(path), wav_np, sr)
+
+
 logger.remove()
 logger.add(sys.stdout, level="INFO", format="HunyuanVideo-Foley LoRA: {message}")
 
@@ -158,7 +168,7 @@ class FoleyFeatureExtractor:
         wav = waveform.squeeze(0)  # [C, L]
         if sample_rate != 48000:
             wav = torchaudio.functional.resample(wav, sample_rate, 48000)
-        torchaudio.save(str(audio_out_path), wav, 48000)
+        _save_wav(audio_out_path, wav, 48000)
 
         logger.info(f"Saved features to {npz_path}")
         logger.info(f"  clip_features: {clip_features.shape}, sync_features: {sync_features.shape}")
@@ -461,7 +471,7 @@ class FoleyLoRATrainer:
                 wav_t = torch.from_numpy(wav)
                 if wav_t.ndim == 1:
                     wav_t = wav_t.unsqueeze(0)
-                torchaudio.save(str(samples_path / f"step_{step+1:05d}.wav"), wav_t, sr)
+                _save_wav(samples_path / f"step_{step+1:05d}.wav", wav_t, sr)
                 model.train()
 
         # -- Save final --
@@ -907,7 +917,7 @@ class FoleyLoRAEvaluator:
                 ref_m = spectral_metrics(ref_wav_np, 48000)
                 ref_metrics_list.append(ref_m)
                 # Save reference
-                torchaudio.save(str(ref_dir / f"{entry['name']}.wav"), ref_wav.mean(dim=0, keepdim=True), 48000)
+                _save_wav(ref_dir / f"{entry['name']}.wav", ref_wav.mean(dim=0, keepdim=True), 48000)
 
         ref_avg = {}
         if ref_metrics_list:
@@ -963,7 +973,7 @@ class FoleyLoRAEvaluator:
                 wav_t = torch.from_numpy(wav)
                 if wav_t.ndim == 1:
                     wav_t = wav_t.unsqueeze(0)
-                torchaudio.save(str(wav_path), wav_t, sr)
+                _save_wav(wav_path, wav_t, sr)
                 clips.append({"clip": entry["name"], "wav_path": str(wav_path), "spectral_metrics": sm})
 
             avg_metrics = {}

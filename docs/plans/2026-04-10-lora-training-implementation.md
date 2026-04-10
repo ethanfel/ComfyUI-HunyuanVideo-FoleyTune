@@ -8,6 +8,12 @@
 
 **Tech Stack:** PyTorch, huggingface_hub, ComfyUI node API, DAC neural codec, SigLIP2/Synchformer/CLAP feature extractors.
 
+**Critical notes (from bug review):**
+- DAC is initialized with `continuous=True` — `encode()` returns a `DiagonalGaussianDistribution`, not a tensor. Always call `.sample()` or `.mode()` on the result.
+- The model's `cond` input expects `last_hidden_state` from CLAP `[B, seq_len, 768]`, NOT `text_embeds` (pooled `[B, D]`).
+- All training clips must have the same duration (fixed at dataset prep time) or latents padded/trimmed to a fixed length, otherwise `torch.cat` across the batch will fail.
+- Timesteps should stay as float (not `.long()`) — `TimestepEmbedder` handles floats via sinusoidal embedding.
+
 ---
 
 ### Task 1: Create `lora/lora.py` — LoRA layer primitives
@@ -360,10 +366,11 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16):
             waveform = F.pad(waveform, (0, target_samples - waveform.shape[1]))
         
         # DAC encode: [1, 1, samples] -> latents
+        # NOTE: DAC with continuous=True returns DiagonalGaussianDistribution, not tensor
         with torch.no_grad():
             audio_input = waveform.unsqueeze(0).to(device=device, dtype=dtype)
-            z, _, _, _, _ = dac_model.encode(audio_input)
-            latents = z.cpu().float()  # [1, 128, T]
+            z_dist, _, _, _, _ = dac_model.encode(audio_input)
+            latents = z_dist.sample().cpu().float()  # [1, 128, T]
         
         dataset.append({
             "latents": latents,
@@ -378,6 +385,17 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16):
     dac_model.cpu()
     torch.cuda.empty_cache()
     gc.collect()
+    
+    # Enforce fixed latent length across all clips (required for batching with torch.cat)
+    if dataset:
+        latent_lengths = [d["latents"].shape[-1] for d in dataset]
+        target_len = min(latent_lengths)  # trim to shortest
+        for d in dataset:
+            if d["latents"].shape[-1] > target_len:
+                d["latents"] = d["latents"][..., :target_len]
+            elif d["latents"].shape[-1] < target_len:
+                d["latents"] = F.pad(d["latents"], (0, target_len - d["latents"].shape[-1]))
+        logger.info(f"Latents normalized to length {target_len}")
     
     logger.info(f"Prepared dataset: {len(dataset)} clips from {data_dir}")
     return dataset
@@ -432,8 +450,8 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
     # Target velocity: v = x1 - x0
     v_target = x1 - x0
     
-    # Timestep for model: scale to [0, 1000] range
-    t_model = (t * 1000).long()
+    # Timestep for model: scale to [0, 1000] range (keep as float — TimestepEmbedder handles floats)
+    t_model = t * 1000
     
     # Forward pass
     xt = xt.to(device=device, dtype=dtype)
@@ -459,6 +477,10 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
 def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
                          num_steps=25, seed=42):
     """Generate an audio sample for evaluation during training.
+    
+    NOTE: No classifier-free guidance (CFG) is used here. This is intentional —
+    eval samples during training are quick quality checks, not final output.
+    The evaluator node and inference pipeline use full CFG.
     
     Returns:
         waveform: [1, samples] numpy array
@@ -725,16 +747,16 @@ class FoleyFeatureExtractor:
         ).cpu()
         hunyuan_deps.syncformer_model.to(offload_device)
         
-        # CLAP text embedding
+        # CLAP text embedding — must use last_hidden_state [B, seq_len, 768], NOT text_embeds (pooled)
         hunyuan_deps.clap_model.to(device)
         text_inputs = hunyuan_deps.clap_tokenizer(
             [prompt], padding=True, truncation=True, max_length=100,
             return_tensors="pt"
         ).to(device)
-        text_embedding = hunyuan_deps.clap_model(**text_inputs).text_embeds.cpu()
-        # Expand to [1, 1, D] for consistency
-        if text_embedding.ndim == 2:
-            text_embedding = text_embedding.unsqueeze(1)
+        clap_outputs = hunyuan_deps.clap_model(
+            **text_inputs, output_hidden_states=True, return_dict=True
+        )
+        text_embedding = clap_outputs.last_hidden_state.cpu()  # [1, seq_len, 768]
         hunyuan_deps.clap_model.to(offload_device)
         
         torch.cuda.empty_cache()
@@ -797,10 +819,12 @@ class FoleyVAERoundtrip:
             waveform = waveform.mean(dim=1, keepdim=True)
         
         # DAC encode -> decode
+        # NOTE: DAC with continuous=True returns DiagonalGaussianDistribution, not tensor
         dac.to(device)
         with torch.no_grad():
             audio_in = waveform.to(device=device, dtype=torch.float32)
-            z, _, _, _, _ = dac.encode(audio_in)
+            z_dist, _, _, _, _ = dac.encode(audio_in)
+            z = z_dist.sample()
             reconstructed = dac.decode(z)
         dac.cpu()
         torch.cuda.empty_cache()

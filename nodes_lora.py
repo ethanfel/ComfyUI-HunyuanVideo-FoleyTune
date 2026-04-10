@@ -24,9 +24,10 @@ from .lora.lora import (
 )
 from .lora.train import (
     prepare_dataset, sample_timesteps, flow_matching_loss,
-    generate_eval_sample, save_loss_curve, save_checkpoint, save_meta_json,
+    generate_eval_sample, save_checkpoint, save_meta_json,
 )
 from .lora.spectral_metrics import spectral_metrics, reference_metrics
+from PIL import Image, ImageDraw
 
 
 def _save_wav(path, wav_tensor, sr):
@@ -37,6 +38,142 @@ def _save_wav(path, wav_tensor, sr):
         wav_tensor = wav_tensor.squeeze(0)
     wav_np = wav_tensor.float().numpy().T  # [L, C]
     sf.write(str(path), wav_np, sr)
+
+
+def _smooth_losses(losses, beta=0.9):
+    """Exponential moving average smoothing."""
+    smoothed, ema = [], None
+    for v in losses:
+        ema = v if ema is None else beta * ema + (1 - beta) * v
+        smoothed.append(ema)
+    return smoothed
+
+
+def _pil_to_tensor(img):
+    """Convert a PIL Image to a [1, H, W, 3] float32 IMAGE tensor for ComfyUI."""
+    arr = np.array(img).astype(np.float32) / 255.0
+    return torch.from_numpy(arr).unsqueeze(0)
+
+
+def _draw_loss_curve(losses, log_interval=50, start_step=0, smoothed=None):
+    """Render a loss curve as a PIL Image."""
+    W, H = 800, 380
+    pl, pr, pt, pb = 70, 20, 25, 45
+
+    img = Image.new("RGB", (W, H), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+
+    pw = W - pl - pr
+    ph = H - pt - pb
+
+    if len(losses) >= 2:
+        lo, hi = min(losses), max(losses)
+        if hi == lo:
+            hi = lo + 1e-6
+        rng = hi - lo
+
+        for i in range(5):
+            y = pt + int(i * ph / 4)
+            val = hi - i * rng / 4
+            draw.line([(pl, y), (W - pr, y)], fill=(220, 220, 220), width=1)
+            draw.text((2, y - 7), f"{val:.4f}", fill=(120, 120, 120))
+
+        n = len(losses)
+        pts = []
+        for i, v in enumerate(losses):
+            x = pl + int(i * pw / max(n - 1, 1))
+            y = pt + int((1.0 - (v - lo) / rng) * ph)
+            pts.append((x, y))
+        draw.line(pts, fill=(200, 220, 255), width=1)
+
+        if smoothed is not None and len(smoothed) >= 2:
+            spts = []
+            for i, v in enumerate(smoothed):
+                x = pl + int(i * pw / max(n - 1, 1))
+                y = pt + int((1.0 - (v - lo) / rng) * ph)
+                spts.append((x, y))
+            draw.line(spts, fill=(66, 133, 244), width=2)
+
+        first_step = start_step + log_interval
+        last_step = start_step + n * log_interval
+        for i in range(5):
+            x = pl + int(i * pw / 4)
+            step = int(first_step + i * (last_step - first_step) / 4)
+            draw.text((x - 12, H - pb + 5), str(step), fill=(120, 120, 120))
+
+    draw.line([(pl, pt), (pl, H - pb)], fill=(40, 40, 40), width=1)
+    draw.line([(pl, H - pb), (W - pr, H - pb)], fill=(40, 40, 40), width=1)
+    draw.text((pl + 4, 5), "Training Loss", fill=(40, 40, 40))
+
+    return img
+
+
+_COMPARISON_PALETTE = [
+    (66, 133, 244), (234, 67, 53), (52, 168, 83), (251, 188, 5),
+    (155, 89, 182), (26, 188, 156), (230, 126, 34), (149, 165, 166),
+]
+
+
+def _draw_comparison_curves(experiments_data):
+    """Draw all smoothed loss curves on the same axes, one color per experiment."""
+    W, H = 900, 420
+    pl, pr, pt, pb = 75, 160, 30, 50
+
+    img = Image.new("RGB", (W, H), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+
+    pw = W - pl - pr
+    ph = H - pt - pb
+
+    series = []
+    for i, ed in enumerate(experiments_data):
+        lh = ed.get("loss_history") or []
+        if len(lh) < 2:
+            continue
+        sm = _smooth_losses(lh)
+        series.append({
+            "id": ed["id"],
+            "smoothed": sm,
+            "color": _COMPARISON_PALETTE[i % len(_COMPARISON_PALETTE)],
+        })
+
+    if not series:
+        draw.text((pl + 10, pt + 10), "No data to plot", fill=(80, 80, 80))
+        return img
+
+    all_vals = [v for s in series for v in s["smoothed"]]
+    lo, hi = min(all_vals), max(all_vals)
+    if hi == lo:
+        hi = lo + 1e-6
+    rng = hi - lo
+
+    for i in range(5):
+        y = pt + int(i * ph / 4)
+        val = hi - i * rng / 4
+        draw.line([(pl, y), (W - pr, y)], fill=(220, 220, 220), width=1)
+        draw.text((2, y - 7), f"{val:.4f}", fill=(100, 100, 100))
+
+    for s in series:
+        n = len(s["smoothed"])
+        pts = []
+        for j, v in enumerate(s["smoothed"]):
+            x = pl + int(j * pw / max(n - 1, 1))
+            y = pt + int((1.0 - (v - lo) / rng) * ph)
+            pts.append((x, y))
+        draw.line(pts, fill=s["color"], width=2)
+
+    draw.line([(pl, pt), (pl, H - pb)], fill=(40, 40, 40), width=1)
+    draw.line([(pl, H - pb), (W - pr, H - pb)], fill=(40, 40, 40), width=1)
+    draw.text((pl + 4, 8), "Loss comparison (smoothed)", fill=(40, 40, 40))
+
+    lx = W - pr + 10
+    ly = pt
+    for s in series:
+        draw.rectangle([(lx, ly + 3), (lx + 14, ly + 13)], fill=s["color"])
+        draw.text((lx + 18, ly), s["id"][:20], fill=(40, 40, 40))
+        ly += 20
+
+    return img
 
 
 logger.remove()
@@ -261,7 +398,12 @@ class FoleyLoRATrainer:
             },
         }
 
-    RETURN_TYPES = ("HUNYUAN_MODEL",)
+    RETURN_TYPES = ("HUNYUAN_MODEL", "IMAGE")
+    RETURN_NAMES = ("model", "loss_curve")
+    OUTPUT_TOOLTIPS = (
+        "Model with trained LoRA adapter applied.",
+        "Training loss curve (smoothed).",
+    )
     FUNCTION = "train"
     CATEGORY = "audio/HunyuanFoley/LoRA"
     OUTPUT_NODE = True
@@ -450,7 +592,7 @@ class FoleyLoRATrainer:
             if (step + 1) % save_every == 0:
                 ckpt_path = output_path / f"adapter_step{step+1:05d}.pt"
                 save_checkpoint(model, optimizer, scheduler, step + 1, meta, ckpt_path)
-                save_loss_curve(losses, output_path / "loss.png", start_step)
+                _draw_loss_curve(losses, start_step=start_step, smoothed=_smooth_losses(losses)).save(str(output_path / "loss.png"))
 
                 # Generate eval sample
                 model.eval()
@@ -468,7 +610,11 @@ class FoleyLoRATrainer:
         meta["steps_completed"] = step + 1 if step >= start_step else start_step
         save_checkpoint(model, optimizer, scheduler, step + 1, meta, final_path, final=True)
         save_meta_json(meta, output_path / "meta.json")
-        save_loss_curve(losses, output_path / "loss.png", start_step)
+        # Draw and save loss curve
+        smoothed = _smooth_losses(losses)
+        loss_img = _draw_loss_curve(losses, log_interval=50, start_step=start_step, smoothed=smoothed)
+        loss_img.save(str(output_path / "loss.png"))
+        loss_curve_tensor = _pil_to_tensor(loss_img)
 
         elapsed_total = time.time() - t_start
         logger.info(f"Training complete: {elapsed_total:.0f}s, final loss: {np.mean(losses[-100:]):.4f}")
@@ -477,7 +623,7 @@ class FoleyLoRATrainer:
         # Return model with LoRA active (on CPU for ComfyUI pipeline)
         model.eval()
         model.to(mm.unet_offload_device())
-        return (model,)
+        return (model, loss_curve_tensor)
 
 
 # --- Node 3: LoRA Loader ----------------------------------------------------
@@ -573,7 +719,12 @@ class FoleyLoRAScheduler:
             }
         }
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = ("STRING", "IMAGE")
+    RETURN_NAMES = ("summary_path", "comparison_curves")
+    OUTPUT_TOOLTIPS = (
+        "Path to experiment_summary.json.",
+        "All smoothed loss curves overlaid on the same axes.",
+    )
     FUNCTION = "run_sweep"
     CATEGORY = "audio/HunyuanFoley/LoRA"
     OUTPUT_NODE = True
@@ -759,7 +910,10 @@ class FoleyLoRAScheduler:
                 meta = {**config, "steps_completed": config["steps"]}
                 final_path = exp_dir / "adapter_final.pt"
                 save_checkpoint(model, optimizer, lr_sched, config["steps"], meta, final_path, final=True)
-                save_loss_curve(losses, exp_dir / "loss.png")
+                # Draw and save per-experiment loss curve
+                smoothed = _smooth_losses(losses)
+                loss_img = _draw_loss_curve(losses, smoothed=smoothed)
+                loss_img.save(str(exp_dir / "loss.png"))
 
                 # Save loss history for comparison chart
                 with open(exp_dir / "loss_history.json", "w") as f:
@@ -801,46 +955,18 @@ class FoleyLoRAScheduler:
                 json.dump(summary, f, indent=2, default=str)
 
         # Generate comparison chart
-        if all_loss_histories:
-            _save_comparison_chart(all_loss_histories, output_root / "loss_comparison.png")
+        curve_data = [{"id": eid, "loss_history": lh} for eid, lh in all_loss_histories.items()]
+        comparison_img = _draw_comparison_curves(curve_data)
+        comparison_img.save(str(output_root / "loss_comparison.png"))
+        comparison_tensor = _pil_to_tensor(comparison_img)
 
         logger.info(f"Sweep complete: {len(results)} experiments")
-        return ()
+        return (str(summary_path), comparison_tensor)
 
 
 class _SkipExperiment(Exception):
     pass
 
-
-def _save_comparison_chart(histories, path):
-    """Overlay smoothed loss curves for all experiments."""
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        return
-
-    fig, ax = plt.subplots(figsize=(12, 5))
-    colors = plt.cm.tab10.colors
-
-    for i, (exp_id, losses) in enumerate(histories.items()):
-        color = colors[i % len(colors)]
-        # EMA smoothing
-        smoothed = []
-        s = losses[0]
-        for v in losses:
-            s = 0.95 * s + 0.05 * v
-            smoothed.append(s)
-        ax.plot(smoothed, color=color, linewidth=1.5, label=exp_id)
-
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Loss (smoothed)")
-    ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(str(path), dpi=150)
-    plt.close(fig)
 
 
 # --- Node 5: LoRA Evaluator -------------------------------------------------

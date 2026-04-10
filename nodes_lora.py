@@ -475,3 +475,78 @@ class FoleyLoRATrainer:
         model.eval()
         model.to(mm.unet_offload_device())
         return (model,)
+
+
+# --- Node 3: LoRA Loader ----------------------------------------------------
+
+class FoleyLoRALoader:
+    """Load a trained LoRA adapter into a Foley model for inference."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "hunyuan_model": ("HUNYUAN_MODEL",),
+                "adapter_path": ("STRING", {"default": ""}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+            }
+        }
+
+    RETURN_TYPES = ("HUNYUAN_MODEL",)
+    FUNCTION = "load_adapter"
+    CATEGORY = "audio/HunyuanFoley/LoRA"
+
+    def load_adapter(self, hunyuan_model, adapter_path, strength):
+        if not adapter_path or not os.path.exists(adapter_path):
+            raise FileNotFoundError(f"Adapter not found: {adapter_path}")
+
+        ckpt = torch.load(adapter_path, map_location="cpu", weights_only=False)
+
+        # Handle both raw state_dict and wrapped checkpoint formats
+        if "state_dict" in ckpt:
+            state_dict = ckpt["state_dict"]
+            meta = ckpt.get("meta", {})
+        else:
+            state_dict = ckpt
+            meta = {}
+
+        rank = meta.get("rank", 16)
+        alpha = meta.get("alpha", float(rank))
+        target = meta.get("target", "all_attn_mlp")
+        init_mode = meta.get("init_mode", "standard")
+        use_rslora = meta.get("use_rslora", False)
+        lora_dropout = meta.get("lora_dropout", 0.0)
+
+        # Get target suffixes
+        if isinstance(target, str) and target in FOLEY_TARGET_PRESETS:
+            target_suffixes = FOLEY_TARGET_PRESETS[target]
+        elif isinstance(target, (list, tuple)):
+            target_suffixes = tuple(target)
+        else:
+            target_suffixes = FOLEY_TARGET_PRESETS["all_attn_mlp"]
+
+        # Deep copy model
+        model = copy.deepcopy(hunyuan_model)
+
+        # Apply LoRA structure (always standard init for loading)
+        n_wrapped = apply_lora(
+            model, rank=rank, alpha=alpha,
+            target_suffixes=target_suffixes,
+            dropout=lora_dropout,
+            init_mode="standard",  # PiSSA residuals are in the checkpoint
+            use_rslora=use_rslora,
+        )
+
+        # Load weights
+        load_lora(model, state_dict)
+
+        # Apply strength scaling
+        if strength != 1.0:
+            for name, module in model.named_modules():
+                if isinstance(module, LoRALinear):
+                    module.lora_B.data *= strength
+
+        model.eval()
+        logger.info(f"Loaded LoRA adapter: {n_wrapped} layers, rank={rank}, strength={strength}")
+
+        return (model,)

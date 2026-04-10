@@ -1022,6 +1022,22 @@ class FoleyLoRAScheduler:
                             _save_spectrogram(ref_wav_np, 48000, samples_dir_ref / "reference")
                             break
 
+                    # Step-0 eval: generate sample before any training
+                    samples_dir_0 = exp_dir / "samples"
+                    samples_dir_0.mkdir(exist_ok=True)
+                    model.eval()
+                    wav0, sr0 = generate_eval_sample(
+                        model, hunyuan_deps.dac_model, dataset[0], device, dtype,
+                    )
+                    wav0_mono = wav0.squeeze()
+                    wav0_t = torch.from_numpy(wav0)
+                    if wav0_t.ndim == 1:
+                        wav0_t = wav0_t.unsqueeze(0)
+                    _save_wav(samples_dir_0 / "step_00000.wav", wav0_t, sr0)
+                    _save_spectrogram(wav0_mono, sr0, samples_dir_0 / "step_00000")
+                    logger.info(f"[{exp_id}] Step 0 eval sample saved")
+                    model.train()
+
                     for step in range(config["steps"]):
                         # Skip flag
                         skip_flag = output_root / "skip_current.flag"

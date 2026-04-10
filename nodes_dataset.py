@@ -1125,15 +1125,31 @@ class FoleyOutputNormalizer:
 class FoleyDatasetBrowser:
     """Browse a dataset.json file entry by entry using an integer index.
 
-    Each entry in the JSON is expected to have:
-      - "video_path" : path to the video file (absolute or relative to JSON dir)
-      - "prompt"     : text description of the sound
+    Accepts three JSON formats:
 
-    Optional keys:
-      - "audio_path" : explicit audio path (if absent, derived from video_path as .wav)
+    1. SelVA format (array of objects with base path, no extension):
+       [{"path": "/clips/clip_001", "label": "description"}, ...]
 
-    Outputs STRING paths that wire directly to VHS_LoadVideoPath and
-    Foley Feature Extractor for batch feature extraction.
+    2. Foley format (array of objects with explicit paths):
+       [{"video_path": "/clips/clip_001.mp4", "prompt": "description"}, ...]
+
+    3. Compact format (shared prompt + directories + clip names):
+       {
+         "prompt": "description",
+         "clips_dir": "/path/to/frames",
+         "audio_dir": "/path/to/cleaned",
+         "features_dir": "/path/to/features",
+         "clips": ["clip_001", "clip_002"]
+       }
+       Only clips_dir is required. audio_dir defaults to clips_dir,
+       features_dir defaults to clips_dir/features.
+       Audio extension auto-detected (.flac then .wav).
+
+    For formats 1 and 2, base paths derive:
+      - video:  path + ".mp4"
+      - audio:  path + ".wav" or ".flac" (auto-detected)
+      - frames: path           (directory of image sequences)
+      - npz:    parent/features/name.npz
     """
 
     @classmethod
@@ -1142,7 +1158,7 @@ class FoleyDatasetBrowser:
             "required": {
                 "dataset_json": ("STRING", {
                     "default": "",
-                    "tooltip": "Path to a dataset.json file listing video/audio/prompt entries.",
+                    "tooltip": "Path to a dataset.json file. Accepts SelVA, Foley, or compact format.",
                 }),
                 "index": ("INT", {
                     "default": 0, "min": 0, "max": 99999, "step": 1,
@@ -1151,21 +1167,23 @@ class FoleyDatasetBrowser:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "INT")
-    RETURN_NAMES = ("video_path", "audio_path", "npz_path", "prompt", "max_index")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "INT")
+    RETURN_NAMES = ("video_path", "audio_path", "frames_dir", "npz_path", "prompt", "max_index")
     OUTPUT_TOOLTIPS = (
-        "Path to the video file",
-        "Path to the audio file (.wav/.flac alongside video, or explicit audio_path)",
-        "Path to .npz features file (if it exists in a features/ subdirectory)",
-        "Text prompt for this clip",
+        "path + '.mp4'",
+        "path + '.wav'  (or features/name.wav)",
+        "path  (image-sequence directory)",
+        "features/name.npz  (pre-extracted features)",
+        "Text prompt / label for this clip",
         "count - 1 — wire to a primitive INT's max to constrain the index widget",
     )
     FUNCTION = "browse"
     CATEGORY = FOLEY_DS_CATEGORY
     DESCRIPTION = (
-        "Reads a dataset.json and exposes one entry at a time via an integer index. "
-        "Outputs video path, audio path, features path, and prompt. "
-        "Wire video_path to VHS_LoadVideoPath and prompt to Foley Feature Extractor."
+        "Reads a dataset.json and exposes one entry at a time. "
+        "Accepts SelVA format (path/label), Foley format (video_path/prompt), "
+        "or compact format (shared prompt + list of paths). "
+        "Wire outputs to VHS_LoadVideoPath and Foley Feature Extractor."
     )
 
     IS_CHANGED = classmethod(lambda cls, **_: float("nan"))
@@ -1180,37 +1198,94 @@ class FoleyDatasetBrowser:
         with p.open("r", encoding="utf-8") as f:
             data = _json.load(f)
 
-        if not isinstance(data, list) or len(data) == 0:
-            raise ValueError(f"[FoleyDatasetBrowser] Expected a non-empty JSON array in {p}")
+        # Parse the three supported formats into a uniform list
+        entries = []
+        default_prompt = ""
+        clips_dir = None
+        audio_dir = None
+        features_dir = None
 
-        count = len(data)
+        if isinstance(data, dict):
+            # Compact format
+            default_prompt = data.get("prompt", data.get("label", ""))
+            clips_dir = Path(data["clips_dir"]) if "clips_dir" in data else None
+            audio_dir = Path(data["audio_dir"]) if "audio_dir" in data else clips_dir
+            if "features_dir" in data:
+                features_dir = Path(data["features_dir"])
+            elif clips_dir:
+                features_dir = clips_dir / "features"
+
+            clips = data.get("clips", [])
+            for c in clips:
+                if isinstance(c, str):
+                    base = str(clips_dir / c) if clips_dir else c
+                    entries.append({"name": c, "base": base, "prompt": default_prompt})
+                elif isinstance(c, dict):
+                    name = c.get("name", "")
+                    base = c.get("path", c.get("video_path", ""))
+                    if not base and name and clips_dir:
+                        base = str(clips_dir / name)
+                    prompt = c.get("prompt", c.get("label", default_prompt))
+                    entries.append({"name": name or Path(base).stem, "base": base, "prompt": prompt})
+        elif isinstance(data, list):
+            for item in data:
+                if isinstance(item, str):
+                    entries.append({"name": Path(item).stem, "base": item, "prompt": ""})
+                elif isinstance(item, dict):
+                    # SelVA format: path/label  or  Foley format: video_path/prompt
+                    base = item.get("path", item.get("video_path", ""))
+                    prompt = item.get("label", item.get("prompt", ""))
+                    entries.append({"name": Path(base).stem, "base": base, "prompt": prompt})
+
+        if not entries:
+            raise ValueError(f"[FoleyDatasetBrowser] No entries found in {p}")
+
+        count = len(entries)
         if index >= count:
             raise IndexError(
                 f"[FoleyDatasetBrowser] index {index} out of range "
                 f"(dataset has {count} entries, last index is {count - 1})"
             )
-        entry = data[index]
 
-        video_path = entry["video_path"]
-        prompt = entry.get("prompt", "")
+        entry = entries[index]
+        name = entry["name"]
+        base = entry["base"]
+        prompt = entry["prompt"]
+        p_base = Path(base)
 
-        # Audio path: explicit or derived from video
-        if "audio_path" in entry:
-            audio_path = entry["audio_path"]
+        # Video / frames
+        video_path = base + ".mp4" if not p_base.suffix else base
+        frames_dir = str(p_base) if not p_base.suffix else str(p_base.with_suffix(""))
+
+        # Audio: use audio_dir if set, otherwise derive from base
+        if audio_dir:
+            audio_base = audio_dir / name
         else:
-            audio_path = str(Path(video_path).with_suffix(".wav"))
+            audio_base = p_base
 
-        # NPZ path: check features/ subdirectory
-        v = Path(video_path)
-        npz_path = str(v.parent / "features" / v.stem) + ".npz"
+        # Auto-detect .flac or .wav
+        audio_path = ""
+        for ext in (".flac", ".wav"):
+            candidate = audio_base.with_suffix(ext)
+            if candidate.exists():
+                audio_path = str(candidate)
+                break
+        if not audio_path:
+            audio_path = str(audio_base.with_suffix(".wav"))
+
+        # NPZ: use features_dir if set, otherwise derive from base
+        if features_dir:
+            npz_path = str(features_dir / name) + ".npz"
+        else:
+            npz_path = str(p_base.parent / "features" / p_base.stem) + ".npz"
 
         print(
             f"[FoleyDatasetBrowser] [{index}/{count - 1}]  prompt='{prompt}'  "
-            f"video={video_path}",
+            f"base={base}",
             flush=True,
         )
 
-        return (video_path, audio_path, npz_path, prompt, count - 1)
+        return (video_path, audio_path, frames_dir, npz_path, prompt, count - 1)
 
 
 # ─── Node Mappings ───────────────────────────────────────────────────────────

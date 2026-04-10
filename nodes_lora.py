@@ -1018,9 +1018,6 @@ class FoleyLoRAScheduler:
                             if _sr != 48000:
                                 import soxr as _soxr
                                 _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
-                            # Trim reference to match eval sample length
-                            eval_samples = ref_entry["latents"].shape[-1] * 512  # DAC hop = prod([2,4,8,8]) = 512
-                            _raw = _raw[:eval_samples]
                             ref_wav_np = _raw
                             samples_dir_ref = exp_dir / "samples"
                             samples_dir_ref.mkdir(exist_ok=True)

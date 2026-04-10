@@ -1168,15 +1168,16 @@ class FoleyDatasetBrowser:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "INT")
-    RETURN_NAMES = ("video_path", "raw_audio_dir", "clean_audio_dir", "audio_path", "frames_dir", "npz_path", "prompt", "max_index")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "INT")
+    RETURN_NAMES = ("video_path", "raw_audio_dir", "clean_audio_dir", "audio_path", "features_dir", "frames_dir", "npz_path", "prompt", "max_index")
     OUTPUT_TOOLTIPS = (
         "path + '.mp4'",
         "raw_audio_dir folder path — wire to Foley Dataset Loader",
         "audio_dir folder path — cleaned audio directory",
         "audio_dir/name.flac or .wav  (per-clip cleaned audio file)",
+        "features_dir folder path — wire to Feature Extractor cache_dir",
         "clips_dir/name  (image-sequence directory)",
-        "features_dir/name.npz  (pre-extracted features)",
+        "features_dir/name.npz  (per-clip .npz features file)",
         "Text prompt / label for this clip",
         "count - 1 — wire to a primitive INT's max to constrain the index widget",
     )
@@ -1296,7 +1297,9 @@ class FoleyDatasetBrowser:
             flush=True,
         )
 
-        return (video_path, raw_dir_str, clean_dir_str, audio_path, frames_dir, npz_path, prompt, count - 1)
+        feat_dir_str = str(features_dir) if features_dir else ""
+
+        return (video_path, raw_dir_str, clean_dir_str, audio_path, feat_dir_str, frames_dir, npz_path, prompt, count - 1)
 
 
 # ─── Node Mappings ───────────────────────────────────────────────────────────

@@ -1,0 +1,496 @@
+{
+  "last_node_id": 19,
+  "last_link_id": 19,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "HunyuanModelLoader",
+      "pos": [30, 50],
+      "size": [440, 106],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {"name": "model_name", "type": "COMBO", "widget": {"name": "model_name"}, "link": null},
+        {"name": "precision", "type": "COMBO", "widget": {"name": "precision"}, "link": null},
+        {"name": "quantization", "type": "COMBO", "widget": {"name": "quantization"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "HUNYUAN_MODEL", "type": "HUNYUAN_MODEL", "links": [10, 12]}
+      ],
+      "properties": {"Node name for S&R": "HunyuanModelLoader"},
+      "widgets_values": ["hunyuanvideo_foley.pth", "bf16", "none"]
+    },
+    {
+      "id": 2,
+      "type": "HunyuanDependenciesLoader",
+      "pos": [30, 210],
+      "size": [440, 82],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {"name": "vae_name", "type": "COMBO", "widget": {"name": "vae_name"}, "link": null},
+        {"name": "synchformer_name", "type": "COMBO", "widget": {"name": "synchformer_name"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "HUNYUAN_DEPS", "type": "HUNYUAN_DEPS", "links": [7, 11, 14, 17]}
+      ],
+      "properties": {"Node name for S&R": "HunyuanDependenciesLoader"},
+      "widgets_values": ["vae_128d_48k.pth", "synchformer_state_dict.pth"]
+    },
+    {
+      "id": 3,
+      "type": "FoleyDatasetLoader",
+      "pos": [630, 50],
+      "size": [440, 58],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {"name": "folder", "type": "STRING", "widget": {"name": "folder"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "links": [1]}
+      ],
+      "properties": {"Node name for S&R": "FoleyDatasetLoader"},
+      "widgets_values": ["/path/to/raw/audio"]
+    },
+    {
+      "id": 4,
+      "type": "FoleyDatasetResampler",
+      "pos": [630, 160],
+      "size": [440, 82],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "link": 1},
+        {"name": "target_sr", "type": "INT", "widget": {"name": "target_sr"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "links": [2]}
+      ],
+      "properties": {"Node name for S&R": "FoleyDatasetResampler"},
+      "widgets_values": [48000]
+    },
+    {
+      "id": 5,
+      "type": "FoleyDatasetLUFSNormalizer",
+      "pos": [630, 300],
+      "size": [440, 106],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "link": 2},
+        {"name": "target_lufs", "type": "FLOAT", "widget": {"name": "target_lufs"}, "link": null},
+        {"name": "true_peak_dbtp", "type": "FLOAT", "widget": {"name": "true_peak_dbtp"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "links": [3]}
+      ],
+      "properties": {"Node name for S&R": "FoleyDatasetLUFSNormalizer"},
+      "widgets_values": [-23.0, -1.0]
+    },
+    {
+      "id": 6,
+      "type": "FoleyDatasetCompressor",
+      "pos": [630, 460],
+      "size": [440, 178],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "link": 3},
+        {"name": "threshold_db", "type": "FLOAT", "widget": {"name": "threshold_db"}, "link": null},
+        {"name": "ratio", "type": "FLOAT", "widget": {"name": "ratio"}, "link": null},
+        {"name": "attack_ms", "type": "FLOAT", "widget": {"name": "attack_ms"}, "link": null},
+        {"name": "release_ms", "type": "FLOAT", "widget": {"name": "release_ms"}, "link": null},
+        {"name": "mix", "type": "FLOAT", "widget": {"name": "mix"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "links": [4]}
+      ],
+      "properties": {"Node name for S&R": "FoleyDatasetCompressor"},
+      "widgets_values": [-18.0, 2.5, 10.0, 100.0, 0.4]
+    },
+    {
+      "id": 7,
+      "type": "FoleyDatasetHfSmoother",
+      "pos": [630, 700],
+      "size": [440, 106],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "link": 4},
+        {"name": "cutoff_hz", "type": "FLOAT", "widget": {"name": "cutoff_hz"}, "link": null},
+        {"name": "blend", "type": "FLOAT", "widget": {"name": "blend"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "links": [5]}
+      ],
+      "properties": {"Node name for S&R": "FoleyDatasetHfSmoother"},
+      "widgets_values": [16000.0, 0.5]
+    },
+    {
+      "id": 8,
+      "type": "FoleyDatasetInspector",
+      "pos": [630, 860],
+      "size": [440, 154],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "link": 5},
+        {"name": "skip_rejected", "type": "BOOLEAN", "widget": {"name": "skip_rejected"}, "link": null},
+        {"name": "min_snr_db", "type": "FLOAT", "widget": {"name": "min_snr_db"}, "link": null},
+        {"name": "check_codec_artifacts", "type": "BOOLEAN", "widget": {"name": "check_codec_artifacts"}, "link": null},
+        {"name": "max_silence_fraction", "type": "FLOAT", "widget": {"name": "max_silence_fraction"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "links": [6]},
+        {"name": "report", "type": "STRING", "links": null}
+      ],
+      "properties": {"Node name for S&R": "FoleyDatasetInspector"},
+      "widgets_values": [true, 15.0, true, 0.5]
+    },
+    {
+      "id": 9,
+      "type": "FoleyDatasetSaver",
+      "pos": [630, 1070],
+      "size": [440, 106],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "link": 6},
+        {"name": "output_dir", "type": "STRING", "widget": {"name": "output_dir"}, "link": null},
+        {"name": "npz_source_dir", "type": "STRING", "widget": {"name": "npz_source_dir"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "report", "type": "STRING", "links": null}
+      ],
+      "properties": {"Node name for S&R": "FoleyDatasetSaver"},
+      "widgets_values": ["/path/to/cleaned/audio", ""]
+    },
+    {
+      "id": 10,
+      "type": "VHS_LoadVideoPath",
+      "pos": [1280, 50],
+      "size": [480, 370],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {"name": "meta_batch", "shape": 7, "type": "VHS_BatchManager", "link": null},
+        {"name": "vae", "shape": 7, "type": "VAE", "link": null},
+        {"name": "video", "type": "STRING", "widget": {"name": "video"}, "link": null},
+        {"name": "force_rate", "type": "FLOAT", "widget": {"name": "force_rate"}, "link": null},
+        {"name": "custom_width", "type": "INT", "widget": {"name": "custom_width"}, "link": null},
+        {"name": "custom_height", "type": "INT", "widget": {"name": "custom_height"}, "link": null},
+        {"name": "frame_load_cap", "type": "INT", "widget": {"name": "frame_load_cap"}, "link": null},
+        {"name": "skip_first_frames", "type": "INT", "widget": {"name": "skip_first_frames"}, "link": null},
+        {"name": "select_every_nth", "type": "INT", "widget": {"name": "select_every_nth"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "IMAGE", "type": "IMAGE", "links": [8]},
+        {"name": "frame_count", "type": "INT", "links": null},
+        {"name": "audio", "type": "AUDIO", "links": [9]},
+        {"name": "video_info", "type": "VHS_VIDEOINFO", "links": null}
+      ],
+      "properties": {"Node name for S&R": "VHS_LoadVideoPath"},
+      "widgets_values": {"video": "/path/to/video.mp4", "force_rate": 0, "custom_width": 0, "custom_height": 0, "frame_load_cap": 0, "skip_first_frames": 0, "select_every_nth": 1}
+    },
+    {
+      "id": 11,
+      "type": "FoleyFeatureExtractor",
+      "pos": [1280, 480],
+      "size": [480, 280],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {"name": "hunyuan_deps", "type": "HUNYUAN_DEPS", "link": 7},
+        {"name": "image", "type": "IMAGE", "link": 8},
+        {"name": "audio", "type": "AUDIO", "link": 9},
+        {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": null},
+        {"name": "frame_rate", "type": "FLOAT", "widget": {"name": "frame_rate"}, "link": null},
+        {"name": "duration", "type": "FLOAT", "widget": {"name": "duration"}, "link": null},
+        {"name": "cache_dir", "type": "STRING", "widget": {"name": "cache_dir"}, "link": null},
+        {"name": "name", "type": "STRING", "widget": {"name": "name"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "npz_path", "type": "STRING", "links": null}
+      ],
+      "properties": {"Node name for S&R": "FoleyFeatureExtractor"},
+      "widgets_values": ["a description of the sound", 25.0, 0.0, "/path/to/features/", "clip"]
+    },
+    {
+      "id": 12,
+      "type": "FoleyLoRATrainer",
+      "pos": [1930, 50],
+      "size": [470, 820],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {"name": "hunyuan_model", "type": "HUNYUAN_MODEL", "link": 10},
+        {"name": "hunyuan_deps", "type": "HUNYUAN_DEPS", "link": 11},
+        {"name": "data_dir", "type": "STRING", "widget": {"name": "data_dir"}, "link": null},
+        {"name": "output_dir", "type": "STRING", "widget": {"name": "output_dir"}, "link": null},
+        {"name": "target", "type": "COMBO", "widget": {"name": "target"}, "link": null},
+        {"name": "rank", "type": "INT", "widget": {"name": "rank"}, "link": null},
+        {"name": "alpha", "type": "FLOAT", "widget": {"name": "alpha"}, "link": null},
+        {"name": "lr", "type": "FLOAT", "widget": {"name": "lr"}, "link": null},
+        {"name": "steps", "type": "INT", "widget": {"name": "steps"}, "link": null},
+        {"name": "batch_size", "type": "INT", "widget": {"name": "batch_size"}, "link": null},
+        {"name": "grad_accum", "type": "INT", "widget": {"name": "grad_accum"}, "link": null},
+        {"name": "warmup_steps", "type": "INT", "widget": {"name": "warmup_steps"}, "link": null},
+        {"name": "save_every", "type": "INT", "widget": {"name": "save_every"}, "link": null},
+        {"name": "timestep_mode", "type": "COMBO", "widget": {"name": "timestep_mode"}, "link": null},
+        {"name": "precision", "type": "COMBO", "widget": {"name": "precision"}, "link": null},
+        {"name": "seed", "type": "INT", "widget": {"name": "seed"}, "link": null},
+        {"name": "logit_normal_sigma", "type": "FLOAT", "widget": {"name": "logit_normal_sigma"}, "link": null},
+        {"name": "curriculum_switch", "type": "FLOAT", "widget": {"name": "curriculum_switch"}, "link": null},
+        {"name": "init_mode", "type": "COMBO", "widget": {"name": "init_mode"}, "link": null},
+        {"name": "use_rslora", "type": "BOOLEAN", "widget": {"name": "use_rslora"}, "link": null},
+        {"name": "lora_dropout", "type": "FLOAT", "widget": {"name": "lora_dropout"}, "link": null},
+        {"name": "lora_plus_ratio", "type": "FLOAT", "widget": {"name": "lora_plus_ratio"}, "link": null},
+        {"name": "schedule_type", "type": "COMBO", "widget": {"name": "schedule_type"}, "link": null},
+        {"name": "latent_mixup_alpha", "type": "FLOAT", "widget": {"name": "latent_mixup_alpha"}, "link": null},
+        {"name": "latent_noise_sigma", "type": "FLOAT", "widget": {"name": "latent_noise_sigma"}, "link": null},
+        {"name": "resume_from", "type": "STRING", "widget": {"name": "resume_from"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "HUNYUAN_MODEL", "type": "HUNYUAN_MODEL", "links": null}
+      ],
+      "properties": {"Node name for S&R": "FoleyLoRATrainer"},
+      "widgets_values": ["/path/to/features/", "/path/to/lora_output/", "all_attn_mlp", 64, 64.0, 0.0001, 3000, 8, 1, 100, 500, "logit_normal", "bf16", 42, 1.0, 0.6, "standard", false, 0.0, 1.0, "constant", 0.0, 0.0, ""]
+    },
+    {
+      "id": 13,
+      "type": "FoleyLoRALoader",
+      "pos": [2580, 50],
+      "size": [450, 106],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {"name": "hunyuan_model", "type": "HUNYUAN_MODEL", "link": 12},
+        {"name": "adapter_path", "type": "STRING", "widget": {"name": "adapter_path"}, "link": null},
+        {"name": "strength", "type": "FLOAT", "widget": {"name": "strength"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "HUNYUAN_MODEL", "type": "HUNYUAN_MODEL", "links": [13]}
+      ],
+      "properties": {"Node name for S&R": "FoleyLoRALoader"},
+      "widgets_values": ["/path/to/lora_output/adapter_final.pt", 1.0]
+    },
+    {
+      "id": 14,
+      "type": "VHS_LoadVideoPath",
+      "pos": [2580, 210],
+      "size": [480, 370],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {"name": "meta_batch", "shape": 7, "type": "VHS_BatchManager", "link": null},
+        {"name": "vae", "shape": 7, "type": "VAE", "link": null},
+        {"name": "video", "type": "STRING", "widget": {"name": "video"}, "link": null},
+        {"name": "force_rate", "type": "FLOAT", "widget": {"name": "force_rate"}, "link": null},
+        {"name": "custom_width", "type": "INT", "widget": {"name": "custom_width"}, "link": null},
+        {"name": "custom_height", "type": "INT", "widget": {"name": "custom_height"}, "link": null},
+        {"name": "frame_load_cap", "type": "INT", "widget": {"name": "frame_load_cap"}, "link": null},
+        {"name": "skip_first_frames", "type": "INT", "widget": {"name": "skip_first_frames"}, "link": null},
+        {"name": "select_every_nth", "type": "INT", "widget": {"name": "select_every_nth"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "IMAGE", "type": "IMAGE", "links": [15]},
+        {"name": "frame_count", "type": "INT", "links": null},
+        {"name": "audio", "type": "AUDIO", "links": null},
+        {"name": "video_info", "type": "VHS_VIDEOINFO", "links": null}
+      ],
+      "properties": {"Node name for S&R": "VHS_LoadVideoPath"},
+      "widgets_values": {"video": "/path/to/test/video.mp4", "force_rate": 0, "custom_width": 0, "custom_height": 0, "frame_load_cap": 0, "skip_first_frames": 0, "select_every_nth": 1}
+    },
+    {
+      "id": 15,
+      "type": "HunyuanFoleySampler",
+      "pos": [2580, 640],
+      "size": [450, 530],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {"name": "hunyuan_model", "type": "HUNYUAN_MODEL", "link": 13},
+        {"name": "hunyuan_deps", "type": "HUNYUAN_DEPS", "link": 14},
+        {"name": "image", "shape": 7, "type": "IMAGE", "link": 15},
+        {"name": "torch_compile_cfg", "shape": 7, "type": "TORCH_COMPILE_CFG", "link": null},
+        {"name": "block_swap_args", "shape": 7, "type": "BLOCKSWAPARGS", "link": null},
+        {"name": "frame_rate", "type": "FLOAT", "widget": {"name": "frame_rate"}, "link": null},
+        {"name": "duration", "type": "FLOAT", "widget": {"name": "duration"}, "link": null},
+        {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": null},
+        {"name": "negative_prompt", "type": "STRING", "widget": {"name": "negative_prompt"}, "link": null},
+        {"name": "cfg_scale", "type": "FLOAT", "widget": {"name": "cfg_scale"}, "link": null},
+        {"name": "steps", "type": "INT", "widget": {"name": "steps"}, "link": null},
+        {"name": "sampler", "type": "COMBO", "widget": {"name": "sampler"}, "link": null},
+        {"name": "batch_size", "type": "INT", "widget": {"name": "batch_size"}, "link": null},
+        {"name": "seed", "type": "INT", "widget": {"name": "seed"}, "link": null},
+        {"name": "force_offload", "type": "BOOLEAN", "widget": {"name": "force_offload"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "audio_first", "type": "AUDIO", "links": [16]},
+        {"name": "audio_batch", "type": "AUDIO", "links": null}
+      ],
+      "properties": {"Node name for S&R": "HunyuanFoleySampler"},
+      "widgets_values": [24, 10, "a description of the sound", "", 4.5, 50, "euler", 1, 42, "fixed", false]
+    },
+    {
+      "id": 16,
+      "type": "PreviewAudio",
+      "pos": [3100, 640],
+      "size": [300, 88],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {"name": "audio", "type": "AUDIO", "link": 16}
+      ],
+      "outputs": [],
+      "properties": {"Node name for S&R": "PreviewAudio"},
+      "widgets_values": []
+    },
+    {
+      "id": 17,
+      "type": "LoadAudio",
+      "pos": [1280, 1080],
+      "size": [480, 82],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {"name": "audio", "type": "COMBO", "widget": {"name": "audio"}, "link": null}
+      ],
+      "outputs": [
+        {"name": "AUDIO", "type": "AUDIO", "links": [18]}
+      ],
+      "properties": {"Node name for S&R": "LoadAudio"},
+      "widgets_values": ["example.wav"]
+    },
+    {
+      "id": 18,
+      "type": "FoleyVAERoundtrip",
+      "pos": [1280, 1220],
+      "size": [480, 82],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {"name": "hunyuan_deps", "type": "HUNYUAN_DEPS", "link": 17},
+        {"name": "audio", "type": "AUDIO", "link": 18}
+      ],
+      "outputs": [
+        {"name": "AUDIO", "type": "AUDIO", "links": [19]}
+      ],
+      "properties": {"Node name for S&R": "FoleyVAERoundtrip"},
+      "widgets_values": []
+    },
+    {
+      "id": 19,
+      "type": "PreviewAudio",
+      "pos": [1280, 1360],
+      "size": [300, 88],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {"name": "audio", "type": "AUDIO", "link": 19}
+      ],
+      "outputs": [],
+      "properties": {"Node name for S&R": "PreviewAudio"},
+      "widgets_values": []
+    }
+  ],
+  "links": [
+    [1, 3, 0, 4, 0, "FOLEY_AUDIO_DATASET"],
+    [2, 4, 0, 5, 0, "FOLEY_AUDIO_DATASET"],
+    [3, 5, 0, 6, 0, "FOLEY_AUDIO_DATASET"],
+    [4, 6, 0, 7, 0, "FOLEY_AUDIO_DATASET"],
+    [5, 7, 0, 8, 0, "FOLEY_AUDIO_DATASET"],
+    [6, 8, 0, 9, 0, "FOLEY_AUDIO_DATASET"],
+    [7, 2, 0, 11, 0, "HUNYUAN_DEPS"],
+    [8, 10, 0, 11, 1, "IMAGE"],
+    [9, 10, 2, 11, 2, "AUDIO"],
+    [10, 1, 0, 12, 0, "HUNYUAN_MODEL"],
+    [11, 2, 0, 12, 1, "HUNYUAN_DEPS"],
+    [12, 1, 0, 13, 0, "HUNYUAN_MODEL"],
+    [13, 13, 0, 15, 0, "HUNYUAN_MODEL"],
+    [14, 2, 0, 15, 1, "HUNYUAN_DEPS"],
+    [15, 14, 0, 15, 2, "IMAGE"],
+    [16, 15, 0, 16, 0, "AUDIO"],
+    [17, 2, 0, 18, 0, "HUNYUAN_DEPS"],
+    [18, 17, 0, 18, 1, "AUDIO"],
+    [19, 18, 0, 19, 0, "AUDIO"]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "Model Loaders (full precision for training)",
+      "bounding": [-10, -30, 530, 370],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "Step 1 \u2014 Dataset Preparation",
+      "bounding": [590, -30, 520, 1240],
+      "color": "#2e7d32",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "Step 2 \u2014 Feature Extraction (queue once per clip)",
+      "bounding": [1240, -30, 560, 830],
+      "color": "#e65100",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "Step 3 \u2014 LoRA Training",
+      "bounding": [1890, -30, 530, 930],
+      "color": "#6a1b9a",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 5,
+      "title": "Step 4 \u2014 Inference (test your adapter)",
+      "bounding": [2540, -30, 920, 1300],
+      "color": "#1565c0",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 6,
+      "title": "Optional \u2014 VAE Roundtrip (check DAC quality ceiling)",
+      "bounding": [1240, 1000, 560, 510],
+      "color": "#616161",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.6,
+      "offset": [100, 100]
+    }
+  },
+  "version": 0.4
+}

@@ -1114,3 +1114,38 @@ class FoleyOutputNormalizer:
             flush=True,
         )
         return ({"waveform": wav_out.unsqueeze(0), "sample_rate": sr},)
+
+
+# ─── Node Mappings ───────────────────────────────────────────────────────────
+
+NODE_CLASS_MAPPINGS = {
+    "FoleyDatasetLoader": FoleyDatasetLoader,
+    "FoleyDatasetResampler": FoleyDatasetResampler,
+    "FoleyDatasetLUFSNormalizer": FoleyDatasetLUFSNormalizer,
+    "FoleyDatasetCompressor": FoleyDatasetCompressor,
+    "FoleyDatasetInspector": FoleyDatasetInspector,
+    "FoleyDatasetHfSmoother": FoleyDatasetHfSmoother,
+    "FoleyDatasetAugmenter": FoleyDatasetAugmenter,
+    "FoleyDatasetSaver": FoleyDatasetSaver,
+    "FoleyDatasetItemExtractor": FoleyDatasetItemExtractor,
+    "FoleyDatasetSpectralMatcher": FoleyDatasetSpectralMatcher,
+    "FoleyHfSmoother": FoleyHfSmoother,
+    "FoleyHarmonicExciter": FoleyHarmonicExciter,
+    "FoleyOutputNormalizer": FoleyOutputNormalizer,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "FoleyDatasetLoader": "Foley Dataset Loader",
+    "FoleyDatasetResampler": "Foley Dataset Resampler",
+    "FoleyDatasetLUFSNormalizer": "Foley Dataset LUFS Normalizer",
+    "FoleyDatasetCompressor": "Foley Dataset Compressor",
+    "FoleyDatasetInspector": "Foley Dataset Inspector",
+    "FoleyDatasetHfSmoother": "Foley Dataset HF Smoother",
+    "FoleyDatasetAugmenter": "Foley Dataset Augmenter",
+    "FoleyDatasetSaver": "Foley Dataset Saver",
+    "FoleyDatasetItemExtractor": "Foley Dataset Item Extractor",
+    "FoleyDatasetSpectralMatcher": "Foley Dataset Spectral Matcher",
+    "FoleyHfSmoother": "Foley HF Smoother",
+    "FoleyHarmonicExciter": "Foley Harmonic Exciter",
+    "FoleyOutputNormalizer": "Foley Output Normalizer",
+}

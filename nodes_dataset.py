@@ -384,6 +384,7 @@ class FoleyDatasetInspector:
             wav = item["waveform"]
             sr = item["sample_rate"]
             name = item["name"]
+            duration = wav.shape[-1] / sr
             issues = []
 
             peak = wav.abs().max().item()
@@ -408,12 +409,12 @@ class FoleyDatasetInspector:
 
             if issues:
                 flagged.append(name)
-                lines.append(f"  FLAGGED  {name}: {', '.join(issues)}")
+                lines.append(f"  FLAGGED  {name} ({duration:.2f}s): {', '.join(issues)}")
                 if not skip_rejected:
                     clean.append(item)
             else:
                 clean.append(item)
-                lines.append(f"  OK       {name}")
+                lines.append(f"  OK       {name} ({duration:.2f}s)")
 
         lines.append("=" * 40)
         lines.append(

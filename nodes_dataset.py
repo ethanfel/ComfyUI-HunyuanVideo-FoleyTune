@@ -920,3 +920,197 @@ class FoleyDatasetSpectralMatcher:
         print(f"[FoleyDatasetSpectralMatcher] {len(out)} clips processed  "
               f"strength={strength}  n_mels={n_mels}  ref={ref_dir.name}", flush=True)
         return (out,)
+
+
+# ─── Single-audio pre/post-processor nodes ───────────────────────────────────
+
+# ─── Node 11: HF Smoother (single audio) ─────────────────────────────────────
+
+class FoleyHfSmoother:
+    """Soft high-frequency attenuation for a single audio clip.
+
+    Blends a low-pass filtered copy with the original. Default cutoff is 16 kHz
+    for DAC's 48kHz codec (vs 12 kHz in SelVA for BigVGAN at 44.1kHz).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "cutoff_hz": ("FLOAT", {
+                    "default": 16000.0, "min": 2000.0, "max": 22000.0, "step": 500.0,
+                    "tooltip": "Low-pass cutoff. 16 kHz is gentle for DAC; lower = more aggressive.",
+                }),
+                "blend": ("FLOAT", {
+                    "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "0 = original, 1 = fully filtered.",
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("audio",)
+    FUNCTION = "process"
+    CATEGORY = FOLEY_AUDIO_CATEGORY
+    DESCRIPTION = (
+        "Blends a low-pass filtered version of the audio with the original to gently "
+        "attenuate high-frequency content. Use before feature extraction for training."
+    )
+
+    def process(self, audio, cutoff_hz: float, blend: float):
+        import torchaudio.functional as AF
+
+        waveform = audio["waveform"].float()  # [1, C, L]
+        sr = audio["sample_rate"]
+
+        filtered = AF.lowpass_biquad(waveform, sr, cutoff_hz)
+        out = blend * filtered + (1.0 - blend) * waveform
+
+        rms_in = waveform.pow(2).mean().sqrt().clamp(min=1e-8)
+        rms_out = out.pow(2).mean().sqrt().clamp(min=1e-8)
+        out = out * (rms_in / rms_out)
+
+        peak = out.abs().max()
+        if peak > 1.0:
+            out = out / peak
+
+        print(f"[FoleyHfSmoother] cutoff={cutoff_hz:.0f} Hz  blend={blend:.2f}  "
+              f"rms={rms_in:.4f}->{out.pow(2).mean().sqrt():.4f}", flush=True)
+
+        return ({"waveform": out, "sample_rate": sr},)
+
+
+# ─── Node 12: Harmonic Exciter ───────────────────────────────────────────────
+
+class FoleyHarmonicExciter:
+    """Multi-band harmonic exciter for post-generation enhancement.
+
+    Isolates high-frequency content above a cutoff, applies tanh saturation
+    to generate harmonics, then mixes back with the dry signal.
+
+    NOTE: DAC's neural codec has better HF fidelity than BigVGAN, so this
+    is less critical for Foley than SelVA. Use subtly (mix 0.05-0.15) or
+    skip entirely if DAC output sounds good already.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "cutoff_hz": ("FLOAT", {
+                    "default": 4000.0, "min": 500.0, "max": 16000.0, "step": 100.0,
+                    "tooltip": "Highpass cutoff. Only content above this is excited. "
+                               "4000 Hz for DAC (vs 3000 Hz for BigVGAN).",
+                }),
+                "drive": ("FLOAT", {
+                    "default": 2.0, "min": 1.0, "max": 10.0, "step": 0.5,
+                    "tooltip": "Saturation drive. Higher = more harmonics. 2-3 is subtle.",
+                }),
+                "mix": ("FLOAT", {
+                    "default": 0.10, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Wet/dry blend. 0.05-0.15 is subtle for DAC. "
+                               "Lower than SelVA default since DAC needs less HF compensation.",
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("audio",)
+    FUNCTION = "excite"
+    CATEGORY = FOLEY_AUDIO_CATEGORY
+    DESCRIPTION = (
+        "Multi-band harmonic exciter. Applies tanh saturation to the HF band "
+        "to restore harmonics. Less aggressive defaults than SelVA — DAC's neural "
+        "codec preserves HF better than BigVGAN."
+    )
+
+    def excite(self, audio, cutoff_hz: float, drive: float, mix: float):
+        from pedalboard import Pedalboard, HighpassFilter
+
+        wav = audio["waveform"][0]  # [C, T]
+        sr = audio["sample_rate"]
+
+        wav_np = wav.float().numpy()  # [C, T]
+
+        board = Pedalboard([HighpassFilter(cutoff_frequency_hz=cutoff_hz)])
+        hf = board(wav_np, sr)  # [C, T]
+
+        excited = np.tanh(hf * drive) / max(drive, 1.0)
+        mixed = wav_np + mix * excited
+        mixed = np.tanh(mixed)
+
+        wav_out = torch.from_numpy(mixed).unsqueeze(0)  # [1, C, T]
+        print(f"[FoleyHarmonicExciter] cutoff={cutoff_hz}Hz  drive={drive}  mix={mix:.0%}", flush=True)
+        return ({"waveform": wav_out, "sample_rate": sr},)
+
+
+# ─── Node 13: Output Normalizer ──────────────────────────────────────────────
+
+class FoleyOutputNormalizer:
+    """Normalize generated audio to a target LUFS level with true peak limiting.
+
+    Apply as the final node before saving. Uses pyloudnorm (BS.1770-4).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "target_lufs": ("FLOAT", {
+                    "default": -14.0, "min": -40.0, "max": -6.0, "step": 0.5,
+                    "tooltip": "Target integrated loudness in LUFS. "
+                               "-14 for streaming (Spotify/YouTube), -9 to -7 for masters.",
+                }),
+                "true_peak_dbtp": ("FLOAT", {
+                    "default": -1.0, "min": -6.0, "max": 0.0, "step": 0.5,
+                    "tooltip": "True peak ceiling in dBTP applied after LUFS gain.",
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("audio",)
+    FUNCTION = "normalize"
+    CATEGORY = FOLEY_AUDIO_CATEGORY
+    DESCRIPTION = (
+        "Normalize output audio to a target LUFS level (BS.1770-4) with true peak limiting. "
+        "Apply as the last node before saving."
+    )
+
+    def normalize(self, audio, target_lufs: float, true_peak_dbtp: float):
+        import pyloudnorm as pyln
+
+        wav = audio["waveform"][0]  # [C, T]
+        sr = audio["sample_rate"]
+
+        tp_linear = 10.0 ** (true_peak_dbtp / 20.0)
+
+        wav_np = wav.permute(1, 0).double().numpy()  # [T, C]
+        if wav_np.shape[1] == 1:
+            wav_np = wav_np[:, 0]  # [T] mono
+
+        meter = pyln.Meter(sr)
+        loudness = meter.integrated_loudness(wav_np)
+
+        if not np.isfinite(loudness):
+            print("[FoleyOutputNormalizer] Could not measure loudness — passing through.", flush=True)
+            return (audio,)
+
+        gain_db = target_lufs - loudness
+        gain_linear = 10.0 ** (gain_db / 20.0)
+
+        wav_out = wav * gain_linear
+
+        peak = wav_out.abs().max().item()
+        if peak > tp_linear:
+            wav_out = wav_out * (tp_linear / peak)
+
+        print(
+            f"[FoleyOutputNormalizer] {loudness:.1f} LUFS -> {target_lufs} LUFS  "
+            f"gain={gain_db:+.1f}dB  TP={true_peak_dbtp}dBTP",
+            flush=True,
+        )
+        return ({"waveform": wav_out.unsqueeze(0), "sample_rate": sr},)

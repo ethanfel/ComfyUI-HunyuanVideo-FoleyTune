@@ -729,3 +729,194 @@ class FoleyDatasetItemExtractor:
             flush=True,
         )
         return (audio, item["name"], len(dataset))
+
+
+# ─── Mel filterbank utility ──────────────────────────────────────────────────
+
+def _mel_filterbank(sr: int, n_fft: int, n_mels: int,
+                    fmin: float, fmax: float) -> torch.Tensor:
+    """Returns mel filterbank matrix [n_mels, n_fft//2+1]."""
+    def hz_to_mel(f):
+        return 2595.0 * np.log10(1.0 + np.asarray(f) / 700.0)
+    def mel_to_hz(m):
+        return 700.0 * (10.0 ** (np.asarray(m) / 2595.0) - 1.0)
+
+    n_freqs = n_fft // 2 + 1
+    fft_freqs = np.linspace(0.0, sr / 2.0, n_freqs)
+    mel_pts = np.linspace(hz_to_mel(fmin), hz_to_mel(fmax), n_mels + 2)
+    hz_pts = mel_to_hz(mel_pts)
+
+    fb = np.zeros((n_mels, n_freqs), dtype=np.float32)
+    for m in range(1, n_mels + 1):
+        lo, mid, hi = hz_pts[m - 1], hz_pts[m], hz_pts[m + 1]
+        up = (fft_freqs - lo) / (mid - lo + 1e-12)
+        down = (hi - fft_freqs) / (hi - mid + 1e-12)
+        fb[m - 1] = np.maximum(0.0, np.minimum(up, down))
+    return torch.from_numpy(fb)
+
+
+# ─── Node 10: Dataset Spectral Matcher (reference-based) ─────────────────────
+
+class FoleyDatasetSpectralMatcher:
+    """Adaptive per-band EQ toward a reference audio distribution.
+
+    Unlike SelVA's hardcoded VAE stats, this computes target mel-band means from
+    a reference directory of audio files. Use DAC roundtrip outputs as reference
+    to match what the codec reproduces best.
+
+    Process:
+    1. Compute mean log-mel profile across all reference files
+    2. For each clip: compute its log-mel profile, derive per-band gain difference
+    3. Apply smooth frequency-domain correction (multiplicative in linear space)
+    4. Preserve original RMS level
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "dataset": (FOLEY_AUDIO_DATASET,),
+                "reference_dir": ("STRING", {
+                    "default": "",
+                    "tooltip": "Path to folder of reference audio files. Use DAC roundtrip outputs "
+                               "for best results. The spectral profile of these files becomes the target.",
+                }),
+                "strength": ("FLOAT", {
+                    "default": 0.8, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "0 = no correction, 1 = full match to reference distribution.",
+                }),
+                "max_gain_db": ("FLOAT", {
+                    "default": 12.0, "min": 1.0, "max": 30.0, "step": 1.0,
+                    "tooltip": "Clamps per-band gain to +/-dB. Prevents extreme boosts.",
+                }),
+            },
+            "optional": {
+                "n_mels": ("INT", {
+                    "default": 128, "min": 40, "max": 256,
+                    "tooltip": "Number of mel bands for analysis. 128 is good for 48kHz.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = (FOLEY_AUDIO_DATASET,)
+    RETURN_NAMES = ("dataset",)
+    FUNCTION = "process"
+    CATEGORY = FOLEY_DS_CATEGORY
+    DESCRIPTION = (
+        "Adaptive per-band EQ toward a reference audio distribution. "
+        "Computes target mel-band means from a reference directory, then applies "
+        "smooth frequency-domain correction to each clip in the dataset. "
+        "Use DAC roundtrip outputs as reference for best LoRA training quality."
+    )
+
+    def _compute_reference_profile(self, ref_dir: Path, sr_tgt: int,
+                                   n_fft: int, hop: int, n_mels: int) -> torch.Tensor:
+        """Compute mean log-mel profile across all reference audio files."""
+        ref_files = [f for f in ref_dir.rglob("*") if f.suffix.lower() in _AUDIO_EXTS]
+        if not ref_files:
+            raise FileNotFoundError(
+                f"[FoleyDatasetSpectralMatcher] No audio files found in reference dir: {ref_dir}"
+            )
+
+        import torchaudio.functional as AF
+
+        fb = _mel_filterbank(sr_tgt, n_fft, n_mels, 0, sr_tgt // 2)
+        window = torch.hann_window(n_fft)
+        all_means = []
+
+        for f in sorted(ref_files):
+            try:
+                wav, sr = _load_audio(f)
+                mono = wav[0].mean(0).float()  # [L]
+                if sr != sr_tgt:
+                    mono = AF.resample(mono.unsqueeze(0), sr, sr_tgt).squeeze(0)
+
+                stft = torch.stft(mono, n_fft, hop_length=hop, win_length=n_fft,
+                                  window=window, center=True, return_complex=True)
+                mag = stft.abs()  # [n_freqs, T]
+                mel_mag = torch.matmul(fb, mag).clamp(min=1e-5)
+                mel_log = torch.log(mel_mag)
+                all_means.append(mel_log.mean(dim=-1))  # [n_mels]
+            except Exception as e:
+                print(f"[FoleyDatasetSpectralMatcher] Skipping ref {f.name}: {e}", flush=True)
+
+        if not all_means:
+            raise RuntimeError("[FoleyDatasetSpectralMatcher] Could not process any reference files")
+
+        target_mean = torch.stack(all_means).mean(dim=0)  # [n_mels]
+        print(f"[FoleyDatasetSpectralMatcher] Computed reference profile from "
+              f"{len(all_means)} files", flush=True)
+        return target_mean
+
+    def process(self, dataset, reference_dir: str, strength: float,
+                max_gain_db: float, n_mels: int = 128):
+        import torchaudio.functional as AF
+
+        ref_dir = Path(reference_dir.strip())
+        if not ref_dir.exists():
+            raise FileNotFoundError(f"Reference dir not found: {ref_dir}")
+
+        # Use 48kHz as analysis SR (Foley native)
+        sr_tgt = 48000
+        n_fft = 2048
+        hop = 512
+
+        target_mean = self._compute_reference_profile(ref_dir, sr_tgt, n_fft, hop, n_mels)
+        fb = _mel_filterbank(sr_tgt, n_fft, n_mels, 0, sr_tgt // 2)
+        window = torch.hann_window(n_fft)
+        max_log = max_gain_db / 8.6859  # ln scale: 20 * log10(e) ~ 8.686
+
+        out = []
+        for item in dataset:
+            wav = item["waveform"].float()  # [1, C, L]
+            sr_in = item["sample_rate"]
+
+            mono = wav[0].mean(0)  # [L]
+            if sr_in != sr_tgt:
+                mono = AF.resample(mono.unsqueeze(0), sr_in, sr_tgt).squeeze(0)
+
+            stft = torch.stft(mono, n_fft, hop_length=hop, win_length=n_fft,
+                              window=window, center=True, return_complex=True)
+            mag = stft.abs()
+
+            mel_mag = torch.matmul(fb, mag).clamp(min=1e-5)
+            mel_log = torch.log(mel_mag)
+            current_mean = mel_log.mean(dim=-1)  # [n_mels]
+
+            # Per-mel-band gain (log space)
+            mel_gain = (target_mean - current_mean) * strength
+            mel_gain = mel_gain.clamp(-max_log, max_log)
+
+            # Map mel gains -> STFT frequency bins
+            fb_sum = fb.sum(0).clamp(min=1e-8)
+            freq_gain = (mel_gain @ fb) / fb_sum
+            linear_gain = torch.exp(freq_gain)
+
+            # Apply gain and reconstruct
+            stft_out = stft * linear_gain.unsqueeze(-1)
+            wav_out = torch.istft(stft_out, n_fft, hop_length=hop, win_length=n_fft,
+                                  window=window, center=True, length=mono.shape[0])
+
+            if sr_in != sr_tgt:
+                wav_out = AF.resample(wav_out.unsqueeze(0), sr_tgt, sr_in).squeeze(0)
+
+            # Preserve RMS
+            rms_in = mono.pow(2).mean().sqrt().clamp(min=1e-8)
+            rms_out = wav_out.pow(2).mean().sqrt().clamp(min=1e-8)
+            wav_out = wav_out * (rms_in / rms_out)
+
+            peak = wav_out.abs().max()
+            if peak > 1.0:
+                wav_out = wav_out / peak
+
+            result = wav_out.unsqueeze(0).unsqueeze(0)  # [1, 1, L]
+            if wav.shape[1] > 1:
+                result = result.expand(-1, wav.shape[1], -1).clone()
+
+            new_item = dict(item)
+            new_item["waveform"] = result
+            out.append(new_item)
+
+        print(f"[FoleyDatasetSpectralMatcher] {len(out)} clips processed  "
+              f"strength={strength}  n_mels={n_mels}  ref={ref_dir.name}", flush=True)
+        return (out,)

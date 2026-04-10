@@ -185,14 +185,16 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
     B = x1.shape[0]
     x0 = torch.randn_like(x1)  # noise
 
-    # Interpolate: xt = (1-t)*x0 + t*x1
+    # Scheduler convention: x(sigma) = sigma * noise + (1-sigma) * data
+    # sigma = timestep / 1000, so t_model = sigma * 1000
+    # At sigma=1 (t_model=1000): pure noise. At sigma=0 (t_model=0): clean data.
     t_expand = t.view(B, 1, 1)
-    xt = (1 - t_expand) * x0 + t_expand * x1
+    xt = t_expand * x0 + (1 - t_expand) * x1
 
-    # Target velocity: v = x1 - x0
-    v_target = x1 - x0
+    # Target velocity: dx/dsigma = noise - data (matches scheduler Euler step)
+    v_target = x0 - x1
 
-    # Timestep for model: scale to [0, 1000] range (keep as float -- TimestepEmbedder handles floats)
+    # Timestep for model: scale to [0, 1000] range
     t_model = t * 1000
 
     # Forward pass

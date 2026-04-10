@@ -1168,12 +1168,13 @@ class FoleyDatasetBrowser:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "INT")
-    RETURN_NAMES = ("video_path", "raw_audio_dir", "audio_clean", "frames_dir", "npz_path", "prompt", "max_index")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "INT")
+    RETURN_NAMES = ("video_path", "raw_audio_dir", "clean_audio_dir", "audio_path", "frames_dir", "npz_path", "prompt", "max_index")
     OUTPUT_TOOLTIPS = (
         "path + '.mp4'",
         "raw_audio_dir folder path — wire to Foley Dataset Loader",
-        "audio_dir/name.flac or .wav  (cleaned audio per clip)",
+        "audio_dir folder path — cleaned audio directory",
+        "audio_dir/name.flac or .wav  (per-clip cleaned audio file)",
         "clips_dir/name  (image-sequence directory)",
         "features_dir/name.npz  (pre-extracted features)",
         "Text prompt / label for this clip",
@@ -1274,11 +1275,14 @@ class FoleyDatasetBrowser:
                     return str(candidate)
             return str(ab.with_suffix(exts[0]))
 
-        # Raw audio dir: just the folder path for Dataset Loader
+        # Raw audio dir: folder path for Dataset Loader
         raw_dir_str = str(raw_audio_dir) if raw_audio_dir else str(clips_dir or p_base.parent)
 
-        # Cleaned audio: per-clip file path from audio_dir
-        audio_clean = _find_audio(audio_dir, name, prefer_flac=True)
+        # Clean audio dir: folder path
+        clean_dir_str = str(audio_dir) if audio_dir else raw_dir_str
+
+        # Audio path: per-clip file path with auto extension
+        audio_path = _find_audio(audio_dir, name, prefer_flac=True)
 
         # NPZ: use features_dir if set, otherwise derive from base
         if features_dir:
@@ -1288,11 +1292,11 @@ class FoleyDatasetBrowser:
 
         print(
             f"[FoleyDatasetBrowser] [{index}/{count - 1}]  prompt='{prompt}'  "
-            f"clean={audio_clean}",
+            f"audio={audio_path}",
             flush=True,
         )
 
-        return (video_path, raw_dir_str, audio_clean, frames_dir, npz_path, prompt, count - 1)
+        return (video_path, raw_dir_str, clean_dir_str, audio_path, frames_dir, npz_path, prompt, count - 1)
 
 
 # ─── Node Mappings ───────────────────────────────────────────────────────────

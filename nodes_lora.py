@@ -296,6 +296,8 @@ class FoleyFeatureExtractor:
         # Compute duration from video frames if not specified
         if duration <= 0:
             duration = total_frames / frame_rate
+            logger.warning(f"Auto-detected duration={duration:.2f}s from {total_frames} frames at {frame_rate}fps. "
+                           f"Set duration explicitly if this is wrong (e.g. mismatched fps).")
 
         # SigLIP2: 8fps, 512x512
         siglip2_fps = 8

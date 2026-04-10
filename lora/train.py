@@ -223,12 +223,10 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
 
 @torch.no_grad()
 def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
-                         num_steps=25, seed=42):
+                         num_steps=25, seed=42, cfg_scale=5.0):
     """Generate an audio sample for evaluation during training.
 
-    NOTE: No classifier-free guidance (CFG) is used here. This is intentional --
-    eval samples during training are quick quality checks, not final output.
-    The evaluator node and inference pipeline use full CFG.
+    Uses classifier-free guidance (CFG) matching the inference pipeline.
 
     Returns:
         waveform: [1, samples] numpy array
@@ -249,6 +247,16 @@ def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
     if pad_sync > 0:
         sync_feat = F.pad(sync_feat, (0, 0, 0, pad_sync))
 
+    # Build unconditional embeddings for CFG
+    uncond_clip = model.get_empty_clip_sequence(bs=1, len=clip_feat.shape[1]).to(device=device, dtype=dtype)
+    uncond_sync = model.get_empty_sync_sequence(bs=1, len=sync_feat.shape[1]).to(device=device, dtype=dtype)
+    uncond_text = torch.zeros_like(text_feat)
+
+    # Precompute doubled-batch features
+    cfg_clip = torch.cat([uncond_clip, clip_feat])
+    cfg_sync = torch.cat([uncond_sync, sync_feat])
+    cfg_text = torch.cat([uncond_text, text_feat])
+
     scheduler = FlowMatchDiscreteScheduler(shift=1.0, solver="euler")
     scheduler.set_timesteps(num_steps, device=device)
 
@@ -258,17 +266,20 @@ def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
 
     model.eval()
     for t in scheduler.timesteps:
-        t_expand = t.expand(latents.shape[0]).to(device)
+        latent_input = torch.cat([latents, latents])
+        t_expand = t.expand(latent_input.shape[0]).to(device)
         compute_dtype = dtype
         with torch.autocast(device_type=device.type, dtype=compute_dtype):
             v_pred = model(
-                x=latents.to(compute_dtype),
+                x=latent_input.to(compute_dtype),
                 t=t_expand,
-                cond=text_feat,
-                clip_feat=clip_feat,
-                sync_feat=sync_feat,
+                cond=cfg_text,
+                clip_feat=cfg_clip,
+                sync_feat=cfg_sync,
             )["x"]
-        latents = scheduler.step(v_pred, t, latents)[0]
+        v_uncond, v_cond = v_pred.chunk(2)
+        v_guided = v_uncond + cfg_scale * (v_cond - v_uncond)
+        latents = scheduler.step(v_guided, t, latents)[0]
 
     # Decode via DAC
     dac_model.to(device)

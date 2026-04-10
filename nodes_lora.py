@@ -29,6 +29,65 @@ from .lora.spectral_metrics import spectral_metrics, reference_metrics, clap_sim
 from PIL import Image, ImageDraw
 
 
+_SPEC_N_FFT = 2048
+_SPEC_HOP = 512
+_SPEC_DB_FLOOR = -80.0
+_SPEC_LOG_BINS = 256
+
+
+def _save_spectrogram(wav_np, sr, path):
+    """Save a log-frequency dB spectrogram PNG for an eval sample.
+
+    wav_np: 1D numpy array (mono).
+    """
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    window = torch.hann_window(_SPEC_N_FFT)
+    stft = torch.stft(torch.from_numpy(wav_np), n_fft=_SPEC_N_FFT, hop_length=_SPEC_HOP,
+                      window=window, return_complex=True)
+    mag = stft.abs().numpy()
+    db = 20.0 * np.log10(np.maximum(mag, 1e-8))
+    db = np.maximum(db, db.max() + _SPEC_DB_FLOOR).astype(np.float32)
+
+    # Log-frequency resampling
+    n_freqs = db.shape[0]
+    src_idx = np.logspace(0, np.log10(max(n_freqs - 1, 2)), _SPEC_LOG_BINS)
+    lo = np.floor(src_idx).astype(int).clip(0, n_freqs - 2)
+    frac = (src_idx - lo)[:, None]
+    spec = ((1 - frac) * db[lo] + frac * db[lo + 1]).astype(np.float32)
+    spec = spec[::-1]  # low freq at bottom
+
+    # Hz labels
+    tgt_hz = [100, 500, 1000, 2000, 4000, 8000, 16000]
+    tpos, tlbl = [], []
+    for hz in tgt_hz:
+        bin_f = hz * _SPEC_N_FFT / sr
+        if bin_f < 1 or bin_f >= n_freqs:
+            continue
+        pos = int(np.searchsorted(src_idx, bin_f))
+        tpos.append(_SPEC_LOG_BINS - 1 - min(pos, _SPEC_LOG_BINS - 1))
+        tlbl.append(f"{hz // 1000}k" if hz >= 1000 else str(hz))
+
+    vmin = float(np.percentile(spec, 2.0))
+    vmax = float(np.percentile(spec, 99.5))
+
+    fig = Figure(figsize=(12, 3), dpi=120, tight_layout=True)
+    ax = fig.add_subplot(1, 1, 1)
+    im = ax.imshow(spec, aspect="auto", cmap="inferno", origin="upper",
+                   vmin=vmin, vmax=vmax, interpolation="antialiased")
+    ax.set_yticks(tpos)
+    ax.set_yticklabels(tlbl, fontsize=8)
+    ax.set_ylabel("Hz", fontsize=9)
+    ax.set_xlabel("Time frames", fontsize=9)
+    ax.set_title(Path(path).stem, fontsize=9)
+    fig.colorbar(im, ax=ax, label="dB", fraction=0.02, pad=0.01)
+
+    canvas = FigureCanvasAgg(fig)
+    canvas.draw()
+    canvas.print_figure(str(Path(path).with_suffix(".png")), dpi=120)
+
+
 def _save_wav(path, wav_tensor, sr):
     """Save audio tensor to WAV using soundfile (avoids torchcodec/FFmpeg dependency)."""
     import soundfile as sf
@@ -559,6 +618,7 @@ class FoleyLoRATrainer:
                 import soxr as _soxr
                 _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
             ref_wav_np = _raw
+            _save_spectrogram(ref_wav_np, 48000, samples_path / "reference")
 
         logger.info(f"Starting training: {steps} steps, batch {batch_size}, lr {lr}")
         t_start = time.time()
@@ -656,6 +716,7 @@ class FoleyLoRATrainer:
                 if wav_t.ndim == 1:
                     wav_t = wav_t.unsqueeze(0)
                 _save_wav(samples_path / f"step_{step+1:05d}.wav", wav_t, sr)
+                _save_spectrogram(wav_mono, sr, samples_path / f"step_{step+1:05d}")
 
                 # Spectral metrics
                 sm = spectral_metrics(wav_mono, sr)
@@ -953,6 +1014,9 @@ class FoleyLoRAScheduler:
                                 import soxr as _soxr
                                 _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
                             ref_wav_np = _raw
+                            samples_dir_ref = exp_dir / "samples"
+                            samples_dir_ref.mkdir(exist_ok=True)
+                            _save_spectrogram(ref_wav_np, 48000, samples_dir_ref / "reference")
                             break
 
                     for step in range(config["steps"]):
@@ -1033,6 +1097,7 @@ class FoleyLoRAScheduler:
                             if wav_t.ndim == 1:
                                 wav_t = wav_t.unsqueeze(0)
                             _save_wav(samples_dir / f"step_{step+1:05d}.wav", wav_t, sr)
+                            _save_spectrogram(wav_mono, sr, samples_dir / f"step_{step+1:05d}")
 
                             sm = spectral_metrics(wav_mono, sr)
                             step_metrics = {"step": step + 1, "loss": float(np.mean(losses[-50:])), **sm}

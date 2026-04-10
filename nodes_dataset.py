@@ -1291,6 +1291,8 @@ class FoleyDatasetBrowser:
         else:
             npz_path = str(p_base.parent / "features" / p_base.stem) + ".npz"
 
+        feat_dir_str = str(features_dir) if features_dir else ""
+
         print(
             f"[FoleyDatasetBrowser] [{index}/{count - 1}]\n"
             f"  prompt     = {prompt}\n"
@@ -1303,8 +1305,6 @@ class FoleyDatasetBrowser:
             f"  npz_path   = {npz_path}",
             flush=True,
         )
-
-        feat_dir_str = str(features_dir) if features_dir else ""
 
         return (video_path, raw_dir_str, clean_dir_str, audio_path, feat_dir_str, frames_dir, npz_path, prompt, count - 1)
 

@@ -424,6 +424,25 @@ class FoleyLoRATrainer:
         dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
         dtype = dtype_map[precision]
 
+        # Exit ComfyUI's inference_mode so gradients work
+        with torch.inference_mode(False), torch.enable_grad():
+            return self._train_inner(
+            hunyuan_model, hunyuan_deps, data_dir, output_dir, target, rank,
+            alpha, lr, steps, batch_size, grad_accum, warmup_steps, save_every,
+            timestep_mode, precision, seed, device, dtype,
+            logit_normal_sigma, curriculum_switch, init_mode, use_rslora,
+            lora_dropout, lora_plus_ratio, schedule_type,
+            latent_mixup_alpha, latent_noise_sigma, resume_from,
+        )
+
+    def _train_inner(self, hunyuan_model, hunyuan_deps, data_dir, output_dir, target, rank,
+                     alpha, lr, steps, batch_size, grad_accum, warmup_steps, save_every,
+                     timestep_mode, precision, seed, device, dtype,
+                     logit_normal_sigma, curriculum_switch, init_mode, use_rslora,
+                     lora_dropout, lora_plus_ratio, schedule_type,
+                     latent_mixup_alpha, latent_noise_sigma, resume_from):
+        import random
+
         torch.manual_seed(seed)
         random.seed(seed)
         np.random.seed(seed)
@@ -810,130 +829,131 @@ class FoleyLoRAScheduler:
             exp_result = {"id": exp_id, "config": config, "status": "running"}
 
             try:
-                # Deep copy model for this experiment
-                model = copy.deepcopy(hunyuan_model)
-                model.to(device=device, dtype=dtype)
-                model.train()
-
-                target_suffixes = FOLEY_TARGET_PRESETS[config["target"]]
-                n_wrapped = apply_lora(
-                    model, rank=config["rank"], alpha=config["alpha"],
-                    target_suffixes=target_suffixes,
-                    dropout=config["lora_dropout"],
-                    init_mode=config["init_mode"],
-                    use_rslora=config["use_rslora"],
-                )
-
-                for name, param in model.named_parameters():
-                    param.requires_grad = "lora_" in name
-
-                # Optimizer
-                _lr = config["lr"]
-                if config["lora_plus_ratio"] > 1.0:
-                    a_params = [p for n, p in model.named_parameters() if p.requires_grad and "lora_A" in n]
-                    b_params = [p for n, p in model.named_parameters() if p.requires_grad and "lora_B" in n]
-                    param_groups = [{"params": a_params, "lr": _lr}, {"params": b_params, "lr": _lr * config["lora_plus_ratio"]}]
-                else:
-                    param_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": _lr}]
-
-                optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.01)
-
-                _ga = config["grad_accum"]
-                def lr_lambda(sched_step):
-                    actual_step = sched_step * _ga
-                    if actual_step < config["warmup_steps"]:
-                        return actual_step / max(config["warmup_steps"], 1)
-                    if config["schedule_type"] == "cosine":
-                        progress = (actual_step - config["warmup_steps"]) / max(config["steps"] - config["warmup_steps"], 1)
-                        return 0.5 * (1 + np.cos(np.pi * progress))
-                    return 1.0
-
-                lr_sched = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-                import random
-                torch.manual_seed(config["seed"])
-                random.seed(config["seed"])
-                np.random.seed(config["seed"])
-
-                losses = []
-                n_clips = len(dataset)
-                t_start = time.time()
-
-                for step in range(config["steps"]):
-                    # Skip flag
-                    skip_flag = output_root / "skip_current.flag"
-                    if skip_flag.exists():
-                        logger.info(f"Skip flag detected for {exp_id} at step {step}")
-                        ckpt_path = exp_dir / f"adapter_cancelled_step{step:05d}.pt"
-                        meta = {**config, "steps_completed": step}
-                        save_checkpoint(model, optimizer, lr_sched, step, meta, ckpt_path)
-                        skip_flag.unlink()
-                        raise _SkipExperiment(f"Skipped at step {step}")
-
+                with torch.inference_mode(False), torch.enable_grad():
+                    # Deep copy model for this experiment
+                    model = copy.deepcopy(hunyuan_model)
+                    model.to(device=device, dtype=dtype)
                     model.train()
-                    bs = config["batch_size"]
-                    indices = [np.random.randint(0, n_clips) for _ in range(bs)]
-                    batch_latents = torch.cat([dataset[i]["latents"] for i in indices]).to(device, dtype=dtype)
-                    batch_clip = torch.cat([dataset[i]["clip_features"] for i in indices])
-                    batch_sync = torch.cat([dataset[i]["sync_features"] for i in indices])
-                    batch_text = torch.cat([dataset[i]["text_embedding"] for i in indices])
 
-                    # Pad sync to multiple of 8
-                    sync_len = batch_sync.shape[1]
-                    pad_sync = ((sync_len + 7) // 8) * 8 - sync_len
-                    if pad_sync > 0:
-                        batch_sync = F.pad(batch_sync, (0, 0, 0, pad_sync))
-
-                    t = sample_timesteps(
-                        bs, config["timestep_mode"], device, dtype,
-                        sigma=config["logit_normal_sigma"],
-                        curriculum_switch=config["curriculum_switch"],
-                        step=step, total_steps=config["steps"],
+                    target_suffixes = FOLEY_TARGET_PRESETS[config["target"]]
+                    n_wrapped = apply_lora(
+                        model, rank=config["rank"], alpha=config["alpha"],
+                        target_suffixes=target_suffixes,
+                        dropout=config["lora_dropout"],
+                        init_mode=config["init_mode"],
+                        use_rslora=config["use_rslora"],
                     )
 
-                    loss = flow_matching_loss(model, batch_latents, t, batch_clip, batch_sync, batch_text, device, dtype)
-                    loss = loss / config["grad_accum"]
-                    loss.backward()
+                    for name, param in model.named_parameters():
+                        param.requires_grad = "lora_" in name
 
-                    if (step + 1) % config["grad_accum"] == 0:
-                        torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
-                        optimizer.step()
-                        lr_sched.step()
-                        optimizer.zero_grad()
+                    # Optimizer
+                    _lr = config["lr"]
+                    if config["lora_plus_ratio"] > 1.0:
+                        a_params = [p for n, p in model.named_parameters() if p.requires_grad and "lora_A" in n]
+                        b_params = [p for n, p in model.named_parameters() if p.requires_grad and "lora_B" in n]
+                        param_groups = [{"params": a_params, "lr": _lr}, {"params": b_params, "lr": _lr * config["lora_plus_ratio"]}]
+                    else:
+                        param_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": _lr}]
 
-                    losses.append(loss.item() * config["grad_accum"])
+                    optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.01)
 
-                    if (step + 1) % config["save_every"] == 0:
-                        meta = {**config, "steps_completed": step + 1}
-                        ckpt_path = exp_dir / f"adapter_step{step+1:05d}.pt"
-                        save_checkpoint(model, optimizer, lr_sched, step + 1, meta, ckpt_path)
+                    _ga = config["grad_accum"]
+                    def lr_lambda(sched_step):
+                        actual_step = sched_step * _ga
+                        if actual_step < config["warmup_steps"]:
+                            return actual_step / max(config["warmup_steps"], 1)
+                        if config["schedule_type"] == "cosine":
+                            progress = (actual_step - config["warmup_steps"]) / max(config["steps"] - config["warmup_steps"], 1)
+                            return 0.5 * (1 + np.cos(np.pi * progress))
+                        return 1.0
 
-                # Save final
-                meta = {**config, "steps_completed": config["steps"]}
-                final_path = exp_dir / "adapter_final.pt"
-                save_checkpoint(model, optimizer, lr_sched, config["steps"], meta, final_path, final=True)
-                # Draw and save per-experiment loss curve
-                smoothed = _smooth_losses(losses)
-                loss_img = _draw_loss_curve(losses, smoothed=smoothed)
-                loss_img.save(str(exp_dir / "loss.png"))
+                    lr_sched = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-                # Save loss history for comparison chart
-                with open(exp_dir / "loss_history.json", "w") as f:
-                    json.dump(losses, f)
-                all_loss_histories[exp_id] = losses
+                    import random
+                    torch.manual_seed(config["seed"])
+                    random.seed(config["seed"])
+                    np.random.seed(config["seed"])
 
-                elapsed = time.time() - t_start
-                exp_result.update({
-                    "status": "completed",
-                    "final_loss": float(np.mean(losses[-100:])),
-                    "min_loss": float(min(losses)),
-                    "adapter_path": str(final_path),
-                    "duration_seconds": elapsed,
-                })
+                    losses = []
+                    n_clips = len(dataset)
+                    t_start = time.time()
 
-                del model, optimizer, lr_sched
-                gc.collect()
-                torch.cuda.empty_cache()
+                    for step in range(config["steps"]):
+                        # Skip flag
+                        skip_flag = output_root / "skip_current.flag"
+                        if skip_flag.exists():
+                            logger.info(f"Skip flag detected for {exp_id} at step {step}")
+                            ckpt_path = exp_dir / f"adapter_cancelled_step{step:05d}.pt"
+                            meta = {**config, "steps_completed": step}
+                            save_checkpoint(model, optimizer, lr_sched, step, meta, ckpt_path)
+                            skip_flag.unlink()
+                            raise _SkipExperiment(f"Skipped at step {step}")
+
+                        model.train()
+                        bs = config["batch_size"]
+                        indices = [np.random.randint(0, n_clips) for _ in range(bs)]
+                        batch_latents = torch.cat([dataset[i]["latents"] for i in indices]).to(device, dtype=dtype)
+                        batch_clip = torch.cat([dataset[i]["clip_features"] for i in indices])
+                        batch_sync = torch.cat([dataset[i]["sync_features"] for i in indices])
+                        batch_text = torch.cat([dataset[i]["text_embedding"] for i in indices])
+
+                        # Pad sync to multiple of 8
+                        sync_len = batch_sync.shape[1]
+                        pad_sync = ((sync_len + 7) // 8) * 8 - sync_len
+                        if pad_sync > 0:
+                            batch_sync = F.pad(batch_sync, (0, 0, 0, pad_sync))
+
+                        t = sample_timesteps(
+                            bs, config["timestep_mode"], device, dtype,
+                            sigma=config["logit_normal_sigma"],
+                            curriculum_switch=config["curriculum_switch"],
+                            step=step, total_steps=config["steps"],
+                        )
+
+                        loss = flow_matching_loss(model, batch_latents, t, batch_clip, batch_sync, batch_text, device, dtype)
+                        loss = loss / config["grad_accum"]
+                        loss.backward()
+
+                        if (step + 1) % config["grad_accum"] == 0:
+                            torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
+                            optimizer.step()
+                            lr_sched.step()
+                            optimizer.zero_grad()
+
+                        losses.append(loss.item() * config["grad_accum"])
+
+                        if (step + 1) % config["save_every"] == 0:
+                            meta = {**config, "steps_completed": step + 1}
+                            ckpt_path = exp_dir / f"adapter_step{step+1:05d}.pt"
+                            save_checkpoint(model, optimizer, lr_sched, step + 1, meta, ckpt_path)
+
+                    # Save final
+                    meta = {**config, "steps_completed": config["steps"]}
+                    final_path = exp_dir / "adapter_final.pt"
+                    save_checkpoint(model, optimizer, lr_sched, config["steps"], meta, final_path, final=True)
+                    # Draw and save per-experiment loss curve
+                    smoothed = _smooth_losses(losses)
+                    loss_img = _draw_loss_curve(losses, smoothed=smoothed)
+                    loss_img.save(str(exp_dir / "loss.png"))
+
+                    # Save loss history for comparison chart
+                    with open(exp_dir / "loss_history.json", "w") as f:
+                        json.dump(losses, f)
+                    all_loss_histories[exp_id] = losses
+
+                    elapsed = time.time() - t_start
+                    exp_result.update({
+                        "status": "completed",
+                        "final_loss": float(np.mean(losses[-100:])),
+                        "min_loss": float(min(losses)),
+                        "adapter_path": str(final_path),
+                        "duration_seconds": elapsed,
+                    })
+
+                    del model, optimizer, lr_sched
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
             except _SkipExperiment as e:
                 exp_result["status"] = f"skipped: {e}"

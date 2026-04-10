@@ -161,7 +161,10 @@ class FoleyDatasetResampler:
             wav_np = wav.permute(1, 0).double().numpy()  # [L, C]
             wav_rs = soxr.resample(wav_np, sr, target_sr, quality="VHQ")
             wav_t = torch.from_numpy(wav_rs).float().permute(1, 0).unsqueeze(0)  # [1, C, L]
-            out.append({"waveform": wav_t, "sample_rate": target_sr, "name": item["name"]})
+            new_item = dict(item)  # preserve origin_name and any extra keys
+            new_item["waveform"] = wav_t
+            new_item["sample_rate"] = target_sr
+            out.append(new_item)
             changed += 1
 
         print(f"[FoleyDatasetResampler] {changed}/{len(dataset)} clips resampled -> {target_sr} Hz", flush=True)
@@ -235,7 +238,9 @@ class FoleyDatasetLUFSNormalizer:
             if peak > tp_linear:
                 wav_norm = wav_norm * (tp_linear / peak)
 
-            out.append({"waveform": wav_norm.unsqueeze(0), "sample_rate": sr, "name": item["name"]})
+            new_item = dict(item)  # preserve origin_name and any extra keys
+            new_item["waveform"] = wav_norm.unsqueeze(0)
+            out.append(new_item)
 
         print(
             f"[FoleyDatasetLUFSNormalizer] {len(dataset) - skipped}/{len(dataset)} clips normalized  "
@@ -329,7 +334,9 @@ class FoleyDatasetCompressor:
             compressed = board(wav_np, sr)  # [C, L]
             mixed = (1.0 - mix) * wav_np + mix * compressed
             wav_out = torch.from_numpy(mixed).unsqueeze(0)  # [1, C, L]
-            out.append({"waveform": wav_out, "sample_rate": sr, "name": item["name"]})
+            new_item = dict(item)  # preserve origin_name and any extra keys
+            new_item["waveform"] = wav_out
+            out.append(new_item)
 
         print(
             f"[FoleyDatasetCompressor] {len(out)} clips compressed  "

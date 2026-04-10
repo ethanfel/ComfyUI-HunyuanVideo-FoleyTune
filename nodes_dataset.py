@@ -1292,8 +1292,15 @@ class FoleyDatasetBrowser:
             npz_path = str(p_base.parent / "features" / p_base.stem) + ".npz"
 
         print(
-            f"[FoleyDatasetBrowser] [{index}/{count - 1}]  prompt='{prompt}'  "
-            f"audio={audio_path}",
+            f"[FoleyDatasetBrowser] [{index}/{count - 1}]\n"
+            f"  prompt     = {prompt}\n"
+            f"  video_path = {video_path}\n"
+            f"  raw_dir    = {raw_dir_str}\n"
+            f"  clean_dir  = {clean_dir_str}\n"
+            f"  audio_path = {audio_path}\n"
+            f"  feat_dir   = {feat_dir_str}\n"
+            f"  frames_dir = {frames_dir}\n"
+            f"  npz_path   = {npz_path}",
             flush=True,
         )
 

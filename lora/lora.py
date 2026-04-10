@@ -90,9 +90,9 @@ class LoRALinear(nn.Module):
         # Dropout on LoRA path
         self.lora_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
-        # Low-rank matrices
-        self.lora_A = nn.Parameter(torch.empty(rank, in_features))
-        self.lora_B = nn.Parameter(torch.empty(out_features, rank))
+        # Low-rank matrices — inherit device/dtype from base to avoid mismatch
+        self.lora_A = nn.Parameter(torch.empty(rank, in_features, device=base.weight.device, dtype=base.weight.dtype))
+        self.lora_B = nn.Parameter(torch.empty(out_features, rank, device=base.weight.device, dtype=base.weight.dtype))
 
         # Freeze base weights
         for p in self.base.parameters():
@@ -246,7 +246,9 @@ def spectral_surgery(
             nn.init.zeros_(module.lora_B)
         elif policy == "reweight":
             # SVD reweighting: redistribute singular values
-            U, S, Vt = torch.linalg.svd(delta, full_matrices=False)
+            # Divide out scaling so that forward (which re-applies it) preserves the delta
+            delta_unscaled = delta / module.scaling
+            U, S, Vt = torch.linalg.svd(delta_unscaled, full_matrices=False)
             r = module.rank
             sqrt_S = torch.sqrt(S[:r])
             module.lora_B.data = (U[:, :r] * sqrt_S.unsqueeze(0)).to(module.lora_B.dtype)

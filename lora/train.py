@@ -102,16 +102,39 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16):
     torch.cuda.empty_cache()
     gc.collect()
 
-    # Enforce fixed latent length across all clips (required for batching with torch.cat)
+    # Enforce fixed sequence lengths across all clips (required for batching with torch.cat)
     if dataset:
+        # Normalize latent lengths
         latent_lengths = [d["latents"].shape[-1] for d in dataset]
-        target_len = min(latent_lengths)  # trim to shortest
+        target_lat = min(latent_lengths)
         for d in dataset:
-            if d["latents"].shape[-1] > target_len:
-                d["latents"] = d["latents"][..., :target_len]
-            elif d["latents"].shape[-1] < target_len:
-                d["latents"] = F.pad(d["latents"], (0, target_len - d["latents"].shape[-1]))
-        logger.info(f"Latents normalized to length {target_len}")
+            d["latents"] = d["latents"][..., :target_lat]
+        logger.info(f"Latents normalized to length {target_lat}")
+
+        # Normalize clip_features (SigLIP2) sequence lengths — dim 1
+        clip_lens = [d["clip_features"].shape[1] for d in dataset]
+        target_clip = min(clip_lens)
+        for d in dataset:
+            d["clip_features"] = d["clip_features"][:, :target_clip, :]
+
+        # Normalize sync_features (Synchformer) sequence lengths — dim 1, pad to multiple of 8
+        sync_lens = [d["sync_features"].shape[1] for d in dataset]
+        target_sync = min(sync_lens)
+        target_sync = ((target_sync + 7) // 8) * 8  # model requires multiple of 8
+        for d in dataset:
+            seq = d["sync_features"].shape[1]
+            if seq > target_sync:
+                d["sync_features"] = d["sync_features"][:, :target_sync, :]
+            elif seq < target_sync:
+                d["sync_features"] = F.pad(d["sync_features"], (0, 0, 0, target_sync - seq))
+
+        # Normalize text_embedding (CLAP) sequence lengths — dim 1
+        text_lens = [d["text_embedding"].shape[1] for d in dataset]
+        target_text = min(text_lens)
+        for d in dataset:
+            d["text_embedding"] = d["text_embedding"][:, :target_text, :]
+
+        logger.info(f"Features normalized: clip={target_clip}, sync={target_sync}, text={target_text}")
 
     logger.info(f"Prepared dataset: {len(dataset)} clips from {data_dir}")
     return dataset
@@ -175,6 +198,12 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
     sync_feat = sync_feat.to(device=device, dtype=dtype)
     text_feat = text_feat.to(device=device, dtype=dtype)
 
+    # Ensure sync features are padded to multiple of 8 (model assertion)
+    sync_len = sync_feat.shape[1]
+    pad_sync = ((sync_len + 7) // 8) * 8 - sync_len
+    if pad_sync > 0:
+        sync_feat = F.pad(sync_feat, (0, 0, 0, pad_sync))
+
     v_pred = model(
         x=xt, t=t_model,
         cond=text_feat,
@@ -210,6 +239,12 @@ def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
     sync_feat = dataset_entry["sync_features"].to(device=device, dtype=dtype)
     text_feat = dataset_entry["text_embedding"].to(device=device, dtype=dtype)
     latent_shape = dataset_entry["latents"].shape  # [1, 128, T]
+
+    # Ensure sync features are padded to multiple of 8 (model assertion)
+    sync_len = sync_feat.shape[1]
+    pad_sync = ((sync_len + 7) // 8) * 8 - sync_len
+    if pad_sync > 0:
+        sync_feat = F.pad(sync_feat, (0, 0, 0, pad_sync))
 
     scheduler = FlowMatchDiscreteScheduler(shift=1.0, solver="euler")
     scheduler.set_timesteps(num_steps, device=device)

@@ -77,12 +77,8 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16):
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
 
-        # Pad/trim to match duration from features (or 8 seconds default)
-        target_samples = int((duration if duration > 0 else 8.0) * 48000)
-        if waveform.shape[1] > target_samples:
-            waveform = waveform[:, :target_samples]
-        elif waveform.shape[1] < target_samples:
-            waveform = F.pad(waveform, (0, target_samples - waveform.shape[1]))
+        # Use actual audio length — duration field is from video and may differ
+        # Just ensure length is valid for DAC encoding (no pad/trim needed)
 
         # DAC encode: [1, 1, samples] -> latents
         # NOTE: DAC with continuous=True returns DiagonalGaussianDistribution, not tensor

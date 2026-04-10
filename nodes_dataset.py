@@ -1168,8 +1168,8 @@ class FoleyDatasetBrowser:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "INT")
-    RETURN_NAMES = ("video_path", "raw_audio_dir", "clean_audio_dir", "audio_path", "features_dir", "frames_dir", "npz_path", "prompt", "max_index")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "STRING", "INT")
+    RETURN_NAMES = ("video_path", "raw_audio_dir", "clean_audio_dir", "audio_path", "features_dir", "frames_dir", "npz_path", "dataset_dir", "prompt", "max_index")
     OUTPUT_TOOLTIPS = (
         "path + '.mp4'",
         "raw_audio_dir folder path — wire to Foley Dataset Loader",
@@ -1178,6 +1178,7 @@ class FoleyDatasetBrowser:
         "features_dir folder path — wire to Feature Extractor cache_dir",
         "clips_dir/name  (image-sequence directory)",
         "features_dir/name.npz  (per-clip .npz features file)",
+        "dataset_dir folder path — final dir with .npz + audio for trainer data_dir",
         "Text prompt / label for this clip",
         "count - 1 — wire to a primitive INT's max to constrain the index widget",
     )
@@ -1209,6 +1210,7 @@ class FoleyDatasetBrowser:
         raw_audio_dir = None
         audio_dir = None
         features_dir = None
+        dataset_dir = None
 
         if isinstance(data, dict):
             # Compact format
@@ -1220,6 +1222,7 @@ class FoleyDatasetBrowser:
                 features_dir = Path(data["features_dir"])
             elif clips_dir:
                 features_dir = clips_dir / "features"
+            dataset_dir = Path(data["dataset_dir"]) if "dataset_dir" in data else None
 
             clips = data.get("clips", [])
             for c in clips:
@@ -1292,21 +1295,23 @@ class FoleyDatasetBrowser:
             npz_path = str(p_base.parent / "features" / p_base.stem) + ".npz"
 
         feat_dir_str = str(features_dir) if features_dir else ""
+        ds_dir_str = str(dataset_dir) if dataset_dir else ""
 
         print(
             f"[FoleyDatasetBrowser] [{index}/{count - 1}]\n"
-            f"  prompt     = {prompt}\n"
-            f"  video_path = {video_path}\n"
-            f"  raw_dir    = {raw_dir_str}\n"
-            f"  clean_dir  = {clean_dir_str}\n"
-            f"  audio_path = {audio_path}\n"
-            f"  feat_dir   = {feat_dir_str}\n"
-            f"  frames_dir = {frames_dir}\n"
-            f"  npz_path   = {npz_path}",
+            f"  prompt      = {prompt}\n"
+            f"  video_path  = {video_path}\n"
+            f"  raw_dir     = {raw_dir_str}\n"
+            f"  clean_dir   = {clean_dir_str}\n"
+            f"  audio_path  = {audio_path}\n"
+            f"  feat_dir    = {feat_dir_str}\n"
+            f"  frames_dir  = {frames_dir}\n"
+            f"  npz_path    = {npz_path}\n"
+            f"  dataset_dir = {ds_dir_str}",
             flush=True,
         )
 
-        return (video_path, raw_dir_str, clean_dir_str, audio_path, feat_dir_str, frames_dir, npz_path, prompt, count - 1)
+        return (video_path, raw_dir_str, clean_dir_str, audio_path, feat_dir_str, frames_dir, npz_path, ds_dir_str, prompt, count - 1)
 
 
 # ─── Node Mappings ───────────────────────────────────────────────────────────

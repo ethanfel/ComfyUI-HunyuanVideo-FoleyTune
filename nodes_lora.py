@@ -962,6 +962,24 @@ class FoleyLoRAScheduler:
                             meta = {**config, "steps_completed": step + 1}
                             ckpt_path = exp_dir / f"adapter_step{step+1:05d}.pt"
                             save_checkpoint(model, optimizer, lr_sched, step + 1, meta, ckpt_path)
+                            _draw_loss_curve(losses, smoothed=_smooth_losses(losses)).save(str(exp_dir / "loss.png"))
+
+                            # Generate eval audio sample
+                            samples_dir = exp_dir / "samples"
+                            samples_dir.mkdir(exist_ok=True)
+                            model.eval()
+                            wav, sr = generate_eval_sample(
+                                model, hunyuan_deps.dac_model, dataset[0], device, dtype,
+                            )
+                            wav_t = torch.from_numpy(wav)
+                            if wav_t.ndim == 1:
+                                wav_t = wav_t.unsqueeze(0)
+                            _save_wav(samples_dir / f"step_{step+1:05d}.wav", wav_t, sr)
+                            model.train()
+
+                            logger.info(f"[{exp_id}] Checkpoint step {step+1}: "
+                                       f"loss={np.mean(losses[-50:]):.4f}, "
+                                       f"sample saved")
 
                     # Save final
                     meta = {**config, "steps_completed": config["steps"]}

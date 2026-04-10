@@ -726,6 +726,8 @@ class FoleyLoRATrainer:
                     rm = reference_metrics(wav_mono, ref_wav_np, sr)
                     step_metrics.update(rm)
                 metrics_history.append(step_metrics)
+                with open(output_path / "metrics_history.json", "w") as _mf:
+                    json.dump(metrics_history, _mf, indent=2)
 
                 logger.info(f"Step {step+1} metrics: "
                            f"LSD={step_metrics.get('log_spectral_distance_db', 0):.2f}dB  "
@@ -1106,6 +1108,8 @@ class FoleyLoRAScheduler:
                                 rm = reference_metrics(wav_mono, ref_wav_np, sr)
                                 step_metrics.update(rm)
                             metrics_history.append(step_metrics)
+                            with open(exp_dir / "metrics_history.json", "w") as _mf:
+                                json.dump(metrics_history, _mf, indent=2)
                             model.train()
 
                             logger.info(f"[{exp_id}] Step {step+1}: "

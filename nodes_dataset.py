@@ -85,6 +85,9 @@ class FoleyDatasetLoader:
             except Exception as e:
                 print(f"[FoleyDatasetLoader] Skipping {f.name}: {e}", flush=True)
 
+        if not dataset:
+            raise RuntimeError(f"[FoleyDatasetLoader] All {len(files)} files failed to load from {folder}")
+
         print(f"[FoleyDatasetLoader] Loaded {len(dataset)} clips from {folder}", flush=True)
         return (dataset,)
 
@@ -596,12 +599,11 @@ class FoleyDatasetAugmenter:
                 if peak > 1.0:
                     wav_aug = wav_aug / peak
 
-                out.append({
-                    "waveform": wav_aug,
-                    "sample_rate": sr,
-                    "name": f"{name}_aug{v:02d}",
-                    "origin_name": name,
-                })
+                new_item = dict(item)
+                new_item["waveform"] = wav_aug
+                new_item["name"] = f"{name}_aug{v:02d}"
+                new_item["origin_name"] = name
+                out.append(new_item)
 
         print(f"[FoleyDatasetAugmenter] {len(dataset)} originals -> {len(out)} total clips  "
               f"gain=+/-{gain_range_db:.1f}dB"
@@ -872,6 +874,7 @@ class FoleyDatasetSpectralMatcher:
             sr_in = item["sample_rate"]
 
             mono = wav[0].mean(0)  # [L]
+            rms_original = mono.pow(2).mean().sqrt().clamp(min=1e-8)
             if sr_in != sr_tgt:
                 mono = AF.resample(mono.unsqueeze(0), sr_in, sr_tgt).squeeze(0)
 
@@ -900,10 +903,9 @@ class FoleyDatasetSpectralMatcher:
             if sr_in != sr_tgt:
                 wav_out = AF.resample(wav_out.unsqueeze(0), sr_tgt, sr_in).squeeze(0)
 
-            # Preserve RMS
-            rms_in = mono.pow(2).mean().sqrt().clamp(min=1e-8)
+            # Preserve RMS (use original pre-resample RMS as reference)
             rms_out = wav_out.pow(2).mean().sqrt().clamp(min=1e-8)
-            wav_out = wav_out * (rms_in / rms_out)
+            wav_out = wav_out * (rms_original / rms_out)
 
             peak = wav_out.abs().max()
             if peak > 1.0:
@@ -911,6 +913,8 @@ class FoleyDatasetSpectralMatcher:
 
             result = wav_out.unsqueeze(0).unsqueeze(0)  # [1, 1, L]
             if wav.shape[1] > 1:
+                print(f"[FoleyDatasetSpectralMatcher] Warning: stereo clip '{item['name']}' "
+                      f"collapsed to dual-mono (spectral matching operates on mono downmix)", flush=True)
                 result = result.expand(-1, wav.shape[1], -1).clone()
 
             new_item = dict(item)

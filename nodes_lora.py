@@ -63,10 +63,6 @@ class FoleyFeatureExtractor:
                 "name": ("STRING", {"default": "clip",
                           "tooltip": "Base name for auto-incremented files (e.g. clip -> clip_001.npz)"}),
             },
-            "optional": {
-                "audio_path": ("STRING", {"default": "",
-                               "tooltip": "Source audio file path. If 48kHz, copies instead of re-encoding."}),
-            },
         }
 
     RETURN_TYPES = ("STRING",)
@@ -76,7 +72,7 @@ class FoleyFeatureExtractor:
     OUTPUT_NODE = True
 
     def extract_features(self, hunyuan_deps, image, audio, prompt, frame_rate, duration,
-                         cache_dir, name, audio_path=""):
+                         cache_dir, name):
         from hunyuanvideo_foley.utils.feature_utils import (
             encode_video_with_siglip2, encode_video_with_sync, encode_text_feat,
         )
@@ -91,7 +87,6 @@ class FoleyFeatureExtractor:
         while (cache_dir / f"{name}_{idx:03d}.npz").exists():
             idx += 1
         npz_path = cache_dir / f"{name}_{idx:03d}.npz"
-        audio_out_path = cache_dir / f"{name}_{idx:03d}.wav"
 
         # -- Extract visual features --
         # image is [B, H, W, C] float32 in [0,1] from ComfyUI
@@ -167,20 +162,6 @@ class FoleyFeatureExtractor:
             duration=duration,
             fps=frame_rate,
         )
-
-        # Save audio: if source is 48kHz and path provided, copy directly.
-        audio_src = Path(audio_path.strip()) if audio_path and audio_path.strip() else None
-        if sample_rate == 48000 and audio_src and audio_src.exists():
-            import shutil
-            ext = audio_src.suffix  # .flac, .wav, etc.
-            audio_out_path = cache_dir / f"{name}_{idx:03d}{ext}"
-            shutil.copy2(str(audio_src), str(audio_out_path))
-            logger.info(f"Copied source audio (48kHz): {audio_src}")
-        else:
-            wav = waveform.squeeze(0)  # [C, L]
-            if sample_rate != 48000:
-                wav = torchaudio.functional.resample(wav, sample_rate, 48000)
-            _save_wav(audio_out_path, wav, 48000)
 
         logger.info(f"Saved features to {npz_path}")
         logger.info(f"  clip_features: {clip_features.shape}, sync_features: {sync_features.shape}")

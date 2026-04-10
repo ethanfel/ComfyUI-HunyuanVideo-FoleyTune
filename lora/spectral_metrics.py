@@ -173,14 +173,14 @@ def clap_similarity(wav: np.ndarray, sr: int, prompt: str, device="cpu") -> floa
     Returns:
         float cosine similarity in [-1, 1], higher = better match
     """
-    import torchaudio
+    import soxr
 
     model, processor = _get_clap_full(device)
 
     # Resample to 48kHz if needed
-    wav_t = torch.from_numpy(wav).float().unsqueeze(0)  # [1, L]
     if sr != 48000:
-        wav_t = torchaudio.functional.resample(wav_t, sr, 48000)
+        wav = soxr.resample(wav[:, None], sr, 48000, quality="VHQ").squeeze(-1)
+    wav_t = torch.from_numpy(wav).float().unsqueeze(0)  # [1, L]
 
     # Audio embedding
     audio_inputs = processor(

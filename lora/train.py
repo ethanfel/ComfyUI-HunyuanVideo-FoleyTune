@@ -13,7 +13,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchaudio
+import soundfile as sf
+import soxr
 from loguru import logger
 
 from .lora import apply_lora, get_lora_state_dict, get_lora_and_base_state_dict, load_lora, spectral_surgery, FOLEY_TARGET_PRESETS
@@ -66,10 +67,12 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16):
         duration = float(data.get("duration", 0))
 
         # Load and encode audio
-        waveform, sr = torchaudio.load(str(audio_path))
-        # Resample to 48kHz if needed
+        wav_np, sr = sf.read(str(audio_path))  # [L] or [L, C]
+        if wav_np.ndim == 1:
+            wav_np = wav_np[:, None]  # [L, 1]
         if sr != 48000:
-            waveform = torchaudio.functional.resample(waveform, sr, 48000)
+            wav_np = soxr.resample(wav_np, sr, 48000, quality="VHQ")
+        waveform = torch.from_numpy(wav_np.T).float()  # [C, L]
         # Convert to mono
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)

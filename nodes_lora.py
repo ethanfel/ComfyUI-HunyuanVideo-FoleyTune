@@ -12,7 +12,6 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torchaudio
 from loguru import logger
 
 import folder_paths
@@ -330,7 +329,10 @@ class FoleyVAERoundtrip:
 
         # Resample to 48kHz if needed
         if sample_rate != 48000:
-            waveform = torchaudio.functional.resample(waveform, sample_rate, 48000)
+            import soxr
+            wav_np = waveform.squeeze(0).float().numpy().T  # [L, C]
+            wav_np = soxr.resample(wav_np, sample_rate, 48000, quality="VHQ")
+            waveform = torch.from_numpy(wav_np.T).float().unsqueeze(0)  # [1, C, L]
 
         # Convert to mono
         if waveform.shape[1] > 1:
@@ -1025,9 +1027,14 @@ class FoleyLoRAEvaluator:
                     ref_path = candidate
                     break
             if ref_path:
-                ref_wav, ref_sr = torchaudio.load(str(ref_path))
+                import soundfile as sf_eval
+                import soxr as soxr_eval
+                raw_np, ref_sr = sf_eval.read(str(ref_path))  # [L] or [L, C]
+                if raw_np.ndim == 1:
+                    raw_np = raw_np[:, None]
                 if ref_sr != 48000:
-                    ref_wav = torchaudio.functional.resample(ref_wav, ref_sr, 48000)
+                    raw_np = soxr_eval.resample(raw_np, ref_sr, 48000, quality="VHQ")
+                ref_wav = torch.from_numpy(raw_np.T).float()  # [C, L]
                 ref_wav_np = ref_wav.mean(dim=0).numpy()  # mono
                 ref_m = spectral_metrics(ref_wav_np, 48000)
                 prompt = entry.get("prompt", "")

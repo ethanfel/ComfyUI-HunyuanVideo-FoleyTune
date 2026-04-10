@@ -923,6 +923,13 @@ class FoleyLoRAScheduler:
 
                         losses.append(loss.item() * config["grad_accum"])
 
+                        if (step + 1) % 50 == 0:
+                            avg_loss = np.mean(losses[-50:])
+                            elapsed = time.time() - t_start
+                            logger.info(f"[{exp_id}] Step {step+1}/{config['steps']} | "
+                                       f"loss: {avg_loss:.4f} | lr: {lr_sched.get_last_lr()[0]:.2e} | "
+                                       f"elapsed: {elapsed:.0f}s")
+
                         if (step + 1) % config["save_every"] == 0:
                             meta = {**config, "steps_completed": step + 1}
                             ckpt_path = exp_dir / f"adapter_step{step+1:05d}.pt"

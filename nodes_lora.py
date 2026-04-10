@@ -833,3 +833,191 @@ def _save_comparison_chart(histories, path):
     fig.tight_layout()
     fig.savefig(str(path), dpi=150)
     plt.close(fig)
+
+
+# --- Node 5: LoRA Evaluator -------------------------------------------------
+
+class FoleyLoRAEvaluator:
+    """Compare multiple LoRA adapters by generating audio and computing spectral metrics."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "hunyuan_model": ("HUNYUAN_MODEL",),
+                "hunyuan_deps": ("HUNYUAN_DEPS",),
+                "eval_json": ("STRING", {"default": ""}),
+            }
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "evaluate"
+    CATEGORY = "audio/HunyuanFoley/LoRA"
+    OUTPUT_NODE = True
+
+    def evaluate(self, hunyuan_model, hunyuan_deps, eval_json):
+        if not os.path.exists(eval_json):
+            raise FileNotFoundError(f"Eval JSON not found: {eval_json}")
+
+        with open(eval_json) as f:
+            spec = json.load(f)
+
+        data_dir = spec["data_dir"]
+        output_dir = Path(spec.get("output_dir", "lora_eval"))
+        num_steps = spec.get("steps", 25)
+        seed = spec.get("seed", 42)
+        adapters = spec.get("adapters", [])
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        device = mm.get_torch_device()
+        dtype = torch.bfloat16
+
+        # Prepare dataset
+        dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype)
+
+        # Compute reference metrics from original audio
+        ref_dir = output_dir / "reference"
+        ref_dir.mkdir(exist_ok=True)
+        ref_metrics_list = []
+
+        for entry in dataset:
+            # Load original audio for reference
+            audio_exts = (".wav", ".flac", ".ogg", ".aiff", ".aif")
+            ref_path = None
+            for ext in audio_exts:
+                candidate = Path(data_dir) / f"{entry['name']}{ext}"
+                if candidate.exists():
+                    ref_path = candidate
+                    break
+            if ref_path:
+                ref_wav, ref_sr = torchaudio.load(str(ref_path))
+                if ref_sr != 48000:
+                    ref_wav = torchaudio.functional.resample(ref_wav, ref_sr, 48000)
+                ref_wav_np = ref_wav.mean(dim=0).numpy()  # mono
+                ref_m = spectral_metrics(ref_wav_np, 48000)
+                ref_metrics_list.append(ref_m)
+                # Save reference
+                torchaudio.save(str(ref_dir / f"{entry['name']}.wav"), ref_wav.mean(dim=0, keepdim=True), 48000)
+
+        ref_avg = {}
+        if ref_metrics_list:
+            for key in ref_metrics_list[0]:
+                ref_avg[key] = float(np.mean([m[key] for m in ref_metrics_list]))
+
+        # Evaluate each adapter
+        adapter_results = []
+
+        for adapter_spec in adapters:
+            adapter_id = adapter_spec.get("id", "unknown")
+            adapter_path = adapter_spec.get("path", None)
+
+            logger.info(f"Evaluating adapter: {adapter_id}")
+            adapter_dir = output_dir / adapter_id
+            adapter_dir.mkdir(exist_ok=True)
+
+            # Load adapter or use baseline
+            if adapter_path and os.path.exists(adapter_path):
+                ckpt = torch.load(adapter_path, map_location="cpu", weights_only=False)
+                sd = ckpt.get("state_dict", ckpt)
+                meta = ckpt.get("meta", {})
+
+                model = copy.deepcopy(hunyuan_model)
+                rank = meta.get("rank", 16)
+                alpha_val = meta.get("alpha", float(rank))
+                target = meta.get("target", "all_attn_mlp")
+                target_suffixes = FOLEY_TARGET_PRESETS.get(target, FOLEY_TARGET_PRESETS["all_attn_mlp"])
+
+                apply_lora(model, rank=rank, alpha=alpha_val, target_suffixes=target_suffixes,
+                           init_mode="standard", use_rslora=meta.get("use_rslora", False))
+                load_lora(model, sd)
+            else:
+                model = copy.deepcopy(hunyuan_model)
+                meta = {}
+
+            model.to(device=device, dtype=dtype)
+            model.eval()
+
+            clip_metrics_list = []
+            clips = []
+
+            for ci, entry in enumerate(dataset):
+                wav, sr = generate_eval_sample(
+                    model, hunyuan_deps.dac_model, entry, device, dtype,
+                    num_steps=num_steps, seed=seed,
+                )
+                wav_mono = wav.squeeze()
+                sm = spectral_metrics(wav_mono, sr)
+                clip_metrics_list.append(sm)
+
+                wav_path = adapter_dir / f"{entry['name']}.wav"
+                wav_t = torch.from_numpy(wav)
+                if wav_t.ndim == 1:
+                    wav_t = wav_t.unsqueeze(0)
+                torchaudio.save(str(wav_path), wav_t, sr)
+                clips.append({"clip": entry["name"], "wav_path": str(wav_path), "spectral_metrics": sm})
+
+            avg_metrics = {}
+            if clip_metrics_list:
+                for key in clip_metrics_list[0]:
+                    avg_metrics[key] = float(np.mean([m[key] for m in clip_metrics_list]))
+
+            adapter_results.append({
+                "id": adapter_id, "path": adapter_path, "meta": meta,
+                "clips": clips, "avg_metrics": avg_metrics, "status": "completed",
+            })
+
+            del model
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        # Save summary
+        summary = {
+            "name": spec.get("name", "eval"),
+            "data_dir": data_dir, "output_dir": str(output_dir),
+            "n_clips": len(dataset), "steps": num_steps, "seed": seed,
+            "reference_avg": ref_avg,
+            "adapters": adapter_results,
+        }
+        with open(output_dir / "eval_summary.json", "w") as f:
+            json.dump(summary, f, indent=2, default=str)
+
+        # Comparison chart
+        _save_eval_chart(ref_avg, adapter_results, output_dir / "metric_comparison.png")
+
+        logger.info(f"Evaluation complete: {len(adapter_results)} adapters")
+        return ()
+
+
+def _save_eval_chart(ref_avg, adapter_results, path):
+    """2x2 bar chart comparing spectral metrics across adapters."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+
+    metrics_to_plot = ["hf_energy_ratio", "spectral_centroid_hz", "spectral_flatness", "temporal_variance"]
+    titles = ["HF Energy Ratio (>4kHz)", "Spectral Centroid (Hz)", "Spectral Flatness", "Temporal Variance"]
+
+    ids = ["reference"] + [a["id"] for a in adapter_results]
+    colors = plt.cm.tab10.colors
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+
+    for ax, metric, title in zip(axes.flat, metrics_to_plot, titles):
+        values = [ref_avg.get(metric, 0)]
+        for a in adapter_results:
+            values.append(a["avg_metrics"].get(metric, 0))
+
+        bars = ax.barh(ids, values, color=[colors[i % len(colors)] for i in range(len(ids))])
+        for bar, val in zip(bars, values):
+            ax.text(bar.get_width(), bar.get_y() + bar.get_height() / 2,
+                    f" {val:.4f}", va="center", fontsize=8)
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3, axis="x")
+
+    fig.tight_layout()
+    fig.savefig(str(path), dpi=150)
+    plt.close(fig)

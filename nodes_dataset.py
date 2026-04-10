@@ -214,3 +214,209 @@ class FoleyDatasetLUFSNormalizer:
             flush=True,
         )
         return (out,)
+
+
+# ─── Node 4: Dataset Compressor ──────────────────────────────────────────────
+
+class FoleyDatasetCompressor:
+    """Apply mild parallel compression to reduce within-clip dynamic range.
+
+    Uses pedalboard.Compressor. Parallel (New York) style:
+    blends compressed signal with dry so transients are preserved while
+    the dynamic range is gently tightened. Apply after LUFS normalization.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "dataset": (FOLEY_AUDIO_DATASET,),
+                "threshold_db": ("FLOAT", {
+                    "default": -18.0, "min": -40.0, "max": -6.0, "step": 1.0,
+                    "tooltip": "Compression kicks in above this level. -18 dB is safe after LUFS normalization.",
+                }),
+                "ratio": ("FLOAT", {
+                    "default": 2.5, "min": 1.5, "max": 4.0, "step": 0.5,
+                    "tooltip": "Compression ratio. 2:1-3:1 is mild; stay below 4:1 to avoid pumping.",
+                }),
+                "attack_ms": ("FLOAT", {
+                    "default": 10.0, "min": 1.0, "max": 100.0, "step": 1.0,
+                    "tooltip": "Attack time in ms. Slower attack preserves transients.",
+                }),
+                "release_ms": ("FLOAT", {
+                    "default": 100.0, "min": 20.0, "max": 500.0, "step": 10.0,
+                    "tooltip": "Release time in ms.",
+                }),
+                "mix": ("FLOAT", {
+                    "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Parallel blend: 0.0 = dry only, 1.0 = fully compressed. 0.3-0.5 is typical.",
+                }),
+            }
+        }
+
+    RETURN_TYPES = (FOLEY_AUDIO_DATASET,)
+    RETURN_NAMES = ("dataset",)
+    FUNCTION = "compress"
+    CATEGORY = FOLEY_DS_CATEGORY
+    DESCRIPTION = (
+        "Mild parallel compression to reduce within-clip dynamic range. "
+        "Blends compressed signal with dry at the given mix ratio."
+    )
+
+    def compress(self, dataset, threshold_db: float, ratio: float,
+                 attack_ms: float, release_ms: float, mix: float):
+        from pedalboard import Compressor, Pedalboard
+
+        board = Pedalboard([Compressor(
+            threshold_db=threshold_db,
+            ratio=ratio,
+            attack_ms=attack_ms,
+            release_ms=release_ms,
+        )])
+
+        out = []
+        for item in dataset:
+            wav = item["waveform"][0]  # [C, L]
+            sr = item["sample_rate"]
+
+            wav_np = wav.float().numpy()  # [C, L]
+            compressed = board(wav_np, sr)  # [C, L]
+            mixed = (1.0 - mix) * wav_np + mix * compressed
+            wav_out = torch.from_numpy(mixed).unsqueeze(0)  # [1, C, L]
+            new_item = dict(item)  # preserve origin_name and any extra keys
+            new_item["waveform"] = wav_out
+            out.append(new_item)
+
+        print(
+            f"[FoleyDatasetCompressor] {len(out)} clips compressed  "
+            f"thr={threshold_db}dB  ratio={ratio}:1  mix={mix:.0%}",
+            flush=True,
+        )
+        return (out,)
+
+
+# ─── Node 5: Dataset Inspector ───────────────────────────────────────────────
+
+def _check_hf_shelf(wav: torch.Tensor, sr: int) -> bool:
+    """Return True if clip looks codec-compressed (hard HF shelf above 15 kHz)."""
+    if sr < 32000:
+        return False
+
+    n_fft = 2048
+    hop = 512
+    mono = wav[0].mean(0)  # [L]
+    window = torch.hann_window(n_fft, device=mono.device)
+    stft = torch.stft(mono, n_fft, hop, n_fft, window, return_complex=True)
+    mag_sq = stft.abs().pow(2).mean(-1)  # [n_freqs]
+
+    freqs = torch.linspace(0, sr / 2, n_fft // 2 + 1, device=mono.device)
+    band_lo = (freqs >= 1000) & (freqs < 5000)
+    band_hi = (freqs >= 15000) & (freqs < 20000)
+
+    if band_hi.sum() == 0:
+        return False
+
+    energy_lo = mag_sq[band_lo].mean().clamp(min=1e-12)
+    energy_hi = mag_sq[band_hi].mean().clamp(min=1e-12)
+    ratio_db = 10.0 * torch.log10(energy_lo / energy_hi).item()
+    return ratio_db > 40.0
+
+
+def _estimate_snr(wav: torch.Tensor) -> float:
+    """Rough SNR estimate: ratio of 95th-percentile frame RMS to 5th-percentile."""
+    mono = wav[0].mean(0)  # [L]
+    if mono.shape[0] < 2048:
+        return 60.0
+    frames = mono.unfold(0, 2048, 512)  # [N, 2048]
+    rms = frames.pow(2).mean(-1).sqrt()  # [N]
+    p95 = torch.quantile(rms, 0.95).item()
+    p05 = torch.quantile(rms, 0.05).clamp(min=1e-8).item()
+    return 20.0 * np.log10(p95 / p05 + 1e-8)
+
+
+class FoleyDatasetInspector:
+    """Analyze each clip for quality issues and optionally filter out flagged clips."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "dataset": (FOLEY_AUDIO_DATASET,),
+                "skip_rejected": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "If True, flagged clips are removed from output. "
+                               "If False, all clips pass through but report still lists issues.",
+                }),
+                "min_snr_db": ("FLOAT", {
+                    "default": 15.0, "min": 0.0, "max": 60.0, "step": 1.0,
+                    "tooltip": "Clips with estimated SNR below this value are flagged.",
+                }),
+                "check_codec_artifacts": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Flag clips with a hard HF shelf above 15 kHz (MP3/codec artifact).",
+                }),
+                "max_silence_fraction": ("FLOAT", {
+                    "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Flag clips where more than this fraction of frames are near-silent.",
+                }),
+            }
+        }
+
+    RETURN_TYPES = (FOLEY_AUDIO_DATASET, "STRING")
+    RETURN_NAMES = ("dataset", "report")
+    FUNCTION = "inspect"
+    CATEGORY = FOLEY_DS_CATEGORY
+    DESCRIPTION = (
+        "Analyze each clip for clipping, low SNR, codec artifacts, and silence. "
+        "Outputs a filtered FOLEY_AUDIO_DATASET and a text report."
+    )
+
+    def inspect(self, dataset, skip_rejected: bool, min_snr_db: float,
+                check_codec_artifacts: bool, max_silence_fraction: float = 0.5):
+        clean = []
+        flagged = []
+        lines = ["Foley Dataset Inspector Report", "=" * 40]
+
+        for item in dataset:
+            wav = item["waveform"]
+            sr = item["sample_rate"]
+            name = item["name"]
+            issues = []
+
+            peak = wav.abs().max().item()
+            if peak > 0.99:
+                issues.append(f"clipping (peak={peak:.3f})")
+
+            snr = _estimate_snr(wav)
+            if snr < min_snr_db:
+                issues.append(f"low SNR ({snr:.1f} dB < {min_snr_db} dB)")
+
+            if check_codec_artifacts and _check_hf_shelf(wav, sr):
+                issues.append("codec artifact (HF shelf > 15 kHz)")
+
+            if max_silence_fraction > 0:
+                mono = wav[0].mean(0)
+                if mono.shape[0] >= 2048:
+                    frames = mono.unfold(0, 2048, 512)
+                    rms = frames.pow(2).mean(-1).sqrt()
+                    silent_frac = (rms < 1e-3).float().mean().item()
+                    if silent_frac > max_silence_fraction:
+                        issues.append(f"mostly silent ({silent_frac:.0%} < -60 dBFS)")
+
+            if issues:
+                flagged.append(name)
+                lines.append(f"  FLAGGED  {name}: {', '.join(issues)}")
+                if not skip_rejected:
+                    clean.append(item)
+            else:
+                clean.append(item)
+                lines.append(f"  OK       {name}")
+
+        lines.append("=" * 40)
+        lines.append(
+            f"Total: {len(dataset)}  Clean: {len(clean)}  Flagged: {len(flagged)}"
+            + (" (removed)" if skip_rejected else " (kept)")
+        )
+        report = "\n".join(lines)
+        print(f"[FoleyDatasetInspector]\n{report}", flush=True)
+        return (clean, report)

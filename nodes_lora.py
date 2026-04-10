@@ -550,3 +550,286 @@ class FoleyLoRALoader:
         logger.info(f"Loaded LoRA adapter: {n_wrapped} layers, rank={rank}, strength={strength}")
 
         return (model,)
+
+
+# --- Node 4: LoRA Scheduler -------------------------------------------------
+
+class FoleyLoRAScheduler:
+    """Run multiple LoRA training experiments from a JSON sweep configuration."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "hunyuan_model": ("HUNYUAN_MODEL",),
+                "hunyuan_deps": ("HUNYUAN_DEPS",),
+                "sweep_json": ("STRING", {"default": ""}),
+            }
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "run_sweep"
+    CATEGORY = "audio/HunyuanFoley/LoRA"
+    OUTPUT_NODE = True
+
+    # Default training params (mirrors trainer node defaults)
+    _PARAM_DEFAULTS = {
+        "target": "all_attn_mlp", "rank": 64, "alpha": 64.0,
+        "lr": 1e-4, "steps": 3000, "batch_size": 8, "grad_accum": 1,
+        "warmup_steps": 100, "save_every": 500,
+        "timestep_mode": "logit_normal", "precision": "bf16", "seed": 42,
+        "logit_normal_sigma": 1.0, "curriculum_switch": 0.6,
+        "init_mode": "standard", "use_rslora": False, "lora_dropout": 0.0,
+        "lora_plus_ratio": 1.0, "schedule_type": "constant",
+        "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
+    }
+
+    def _merge_config(self, base, experiment):
+        merged = {**self._PARAM_DEFAULTS, **base}
+        for k, v in experiment.items():
+            if k not in ("id", "description"):
+                merged[k] = v
+        return merged
+
+    def run_sweep(self, hunyuan_model, hunyuan_deps, sweep_json):
+        if not os.path.exists(sweep_json):
+            raise FileNotFoundError(f"Sweep JSON not found: {sweep_json}")
+
+        with open(sweep_json) as f:
+            sweep = json.load(f)
+
+        sweep_name = sweep.get("name", "sweep")
+        data_dir = sweep["data_dir"]
+        output_root = Path(sweep.get("output_root", f"lora_output/{sweep_name}"))
+        base_config = sweep.get("base", {})
+        experiments = sweep.get("experiments", [])
+
+        output_root.mkdir(parents=True, exist_ok=True)
+        summary_path = output_root / "experiment_summary.json"
+
+        # Load existing summary for resume
+        completed_ids = set()
+        results = []
+        if summary_path.exists():
+            with open(summary_path) as f:
+                existing = json.load(f)
+            results = existing.get("experiments", [])
+            completed_ids = {r["id"] for r in results if r.get("status") == "completed"}
+
+        # Prepare dataset once
+        device = mm.get_torch_device()
+        dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+        base_precision = base_config.get("precision", "bf16")
+        dtype = dtype_map[base_precision]
+
+        logger.info(f"Preparing shared dataset from {data_dir}...")
+        dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype)
+
+        # Collect loss histories for comparison chart
+        all_loss_histories = {}
+
+        for exp in experiments:
+            exp_id = exp.get("id", f"exp_{len(results)}")
+
+            if exp_id in completed_ids:
+                logger.info(f"Skipping completed experiment: {exp_id}")
+                # Load loss history if available
+                exp_dir = output_root / exp_id
+                loss_file = exp_dir / "loss_history.json"
+                if loss_file.exists():
+                    with open(loss_file) as f:
+                        all_loss_histories[exp_id] = json.load(f)
+                continue
+
+            config = self._merge_config(base_config, exp)
+            exp_dir = output_root / exp_id
+            exp_dir.mkdir(parents=True, exist_ok=True)
+
+            logger.info(f"Starting experiment: {exp_id}")
+            logger.info(f"Config: {json.dumps({k: v for k, v in config.items() if k != 'description'}, indent=2)}")
+
+            exp_result = {"id": exp_id, "config": config, "status": "running"}
+
+            try:
+                # Deep copy model for this experiment
+                model = copy.deepcopy(hunyuan_model)
+                model.to(device=device, dtype=dtype)
+                model.train()
+
+                target_suffixes = FOLEY_TARGET_PRESETS[config["target"]]
+                n_wrapped = apply_lora(
+                    model, rank=config["rank"], alpha=config["alpha"],
+                    target_suffixes=target_suffixes,
+                    dropout=config["lora_dropout"],
+                    init_mode=config["init_mode"],
+                    use_rslora=config["use_rslora"],
+                )
+
+                for name, param in model.named_parameters():
+                    param.requires_grad = "lora_" in name
+
+                # Optimizer
+                _lr = config["lr"]
+                if config["lora_plus_ratio"] > 1.0:
+                    a_params = [p for n, p in model.named_parameters() if p.requires_grad and "lora_A" in n]
+                    b_params = [p for n, p in model.named_parameters() if p.requires_grad and "lora_B" in n]
+                    param_groups = [{"params": a_params, "lr": _lr}, {"params": b_params, "lr": _lr * config["lora_plus_ratio"]}]
+                else:
+                    param_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": _lr}]
+
+                optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.01)
+
+                def lr_lambda(step):
+                    if step < config["warmup_steps"]:
+                        return step / max(config["warmup_steps"], 1)
+                    if config["schedule_type"] == "cosine":
+                        progress = (step - config["warmup_steps"]) / max(config["steps"] - config["warmup_steps"], 1)
+                        return 0.5 * (1 + np.cos(np.pi * progress))
+                    return 1.0
+
+                lr_sched = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+                import random
+                torch.manual_seed(config["seed"])
+                random.seed(config["seed"])
+                np.random.seed(config["seed"])
+
+                losses = []
+                n_clips = len(dataset)
+                t_start = time.time()
+
+                for step in range(config["steps"]):
+                    # Skip flag
+                    skip_flag = output_root / "skip_current.flag"
+                    if skip_flag.exists():
+                        logger.info(f"Skip flag detected for {exp_id} at step {step}")
+                        ckpt_path = exp_dir / f"adapter_cancelled_step{step:05d}.pt"
+                        meta = {**config, "steps_completed": step}
+                        save_checkpoint(model, optimizer, lr_sched, step, meta, ckpt_path)
+                        skip_flag.unlink()
+                        raise _SkipExperiment(f"Skipped at step {step}")
+
+                    model.train()
+                    bs = config["batch_size"]
+                    indices = [np.random.randint(0, n_clips) for _ in range(bs)]
+                    batch_latents = torch.cat([dataset[i]["latents"] for i in indices]).to(device, dtype=dtype)
+                    batch_clip = torch.cat([dataset[i]["clip_features"] for i in indices])
+                    batch_sync = torch.cat([dataset[i]["sync_features"] for i in indices])
+                    batch_text = torch.cat([dataset[i]["text_embedding"] for i in indices])
+
+                    # Pad sync to multiple of 8
+                    sync_len = batch_sync.shape[1]
+                    pad_sync = ((sync_len + 7) // 8) * 8 - sync_len
+                    if pad_sync > 0:
+                        batch_sync = F.pad(batch_sync, (0, 0, 0, pad_sync))
+
+                    t = sample_timesteps(
+                        bs, config["timestep_mode"], device, dtype,
+                        sigma=config["logit_normal_sigma"],
+                        curriculum_switch=config["curriculum_switch"],
+                        step=step, total_steps=config["steps"],
+                    )
+
+                    loss = flow_matching_loss(model, batch_latents, t, batch_clip, batch_sync, batch_text, device, dtype)
+                    loss = loss / config["grad_accum"]
+                    loss.backward()
+
+                    if (step + 1) % config["grad_accum"] == 0:
+                        torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
+                        optimizer.step()
+                        lr_sched.step()
+                        optimizer.zero_grad()
+
+                    losses.append(loss.item() * config["grad_accum"])
+
+                    if (step + 1) % config["save_every"] == 0:
+                        meta = {**config, "steps_completed": step + 1}
+                        ckpt_path = exp_dir / f"adapter_step{step+1:05d}.pt"
+                        save_checkpoint(model, optimizer, lr_sched, step + 1, meta, ckpt_path)
+
+                # Save final
+                meta = {**config, "steps_completed": config["steps"]}
+                final_path = exp_dir / "adapter_final.pt"
+                save_checkpoint(model, optimizer, lr_sched, config["steps"], meta, final_path, final=True)
+                save_loss_curve(losses, exp_dir / "loss.png")
+
+                # Save loss history for comparison chart
+                with open(exp_dir / "loss_history.json", "w") as f:
+                    json.dump(losses, f)
+                all_loss_histories[exp_id] = losses
+
+                elapsed = time.time() - t_start
+                exp_result.update({
+                    "status": "completed",
+                    "final_loss": float(np.mean(losses[-100:])),
+                    "min_loss": float(min(losses)),
+                    "adapter_path": str(final_path),
+                    "duration_seconds": elapsed,
+                })
+
+                del model, optimizer, lr_sched
+                gc.collect()
+                torch.cuda.empty_cache()
+
+            except _SkipExperiment as e:
+                exp_result["status"] = f"skipped: {e}"
+            except Exception as e:
+                exp_result["status"] = f"failed: {e}"
+                logger.error(f"Experiment {exp_id} failed: {e}")
+
+            results.append(exp_result)
+
+            # Save summary after each experiment
+            summary = {
+                "name": sweep_name, "data_dir": data_dir,
+                "experiments": results,
+                "system": {
+                    "torch": torch.__version__,
+                    "cuda": torch.version.cuda if torch.cuda.is_available() else "N/A",
+                    "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A",
+                },
+            }
+            with open(summary_path, "w") as f:
+                json.dump(summary, f, indent=2, default=str)
+
+        # Generate comparison chart
+        if all_loss_histories:
+            _save_comparison_chart(all_loss_histories, output_root / "loss_comparison.png")
+
+        logger.info(f"Sweep complete: {len(results)} experiments")
+        return ()
+
+
+class _SkipExperiment(Exception):
+    pass
+
+
+def _save_comparison_chart(histories, path):
+    """Overlay smoothed loss curves for all experiments."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    colors = plt.cm.tab10.colors
+
+    for i, (exp_id, losses) in enumerate(histories.items()):
+        color = colors[i % len(colors)]
+        # EMA smoothing
+        smoothed = []
+        s = losses[0]
+        for v in losses:
+            s = 0.95 * s + 0.05 * v
+            smoothed.append(s)
+        ax.plot(smoothed, color=color, linewidth=1.5, label=exp_id)
+
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Loss (smoothed)")
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(str(path), dpi=150)
+    plt.close(fig)

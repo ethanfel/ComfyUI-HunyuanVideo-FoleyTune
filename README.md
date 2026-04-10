@@ -88,6 +88,78 @@ vae_128d_48k.pth               # ~1.49 GB  DAC‑VAE
 
 * If you OOM, drop `batch_size`, reduce `steps`, or enable **force\_offload** in the sampler.
 
+## 🎛️ LoRA Training
+
+Six new nodes for fine-tuning HunyuanVideo-Foley with LoRA adapters.
+
+### New Nodes
+
+* **Foley Feature Extractor** – Caches SigLIP2/Synchformer/CLAP features + audio to `.npz` files for training.
+* **Foley LoRA Trainer** – Trains a LoRA adapter via flow matching. Supports logit-normal/curriculum timestep sampling, LoRA+, PiSSA init, rsLoRA, gradient accumulation, and periodic eval samples.
+* **Foley LoRA Loader** – Loads a trained adapter into the model for inference, with adjustable strength.
+* **Foley LoRA Scheduler** – Runs multiple training experiments from a JSON sweep config. Produces comparison charts and supports resume.
+* **Foley LoRA Evaluator** – Generates audio from multiple adapters and computes spectral metrics (HF energy, centroid, flatness, temporal variance) for comparison.
+* **Foley VAE Roundtrip** – Diagnostic node that encodes/decodes audio through DAC to reveal the codec quality ceiling.
+
+### Quick Start
+
+1. **Prepare data:** Use **Foley Feature Extractor** to cache features for each training clip (video frames + audio + text prompt). Output goes to a directory of `.npz` + `.wav` files.
+2. **Train:** Connect **Model Loader → Dependencies Loader → Foley LoRA Trainer**. Point `data_dir` at your cached features and set `output_dir`. Start with defaults (`rank=64`, `lr=1e-4`, `steps=3000`).
+3. **Inference:** Use **Foley LoRA Loader** to load `adapter_final.pt` into the model, then connect to the standard **Sampler**.
+
+### Dataset Preparation
+
+Each training clip needs a matching `.npz` and audio file with the same stem:
+```
+my_dataset/
+  clip_001.npz    # features from Feature Extractor
+  clip_001.wav    # paired audio
+  clip_002.npz
+  clip_002.wav
+```
+
+All clips should have the same duration (set at extraction time) to avoid batching issues.
+
+### Sweep JSON Format
+
+```json
+{
+  "name": "my_sweep",
+  "data_dir": "/path/to/dataset",
+  "output_root": "/path/to/output",
+  "base": {"steps": 2000, "rank": 64},
+  "experiments": [
+    {"id": "lr_1e4", "lr": 1e-4},
+    {"id": "lr_5e5", "lr": 5e-5},
+    {"id": "rank32", "rank": 32, "alpha": 32.0}
+  ]
+}
+```
+
+### Eval JSON Format
+
+```json
+{
+  "name": "compare_adapters",
+  "data_dir": "/path/to/dataset",
+  "output_dir": "/path/to/eval_output",
+  "steps": 25,
+  "adapters": [
+    {"id": "baseline", "path": null},
+    {"id": "lr_1e4", "path": "/path/to/lr_1e4/adapter_final.pt"},
+    {"id": "rank32", "path": "/path/to/rank32/adapter_final.pt"}
+  ]
+}
+```
+
+### Hyperparameter Recommendations
+
+| Dataset Size | Rank | Steps | LR | Target |
+|---|---|---|---|---|
+| 1-5 clips | 16-32 | 1000-2000 | 5e-5 | audio_attn |
+| 5-20 clips | 32-64 | 2000-4000 | 1e-4 | audio_cross |
+| 20+ clips | 64-128 | 3000-6000 | 1e-4 | all_attn_mlp |
+
 ## 🙏 Credits
 
 * Model & weights: **Tencent HunyuanVideo‑Foley**.

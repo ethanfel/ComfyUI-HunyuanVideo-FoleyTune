@@ -251,6 +251,7 @@ class FoleyFeatureExtractor:
                 "hunyuan_deps": ("HUNYUAN_DEPS",),
                 "image": ("IMAGE",),
                 "prompt": ("STRING", {"default": "", "multiline": True}),
+                "negative_prompt": ("STRING", {"default": "", "multiline": True}),
                 "frame_rate": ("FLOAT", {"default": 25.0, "min": 1.0, "max": 60.0, "step": 0.1}),
                 "duration": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 30.0, "step": 0.1,
                               "tooltip": "Clip duration in seconds. Foley model generates 8s audio."}),
@@ -260,14 +261,14 @@ class FoleyFeatureExtractor:
             },
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("npz_path",)
+    RETURN_TYPES = ("STRING", "FOLEY_FEATURES")
+    RETURN_NAMES = ("npz_path", "features")
     FUNCTION = "extract_features"
     CATEGORY = "audio/HunyuanFoley/LoRA"
     OUTPUT_NODE = True
 
-    def extract_features(self, hunyuan_deps, image, prompt, frame_rate, duration,
-                         cache_dir, name):
+    def extract_features(self, hunyuan_deps, image, prompt, negative_prompt, frame_rate,
+                         duration, cache_dir, name):
         from hunyuanvideo_foley.utils.feature_utils import (
             encode_video_with_siglip2, encode_video_with_sync, encode_text_feat,
         )
@@ -342,6 +343,17 @@ class FoleyFeatureExtractor:
             **text_inputs, output_hidden_states=True, return_dict=True
         )
         text_embedding = clap_outputs.last_hidden_state.cpu()  # [1, seq_len, 768]
+
+        # Encode negative prompt (unconditional)
+        neg_text_inputs = hunyuan_deps.clap_tokenizer(
+            [negative_prompt], padding=True, truncation=True, max_length=100,
+            return_tensors="pt"
+        ).to(device)
+        neg_clap_outputs = hunyuan_deps.clap_model(
+            **neg_text_inputs, output_hidden_states=True, return_dict=True
+        )
+        uncond_text_embedding = neg_clap_outputs.last_hidden_state.cpu()  # [1, seq_len, 768]
+
         hunyuan_deps.clap_model.to(offload_device)
 
         torch.cuda.empty_cache()
@@ -361,7 +373,15 @@ class FoleyFeatureExtractor:
         logger.info(f"  clip_features: {clip_features.shape}, sync_features: {sync_features.shape}")
         logger.info(f"  text_embedding: {text_embedding.shape}, duration: {duration:.2f}s")
 
-        return (str(npz_path),)
+        features = {
+            "clip_feat": clip_features,              # [1, T_clip, 768]
+            "sync_feat": sync_features,              # [1, T_sync, 768]
+            "text_feat": text_embedding,             # [1, T_text, 768]
+            "uncond_text_feat": uncond_text_embedding,  # [1, T_text, 768]
+            "duration": duration,
+        }
+
+        return (str(npz_path), features)
 
 
 # --- Node 6: VAE Roundtrip --------------------------------------------------

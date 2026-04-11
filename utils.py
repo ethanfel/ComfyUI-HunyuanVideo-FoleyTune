@@ -293,6 +293,80 @@ def feature_process_from_tensors(frames_8fps, frames_25fps, prompt, neg_prompt, 
 
 
 # -----------------------------------------------------------------------------------
+# CHUNKED LONG-FORM GENERATION UTILITIES
+# -----------------------------------------------------------------------------------
+
+def compute_chunk_boundaries(duration: float, chunk_duration: float, overlap_seconds: float):
+    """Compute chunk time boundaries with overlap for long-form generation.
+
+    Returns list of (t_start, t_end) tuples in seconds.
+    """
+    # Clamp overlap to half the chunk duration
+    if overlap_seconds >= chunk_duration:
+        logger.warning(f"overlap_seconds ({overlap_seconds}) >= chunk_duration ({chunk_duration}), "
+                       f"clamping to {chunk_duration * 0.5}")
+        overlap_seconds = chunk_duration * 0.5
+
+    # Single chunk — no splitting needed
+    if duration <= chunk_duration:
+        return [(0.0, duration)]
+
+    stride = chunk_duration - overlap_seconds
+    chunks = []
+    t_start = 0.0
+    while t_start < duration:
+        t_end = min(t_start + chunk_duration, duration)
+        chunks.append((t_start, t_end))
+        if t_end >= duration:
+            break
+        t_start += stride
+    return chunks
+
+
+def slice_features_for_chunk(features: dict, t_start: float, t_end: float):
+    """Slice pre-computed features to a specific time window.
+
+    Args:
+        features: FOLEY_FEATURES dict with clip_feat, sync_feat, text_feat, etc.
+        t_start: chunk start time in seconds
+        t_end: chunk end time in seconds
+
+    Returns:
+        Dict with sliced clip_feat and sync_feat, shared text features.
+    """
+    # SigLIP2: 8fps, direct time slice
+    clip_start = int(t_start * 8)
+    clip_end = int(t_end * 8)
+    clip_feat = features["clip_feat"][:, clip_start:clip_end, :]
+    # Ensure at least 1 frame
+    if clip_feat.shape[1] == 0:
+        clip_feat = features["clip_feat"][:, -1:, :]
+
+    # Synchformer: segment_size=16, step_size=8, at 25fps
+    # Each segment spans 16/25 = 0.64s, stride = 8/25 = 0.32s
+    # Segment i covers time [i*0.32, i*0.32 + 0.64] seconds
+    # Each segment produces 8 output tokens
+    seg_stride_s = 8.0 / 25.0   # 0.32s per segment stride
+    total_sync_tokens = features["sync_feat"].shape[1]
+    seg_start = max(0, int(t_start / seg_stride_s))
+    seg_end = max(seg_start + 1, int(t_end / seg_stride_s))
+    # Convert segment indices to token indices (8 tokens per segment)
+    tok_start = seg_start * 8
+    tok_end = min(seg_end * 8, total_sync_tokens)  # clamp to actual token count
+    sync_feat = features["sync_feat"][:, tok_start:tok_end, :]
+    # Ensure at least 8 tokens (one segment)
+    if sync_feat.shape[1] == 0:
+        sync_feat = features["sync_feat"][:, -8:, :]
+
+    return {
+        "clip_feat": clip_feat,
+        "sync_feat": sync_feat,
+        "text_feat": features["text_feat"],
+        "uncond_text_feat": features["uncond_text_feat"],
+    }
+
+
+# -----------------------------------------------------------------------------------
 # FP8 WEIGHT-ONLY QUANTIZATION HELPERS (storage in fp8, compute in fp16/bf16)
 # -----------------------------------------------------------------------------------
 _DENY_SUBSTRINGS = (

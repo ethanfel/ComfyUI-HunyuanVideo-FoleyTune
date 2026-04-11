@@ -599,6 +599,8 @@ class FoleyDatasetQualityFilter:
             )
             with torch.no_grad():
                 text_embed = clap_model.get_text_features(**text_inputs)
+                if not isinstance(text_embed, torch.Tensor):
+                    text_embed = text_embed.pooler_output
                 text_embed = text_embed / text_embed.norm(dim=-1, keepdim=True)
 
         # Normalize weights
@@ -638,6 +640,8 @@ class FoleyDatasetQualityFilter:
                 )
                 with torch.no_grad():
                     audio_embed = clap_model.get_audio_features(**audio_inputs)
+                    if not isinstance(audio_embed, torch.Tensor):
+                        audio_embed = audio_embed.pooler_output
                     audio_embed = audio_embed / audio_embed.norm(dim=-1, keepdim=True)
                 cl = float((audio_embed @ text_embed.T).squeeze())
 
@@ -835,6 +839,8 @@ class FoleyVideoQualityFilter:
             )
             with torch.no_grad():
                 text_embed = clap_model.get_text_features(**text_inputs)
+                if not isinstance(text_embed, torch.Tensor):
+                    text_embed = text_embed.pooler_output
                 text_embed = text_embed / text_embed.norm(dim=-1, keepdim=True)
 
         # Normalize weights
@@ -887,6 +893,8 @@ class FoleyVideoQualityFilter:
                 )
                 with torch.no_grad():
                     audio_embed = clap_model.get_audio_features(**audio_inputs)
+                    if not isinstance(audio_embed, torch.Tensor):
+                        audio_embed = audio_embed.pooler_output
                     audio_embed = audio_embed / audio_embed.norm(dim=-1, keepdim=True)
                 cl = float((audio_embed @ text_embed.T).squeeze())
 

@@ -349,9 +349,9 @@ class FoleyFeatureExtractor:
         # Save .npz
         np.savez(
             str(npz_path),
-            clip_features=clip_features.numpy(),
-            sync_features=sync_features.numpy(),
-            text_embedding=text_embedding.numpy(),
+            clip_features=clip_features.float().numpy(),
+            sync_features=sync_features.float().numpy(),
+            text_embedding=text_embedding.float().numpy(),
             prompt=prompt,
             duration=duration,
             fps=frame_rate,

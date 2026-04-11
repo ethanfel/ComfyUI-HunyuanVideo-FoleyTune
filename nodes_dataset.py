@@ -33,6 +33,7 @@ FOLEY_DS_CATEGORY = "audio/HunyuanFoley/Dataset"
 FOLEY_AUDIO_CATEGORY = "audio/HunyuanFoley/Audio"
 
 _AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".aac", ".m4a", ".aiff", ".aif"}
+_VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv"}
 _SOUNDFILE_EXTS = {".wav", ".flac", ".ogg"}
 
 
@@ -680,6 +681,272 @@ class FoleyDatasetQualityFilter:
         report = "\n".join(lines)
         print(f"[FoleyDatasetQualityFilter]\n{report}", flush=True)
         return (passed, report)
+
+
+# ─── Node 5c: Video Quality Filter ────────────────────────────────────────────
+
+
+def _extract_audio_from_video(path: Path):
+    """Extract audio from a video file via FFmpeg subprocess.
+
+    Returns (waveform [1, C, L], sample_rate) or raises on failure.
+    Uses native sample rate — no resampling.
+    """
+    import io
+    import subprocess
+    import soundfile as sf
+
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", str(path),
+        "-vn",          # no video
+        "-f", "wav",    # output WAV at native sr/channels
+        "pipe:1",
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip())
+
+    wav_np, sr = sf.read(io.BytesIO(result.stdout), dtype="float32", always_2d=True)
+    wav = torch.from_numpy(wav_np).T.unsqueeze(0)  # [1, C, L]
+    return wav, sr
+
+
+def _scan_video_folder(folder: Path):
+    """Scan folder + 1 level of subfolders for video files."""
+    files = []
+    for f in sorted(folder.iterdir()):
+        if f.is_file() and f.suffix.lower() in _VIDEO_EXTS:
+            files.append(f)
+        elif f.is_dir():
+            for child in sorted(f.iterdir()):
+                if child.is_file() and child.suffix.lower() in _VIDEO_EXTS:
+                    files.append(child)
+    return files
+
+
+class FoleyVideoQualityFilter:
+    """Quality-filter video clips by analyzing their audio track only.
+
+    Extracts audio via FFmpeg (no video frame decoding), scores each clip
+    using bandwidth and spectral quality metrics, and optionally copies
+    passing videos to an output folder.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video_folder": ("STRING", {
+                    "default": "",
+                    "tooltip": "Folder containing video files. Scans 1 level of subfolders.",
+                }),
+                "min_quality_score": ("FLOAT", {
+                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Minimum composite quality score to pass.",
+                }),
+                "skip_rejected": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "If True, only passing clips are copied to output.",
+                }),
+            },
+            "optional": {
+                "output_folder": ("STRING", {
+                    "default": "",
+                    "tooltip": "Copy passing videos here. Empty = inspect only, no copy.",
+                }),
+                "clap_prompt": ("STRING", {
+                    "default": "",
+                    "tooltip": "Global text prompt for CLAP similarity. Empty = skip CLAP.",
+                }),
+                "min_bandwidth_score": ("FLOAT", {
+                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Minimum bandwidth sub-score (~0.3 = 7.5 kHz effective).",
+                }),
+                "min_spectral_score": ("FLOAT", {
+                    "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Minimum spectral quality sub-score.",
+                }),
+                "min_clap_score": ("FLOAT", {
+                    "default": 0.1, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Minimum CLAP similarity sub-score.",
+                }),
+                "weight_bandwidth": ("FLOAT", {
+                    "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1,
+                    "tooltip": "Weight of bandwidth score in composite.",
+                }),
+                "weight_spectral": ("FLOAT", {
+                    "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1,
+                    "tooltip": "Weight of spectral quality score in composite.",
+                }),
+                "weight_clap": ("FLOAT", {
+                    "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.1,
+                    "tooltip": "Weight of CLAP similarity score in composite.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("report",)
+    FUNCTION = "filter_videos"
+    CATEGORY = FOLEY_DS_CATEGORY
+    DESCRIPTION = (
+        "Quality-filter video clips by audio analysis only (no video frame loading). "
+        "Scores bandwidth and spectral quality, optionally copies passing clips."
+    )
+
+    def filter_videos(self, video_folder: str, min_quality_score: float,
+                      skip_rejected: bool, output_folder: str = "",
+                      clap_prompt: str = "",
+                      min_bandwidth_score: float = 0.3,
+                      min_spectral_score: float = 0.2,
+                      min_clap_score: float = 0.1,
+                      weight_bandwidth: float = 0.4,
+                      weight_spectral: float = 0.4,
+                      weight_clap: float = 0.2):
+        import shutil
+
+        folder = Path(video_folder.strip())
+        if not folder.exists():
+            raise FileNotFoundError(f"[VideoQualityFilter] Folder not found: {folder}")
+
+        files = _scan_video_folder(folder)
+        if not files:
+            raise RuntimeError(f"[VideoQualityFilter] No video files found in {folder}")
+
+        do_copy = bool(output_folder.strip())
+        out_dir = Path(output_folder.strip()) if do_copy else None
+        if out_dir:
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+        # CLAP setup
+        use_clap = bool(clap_prompt.strip())
+        clap_model = None
+        clap_processor = None
+        text_embed = None
+        if use_clap:
+            from transformers import ClapModel, ClapProcessor
+            print("[VideoQualityFilter] Loading CLAP model...", flush=True)
+            clap_model = ClapModel.from_pretrained("laion/larger_clap_general")
+            clap_processor = ClapProcessor.from_pretrained("laion/larger_clap_general")
+            clap_model.eval()
+            text_inputs = clap_processor(
+                text=[clap_prompt], return_tensors="pt", padding=True
+            )
+            with torch.no_grad():
+                text_embed = clap_model.get_text_features(**text_inputs)
+                text_embed = text_embed / text_embed.norm(dim=-1, keepdim=True)
+
+        # Normalize weights
+        if use_clap:
+            w_total = weight_bandwidth + weight_spectral + weight_clap
+        else:
+            w_total = weight_bandwidth + weight_spectral
+        if w_total < 1e-8:
+            w_total = 1.0
+        w_bw = weight_bandwidth / w_total
+        w_sq = weight_spectral / w_total
+        w_cl = (weight_clap / w_total) if use_clap else 0.0
+
+        n_passed = 0
+        n_rejected = 0
+        n_skipped = 0
+        scores_all = []
+        lines = ["=== Video Quality Filter Report ==="]
+
+        for f in files:
+            # Relative path for display and subfolder preservation
+            try:
+                rel = f.relative_to(folder)
+            except ValueError:
+                rel = Path(f.name)
+
+            # Extract audio
+            try:
+                wav, sr = _extract_audio_from_video(f)
+            except Exception as e:
+                lines.append(f"  SKIP  {rel}: FFmpeg error — {e}")
+                n_skipped += 1
+                continue
+
+            duration = wav.shape[-1] / sr
+
+            # Score
+            bw = _bandwidth_score(wav, sr)
+            sq = _spectral_quality_score(wav, sr)
+
+            cl = None
+            if use_clap:
+                mono = wav[0].mean(0, keepdim=True)
+                if sr != 48000:
+                    mono = torchaudio.functional.resample(mono, sr, 48000)
+                audio_inputs = clap_processor(
+                    audios=[mono.squeeze(0).numpy()],
+                    sampling_rate=48000,
+                    return_tensors="pt",
+                )
+                with torch.no_grad():
+                    audio_embed = clap_model.get_audio_features(**audio_inputs)
+                    audio_embed = audio_embed / audio_embed.norm(dim=-1, keepdim=True)
+                cl = float((audio_embed @ text_embed.T).squeeze())
+
+            composite = w_bw * bw + w_sq * sq
+            if cl is not None:
+                composite += w_cl * cl
+            scores_all.append(composite)
+
+            # Rejection check
+            reasons = []
+            if composite < min_quality_score:
+                reasons.append(f"below {min_quality_score:.2f}")
+            if bw < min_bandwidth_score:
+                reasons.append(f"bandwidth < {min_bandwidth_score:.2f}")
+            if sq < min_spectral_score:
+                reasons.append(f"spectral < {min_spectral_score:.2f}")
+            if cl is not None and cl < min_clap_score:
+                reasons.append(f"CLAP < {min_clap_score:.2f}")
+
+            cl_str = f"{cl:.2f}" if cl is not None else "--"
+            passed = not reasons
+
+            if passed:
+                n_passed += 1
+                lines.append(
+                    f"  PASS    {rel} ({duration:.1f}s): "
+                    f"BW={bw:.2f} SQ={sq:.2f} CLAP={cl_str} SCORE={composite:.2f}"
+                )
+                if do_copy:
+                    dst = out_dir / rel
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(f, dst)
+            else:
+                n_rejected += 1
+                status = f"REJECT: {', '.join(reasons)}"
+                lines.append(
+                    f"  {status}  {rel} ({duration:.1f}s): "
+                    f"BW={bw:.2f} SQ={sq:.2f} CLAP={cl_str} SCORE={composite:.2f}"
+                )
+                if do_copy and not skip_rejected:
+                    dst = out_dir / rel
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(f, dst)
+
+            # Free audio memory immediately
+            del wav
+
+        avg_score = sum(scores_all) / len(scores_all) if scores_all else 0.0
+        lines.append("---")
+        lines.append(
+            f"Passed: {n_passed} | Rejected: {n_rejected} | "
+            f"Skipped: {n_skipped} | Avg score: {avg_score:.2f}"
+        )
+        if do_copy:
+            copied = n_passed if skip_rejected else (n_passed + n_rejected)
+            lines.append(f"Copied {copied} files to {out_dir}")
+
+        report = "\n".join(lines)
+        print(f"[FoleyVideoQualityFilter]\n{report}", flush=True)
+        return (report,)
 
 
 # ─── Node 6: Dataset HF Smoother (batch) ─────────────────────────────────────
@@ -1580,6 +1847,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyDatasetCompressor": FoleyDatasetCompressor,
     "FoleyDatasetInspector": FoleyDatasetInspector,
     "FoleyDatasetQualityFilter": FoleyDatasetQualityFilter,
+    "FoleyVideoQualityFilter": FoleyVideoQualityFilter,
     "FoleyDatasetHfSmoother": FoleyDatasetHfSmoother,
     "FoleyDatasetAugmenter": FoleyDatasetAugmenter,
     "FoleyDatasetSaver": FoleyDatasetSaver,
@@ -1598,6 +1866,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyDatasetCompressor": "Foley Dataset Compressor",
     "FoleyDatasetInspector": "Foley Dataset Inspector",
     "FoleyDatasetQualityFilter": "Foley Dataset Quality Filter",
+    "FoleyVideoQualityFilter": "Foley Video Quality Filter",
     "FoleyDatasetHfSmoother": "Foley Dataset HF Smoother",
     "FoleyDatasetAugmenter": "Foley Dataset Augmenter",
     "FoleyDatasetSaver": "Foley Dataset Saver",

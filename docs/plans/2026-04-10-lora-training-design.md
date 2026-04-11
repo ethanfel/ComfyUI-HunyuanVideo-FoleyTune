@@ -422,3 +422,56 @@ matches reference. By step 1000, spectral characteristics are converging.
    double the compute. No advantage.
 5. **LoRA+ (sweep 2) overfits on this dataset** — loss drops below noise floor (0.5),
    sounds mechanical on some inputs, pure noise on others. Standard LR generalizes better.
+
+### Fourth Sweep Results (no augmentation, 47 unique clips, curriculum r128, 15k steps)
+
+Removing augmented duplicates massively improved training metrics:
+
+| Metric | Augmented (99 clips) @ 10k | No-aug (47 clips) @ 10k | No-aug @ 15k |
+|--------|---------------------------|------------------------|-------------|
+| SC | 0.99 | **0.47** | **0.35** |
+| MCD | 17.9 | **6.5** | **6.5** |
+| PBC | 0.71 | **0.81** | **0.83** |
+| LSD | 36.6 dB | **18.4 dB** | **18.7 dB** |
+
+Still improving at 15k with no sign of plateau. Augmented copies (same video,
+slightly different audio) caused the model to learn averaged spectral patterns,
+producing mechanical-sounding output. Unique clips train cleaner.
+
+**Key insight:** Data augmentation on small datasets can hurt more than help.
+Duplicated videos with varied audio teach "this visual = average of these sounds"
+rather than "follow the video cues." More unique clips > more augmentations.
+
+### Text Prompt Guidelines (CLAP Conditioning)
+
+**CLAP model:** `laion/larger_clap_general` — trained on AudioSet + AudioCaps captions.
+
+**Prompt style:** AudioCaps format — describe the **sound**, not the visual scene.
+CLAP encodes audio semantics; visual context comes from SigLIP2/Synchformer features.
+
+**Rules:**
+1. **Describe sound characteristics, not visuals** — "wet sucking and slurping" not "woman performing oral"
+2. **Use action + texture** — "heavy boots on a wooden floor", "water dripping into a metal bucket"
+3. **Add acoustic modifiers** — "rhythmic", "loud", "close", "deep bass", "high-pitched"
+4. **Keep prompts consistent** across clips of the same sound type
+5. **Avoid negations** — don't use "no background noise", use positive descriptions instead
+6. **Be specific** — "a large dog barking loudly" >> "dog"
+7. **Stay concise** — 77 token limit in model, shorter is better for CLAP
+
+**Prompt flow:**
+```
+Text → CLAP tokenizer (max 77 tokens)
+     → CLAP encoder → [B, 77, 768] (per-token embeddings, NOT pooled)
+     → ConditionProjection (768 → 1536)
+     → Cross-attention in 18 TwoStreamCABlocks (conditions both audio + visual streams)
+     → CFG-scaled at inference (default cfg_scale=4.5)
+```
+
+**Negative prompt:** Default is `"noisy, harsh"`. Can be customized at inference to
+de-emphasize specific sounds (e.g., `"breathing, heavy breathing"` to reduce breathing).
+
+**The prompt affects inference more than training.** During training, the model learns
+audio patterns from all three conditioning streams (visual, sync, text). At inference,
+CFG amplifies the text guidance, so the prompt steers generation. A sound present in
+training audio will still be generated even if not mentioned in the prompt — the visual
+and sync features carry it.

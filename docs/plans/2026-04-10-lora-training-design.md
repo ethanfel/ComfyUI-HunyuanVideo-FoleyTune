@@ -93,6 +93,8 @@ Core training node. Blocks the queue during training.
 | precision | bf16 | bf16/fp16/fp32 | Training precision |
 | seed | 42 | int | Random seed |
 | output_dir | string | path | Checkpoint save location |
+| gradient_checkpointing | false | bool | Recompute activations to save VRAM (~3-5 GB, ~25% slower) |
+| blocks_to_swap | 0 | 0-54 | Offload N transformer blocks to CPU (prefetch=2) |
 | resume_from | optional | path | Resume from checkpoint |
 
 **Target Presets:**
@@ -148,6 +150,7 @@ Without CFG, the model produces pure noise regardless of training quality.
 - Metadata: `meta.json`
 - Loss curve: `loss.png`
 - Eval samples + spectrograms: `samples/step_00000.wav` (pre-training baseline), `samples/step_00500.wav`, etc.
+- Validation samples (if `eval_npz` set): `samples/val_step_00000.wav`, `samples/val_step_00500.wav`, etc.
 - Spectral metrics: `metrics_history.json` (saved incrementally at each checkpoint)
 - Returns: `HUNYUAN_MODEL` with LoRA applied
 
@@ -183,6 +186,7 @@ Multi-experiment sweep orchestrator.
   "name": "rank_sweep",
   "data_dir": "dataset/gunshots",
   "output_root": "lora_output/rank_sweep",
+  "eval_npz": "/path/to/validation_clip.npz",
   "base": { "rank": 64, "lr": 1e-4, "steps": 3000, "target": "all_attn_mlp" },
   "experiments": [
     {"id": "rank32", "rank": 32},
@@ -192,6 +196,27 @@ Multi-experiment sweep orchestrator.
   ]
 }
 ```
+
+**Validation Sample (`eval_npz`):**
+
+Optional path to an NPZ file **outside** the training dataset, with a matching audio file
+alongside it (same stem, e.g., `clip_016.npz` + `clip_016.flac`). When set:
+- Generates `val_step_00000.wav/png` at step 0 (pre-training baseline)
+- Generates `val_step_XXXXX.wav/png` at every checkpoint
+- Saves `val_reference.png` spectrogram of the ground-truth audio
+- Detects overfitting: training eval improves while val eval plateaus or degrades
+
+The validation clip can be any duration — the model handles variable lengths natively.
+Using a rejected clip from the same dataset is ideal: same domain, never trained on.
+
+**VRAM Offload Options (per-experiment):**
+
+| Option | JSON key | Default | Effect |
+|--------|----------|---------|--------|
+| Gradient checkpointing | `gradient_checkpointing` | false | Saves ~3-5 GB VRAM, ~25% slower. Recomputes activations during backward. |
+| Block swap | `blocks_to_swap` | 0 | Offloads N of 54 blocks to CPU. Uses prefetch=2 with async transfers. |
+
+These can be set in `base` (applies to all experiments) or per-experiment.
 
 **Features:**
 - Loads dataset once, reuses across experiments
@@ -287,15 +312,28 @@ ComfyUI-HunyuanVideo-Foley/
 | Audio encoding | Rewrite | DAC encode vs mel-spectrogram VAE |
 | Dataset loading | Adapt | Different .npz contents |
 
-## VRAM Estimates (96 GB target)
+## VRAM Estimates
 
-| Config | VRAM |
-|--------|------|
-| bf16 model + rank 64 + batch 8 | ~25-30 GB |
-| bf16 model + rank 64 + batch 16 | ~40-50 GB |
-| bf16 + rank 64 + all_attn_mlp + batch 16 | ~60-70 GB |
+**Model breakdown (bf16):**
 
-All configurations fit comfortably within 96 GB with no need for fp8, gradient checkpointing, or block swap.
+| Component | Size | Notes |
+|-----------|------|-------|
+| Base model weights (frozen) | 4.3 GB | 2.3B params × 2 bytes |
+| Activations (backprop) | 5-10 GB | Biggest variable, depends on batch/seq |
+| LoRA params + gradients + optimizer | ~0.5-1 GB | Small — only LoRA weights are trained |
+| Batch data | ~0.5-1 GB | Latents + features |
+| **Total (no offload)** | **~18-20 GB** | batch_size=8, rank=128 |
+
+**Offload configurations:**
+
+| Config | VRAM | Speed | Target GPU |
+|--------|------|-------|------------|
+| No offload, batch 8 | ~18-20 GB | Fastest | 24+ GB (4090, A5000) |
+| Gradient checkpointing, batch 8 | ~13-15 GB | ~25% slower | 16 GB (4080, A4000) |
+| Grad ckpt + 20 blocks swapped | ~10-12 GB | ~40% slower | 12 GB (3060 12GB) |
+| Grad ckpt + 40 blocks swapped, batch 2 | ~8-9 GB | ~60% slower | 10 GB |
+
+High-VRAM systems (48+ GB) need no offloading at all.
 
 ## Defaults Summary
 

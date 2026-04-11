@@ -458,6 +458,8 @@ class FoleyLoRATrainer:
                 "schedule_type": (["constant", "cosine"], {"default": "constant"}),
                 "latent_mixup_alpha": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0}),
                 "latent_noise_sigma": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.1}),
+                "gradient_checkpointing": ("BOOLEAN", {"default": False}),
+                "blocks_to_swap": ("INT", {"default": 0, "min": 0, "max": 54, "tooltip": "Number of transformer blocks to offload to CPU (0=disabled). Saves VRAM at the cost of speed."}),
                 "resume_from": ("STRING", {"default": ""}),
             },
         }
@@ -479,6 +481,7 @@ class FoleyLoRATrainer:
               init_mode="standard", use_rslora=False, lora_dropout=0.0,
               lora_plus_ratio=1.0, schedule_type="constant",
               latent_mixup_alpha=0.0, latent_noise_sigma=0.0,
+              gradient_checkpointing=False, blocks_to_swap=0,
               resume_from=""):
 
         import random
@@ -494,7 +497,8 @@ class FoleyLoRATrainer:
             timestep_mode, precision, seed, device, dtype,
             logit_normal_sigma, curriculum_switch, init_mode, use_rslora,
             lora_dropout, lora_plus_ratio, schedule_type,
-            latent_mixup_alpha, latent_noise_sigma, resume_from,
+            latent_mixup_alpha, latent_noise_sigma,
+            gradient_checkpointing, blocks_to_swap, resume_from,
         )
 
     def _train_inner(self, hunyuan_model, hunyuan_deps, data_dir, output_dir, target, rank,
@@ -502,7 +506,8 @@ class FoleyLoRATrainer:
                      timestep_mode, precision, seed, device, dtype,
                      logit_normal_sigma, curriculum_switch, init_mode, use_rslora,
                      lora_dropout, lora_plus_ratio, schedule_type,
-                     latent_mixup_alpha, latent_noise_sigma, resume_from):
+                     latent_mixup_alpha, latent_noise_sigma,
+                     gradient_checkpointing, blocks_to_swap, resume_from):
         import random
 
         torch.manual_seed(seed)
@@ -524,6 +529,16 @@ class FoleyLoRATrainer:
         model = copy.deepcopy(hunyuan_model)
         model.to(device=device, dtype=dtype)
         model.train()
+
+        # VRAM offload strategies
+        if gradient_checkpointing:
+            model.gradient_checkpoint = True
+            model.gradient_checkpoint_layers = -1  # all layers
+            logger.info("Gradient checkpointing enabled for all layers")
+
+        if blocks_to_swap > 0:
+            model.block_swap(blocks_to_swap, use_non_blocking=True, prefetch_blocks=2)
+            logger.info(f"BlockSwap enabled: {blocks_to_swap} blocks offloaded to CPU with prefetch=2")
 
         target_suffixes = FOLEY_TARGET_PRESETS[target]
         n_wrapped = apply_lora(
@@ -594,6 +609,8 @@ class FoleyLoRATrainer:
             "schedule_type": schedule_type,
             "latent_mixup_alpha": latent_mixup_alpha,
             "latent_noise_sigma": latent_noise_sigma,
+            "gradient_checkpointing": gradient_checkpointing,
+            "blocks_to_swap": blocks_to_swap,
             "n_clips": n_clips, "precision": precision, "seed": seed,
         }
 
@@ -884,6 +901,7 @@ class FoleyLoRAScheduler:
         "init_mode": "standard", "use_rslora": False, "lora_dropout": 0.0,
         "lora_plus_ratio": 1.0, "schedule_type": "constant",
         "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
+        "gradient_checkpointing": False, "blocks_to_swap": 0,
     }
 
     def _merge_config(self, base, experiment):
@@ -984,6 +1002,16 @@ class FoleyLoRAScheduler:
                     model = copy.deepcopy(hunyuan_model)
                     model.to(device=device, dtype=dtype)
                     model.train()
+
+                    # VRAM offload strategies
+                    if config.get("gradient_checkpointing", False):
+                        model.gradient_checkpoint = True
+                        model.gradient_checkpoint_layers = -1
+                        logger.info(f"[{exp_id}] Gradient checkpointing enabled")
+
+                    if config.get("blocks_to_swap", 0) > 0:
+                        model.block_swap(config["blocks_to_swap"], use_non_blocking=True, prefetch_blocks=2)
+                        logger.info(f"[{exp_id}] BlockSwap: {config['blocks_to_swap']} blocks offloaded with prefetch=2")
 
                     target_suffixes = FOLEY_TARGET_PRESETS[config["target"]]
                     n_wrapped = apply_lora(

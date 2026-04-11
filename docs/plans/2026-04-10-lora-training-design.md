@@ -385,3 +385,40 @@ Optimized for maximum quality on high-VRAM hardware:
 
 Step 0 (base model) eval sounds like generic audio. By step 500, temporal structure
 matches reference. By step 1000, spectral characteristics are converging.
+
+### Third Sweep Results (rank128, standard LR, 10k steps, 99 training pairs)
+
+**Experiments:** r128_10k (constant LR), r128_cosine_10k (cosine decay), r128_lr5e5
+(half LR), r128_curriculum (curriculum timestep sampling), r128_dropout, r256_10k.
+
+**Key comparison — constant vs cosine vs curriculum at 10k steps:**
+
+| Metric | r128_10k (constant) | r128_cosine_10k | r128_curriculum |
+|--------|--------------------|-----------------|-----------------| 
+| SC | 1.05 | 1.13 | **0.99** |
+| MCD | 18.1 | 18.5 | **17.9** |
+| PBC | 0.70 | 0.64 | **0.71** |
+| LSD | **37.2 dB** | 37.7 dB | **36.6 dB** |
+| Loss | **1.087** | 1.215 | 1.083 |
+
+**Progression — constant LR peaks at 7k then regresses, curriculum keeps improving:**
+
+| Step | SC (constant) | SC (curriculum) | MCD (constant) | MCD (curriculum) |
+|------|--------------|----------------|---------------|-----------------|
+| 4k | 1.09 | 1.14 | 18.3 | 18.8 |
+| 7k | **1.04** | 1.10 | **17.5** | 17.6 |
+| 9k | 1.01 | 1.03 | 18.0 | 17.9 |
+| 10k | 1.05 ↑ | **0.99** ↓ | 18.1 ↑ | **17.9** ↓ |
+
+**Findings:**
+
+1. **Curriculum is the best config so far** — first to break SC < 1.0, still improving at 10k.
+   The late-stage switch to uniform timesteps prevents the mild overfitting that hits constant LR.
+2. **Constant LR peaks at ~7k steps** — best SC 1.04, MCD 17.5, PBC 0.72 at step 7k,
+   then metrics regress slightly by 10k. Suggests 7-8k is the sweet spot for constant LR.
+3. **Cosine decay hurts** — LR decays too fast, model stops learning by step 6k. Wasted
+   the last 4k steps at near-zero LR.
+4. **Half LR (5e-5) too slow** — at 8k steps it's where 1e-4 was at 4k. Same destination,
+   double the compute. No advantage.
+5. **LoRA+ (sweep 2) overfits on this dataset** — loss drops below noise floor (0.5),
+   sounds mechanical on some inputs, pure noise on others. Standard LR generalizes better.

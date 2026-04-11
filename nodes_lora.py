@@ -902,6 +902,7 @@ class FoleyLoRAScheduler:
         "lora_plus_ratio": 1.0, "schedule_type": "constant",
         "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
         "gradient_checkpointing": False, "blocks_to_swap": 0,
+        "resume_from": "",
     }
 
     def _merge_config(self, base, experiment):
@@ -1048,6 +1049,20 @@ class FoleyLoRAScheduler:
 
                     lr_sched = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
+                    # Resume from checkpoint
+                    start_step = 0
+                    resume_path = config.get("resume_from", "")
+                    if resume_path and os.path.exists(resume_path):
+                        ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
+                        load_lora(model, ckpt["state_dict"])
+                        if "optimizer" in ckpt:
+                            optimizer.load_state_dict(ckpt["optimizer"])
+                        if "scheduler" in ckpt:
+                            lr_sched.load_state_dict(ckpt["scheduler"])
+                        start_step = ckpt.get("step", 0)
+                        logger.info(f"[{exp_id}] Resumed from step {start_step}: {resume_path}")
+                        del ckpt
+
                     import random
                     torch.manual_seed(config["seed"])
                     random.seed(config["seed"])
@@ -1055,9 +1070,23 @@ class FoleyLoRAScheduler:
 
                     losses = []
                     metrics_history = []
+
+                    # Load existing loss/metrics history when resuming
+                    if start_step > 0:
+                        loss_file = exp_dir / "loss_history.json"
+                        if loss_file.exists():
+                            with open(loss_file) as f:
+                                losses = json.load(f)
+                            logger.info(f"[{exp_id}] Loaded {len(losses)} loss entries from previous run")
+                        metrics_file = exp_dir / "metrics_history.json"
+                        if metrics_file.exists():
+                            with open(metrics_file) as f:
+                                metrics_history = json.load(f)
+                            logger.info(f"[{exp_id}] Loaded {len(metrics_history)} metrics entries from previous run")
+
                     n_clips = len(dataset)
                     t_start = time.time()
-                    pbar_train = comfy.utils.ProgressBar(config["steps"])
+                    pbar_train = comfy.utils.ProgressBar(config["steps"] - start_step)
 
                     # Load reference audio for metrics
                     ref_entry = dataset[0]
@@ -1078,23 +1107,24 @@ class FoleyLoRAScheduler:
                             _save_spectrogram(ref_wav_np, 48000, samples_dir_ref / "reference")
                             break
 
-                    # Step-0 eval: generate sample before any training
+                    # Step-0 eval: generate sample before any training (skip if resuming)
                     samples_dir_0 = exp_dir / "samples"
                     samples_dir_0.mkdir(exist_ok=True)
-                    model.eval()
-                    wav0, sr0 = generate_eval_sample(
-                        model, hunyuan_deps.dac_model, dataset[0], device, dtype,
-                    )
-                    wav0_mono = wav0.squeeze()
-                    wav0_t = torch.from_numpy(wav0)
-                    if wav0_t.ndim == 1:
-                        wav0_t = wav0_t.unsqueeze(0)
-                    _save_wav(samples_dir_0 / "step_00000.wav", wav0_t, sr0)
-                    _save_spectrogram(wav0_mono, sr0, samples_dir_0 / "step_00000")
-                    logger.info(f"[{exp_id}] Step 0 eval sample saved")
+                    if start_step == 0:
+                        model.eval()
+                        wav0, sr0 = generate_eval_sample(
+                            model, hunyuan_deps.dac_model, dataset[0], device, dtype,
+                        )
+                        wav0_mono = wav0.squeeze()
+                        wav0_t = torch.from_numpy(wav0)
+                        if wav0_t.ndim == 1:
+                            wav0_t = wav0_t.unsqueeze(0)
+                        _save_wav(samples_dir_0 / "step_00000.wav", wav0_t, sr0)
+                        _save_spectrogram(wav0_mono, sr0, samples_dir_0 / "step_00000")
+                        logger.info(f"[{exp_id}] Step 0 eval sample saved")
 
-                    # Step-0 validation eval (external sample)
-                    if val_entry is not None:
+                    # Step-0 validation eval (skip if resuming)
+                    if start_step == 0 and val_entry is not None:
                         wav0v, sr0v = generate_eval_sample(
                             model, hunyuan_deps.dac_model, val_entry, device, dtype,
                         )
@@ -1110,7 +1140,7 @@ class FoleyLoRAScheduler:
 
                     model.train()
 
-                    for step in range(config["steps"]):
+                    for step in range(start_step, config["steps"]):
                         # Skip flag
                         skip_flag = output_root / "skip_current.flag"
                         if skip_flag.exists():
@@ -1166,7 +1196,7 @@ class FoleyLoRAScheduler:
                                 smoothed=_smooth_losses(losses),
                             )
                             pbar_train.update_absolute(
-                                step + 1, config["steps"],
+                                step + 1 - start_step, config["steps"] - start_step,
                                 ("JPEG", preview_img, 800),
                             )
 

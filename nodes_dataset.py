@@ -634,7 +634,7 @@ class FoleyDatasetQualityFilter:
                 if sr != 48000:
                     mono = torchaudio.functional.resample(mono, sr, 48000)
                 audio_inputs = clap_processor(
-                    audios=[mono.squeeze(0).numpy()],
+                    audio=[mono.squeeze(0).numpy()],
                     sampling_rate=48000,
                     return_tensors="pt",
                 )
@@ -887,7 +887,7 @@ class FoleyVideoQualityFilter:
                 if sr != 48000:
                     mono = torchaudio.functional.resample(mono, sr, 48000)
                 audio_inputs = clap_processor(
-                    audios=[mono.squeeze(0).numpy()],
+                    audio=[mono.squeeze(0).numpy()],
                     sampling_rate=48000,
                     return_tensors="pt",
                 )

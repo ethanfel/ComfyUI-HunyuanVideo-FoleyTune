@@ -164,13 +164,14 @@ def slice_features_for_chunk(features: dict, t_start: float, t_end: float):
     # Each segment produces 8 output tokens
     # Map time to segment indices
     seg_stride_s = 8.0 / 25.0   # 0.32s per segment stride
+    total_sync_tokens = features["sync_feat"].shape[1]
     seg_start = max(0, int(t_start / seg_stride_s))
     seg_end = max(seg_start + 1, int(t_end / seg_stride_s))
     # Convert segment indices to token indices (8 tokens per segment)
     tok_start = seg_start * 8
-    tok_end = seg_end * 8
+    tok_end = min(seg_end * 8, total_sync_tokens)  # clamp to actual token count
     sync_feat = features["sync_feat"][:, tok_start:tok_end, :]
-    # Clamp to available tokens
+    # Ensure at least 8 tokens (one segment)
     if sync_feat.shape[1] == 0:
         sync_feat = features["sync_feat"][:, -8:, :]
 
@@ -241,6 +242,10 @@ def equal_power_crossfade(left, right, overlap_len, dim=-1):
     Returns:
         Stitched tensor with crossfaded overlap.
     """
+    # No overlap — pure concatenation
+    if overlap_len <= 0:
+        return torch.cat([left, right], dim=dim)
+
     t = torch.linspace(0, 1, overlap_len, device=left.device, dtype=left.dtype)
     # Reshape for broadcasting: add dims for batch and channel
     shape = [1] * left.ndim
@@ -328,13 +333,20 @@ def chunked_denoise_process(
             guidance_scale, num_inference_steps, batch_size, sampler, generator
         )
 
-    # --- Multi-chunk: set up scheduler and per-chunk latents ---
-    scheduler = FlowMatchDiscreteScheduler(
-        shift=cfg.diffusion_config.sample_flow_shift,
-        solver=sampler
-    )
-    scheduler.set_timesteps(num_inference_steps, device=device)
-    timesteps = scheduler.timesteps
+    # --- Multi-chunk: set up per-chunk schedulers and latents ---
+    # CRITICAL: each chunk needs its own scheduler instance because
+    # FlowMatchDiscreteScheduler.step() increments an internal _step_index.
+    # Sharing one scheduler across N chunks would advance the index N times
+    # per timestep, producing wrong sigma values for chunks after the first.
+    chunk_schedulers = []
+    for _ in chunks:
+        sched = FlowMatchDiscreteScheduler(
+            shift=cfg.diffusion_config.sample_flow_shift,
+            solver=sampler
+        )
+        sched.set_timesteps(num_inference_steps, device=device)
+        chunk_schedulers.append(sched)
+    timesteps = chunk_schedulers[0].timesteps  # all identical
 
     # Prepare per-chunk latents and features
     chunk_latents = []
@@ -342,13 +354,13 @@ def chunked_denoise_process(
     chunk_text_feats = []
     chunk_latent_lens = []
 
-    for t_start, t_end in chunks:
+    for c_idx, (t_start, t_end) in enumerate(chunks):
         chunk_dur = t_end - t_start
         latent_len = int(chunk_dur * audio_frame_rate)
         chunk_latent_lens.append(latent_len)
 
         latent = prepare_latents_with_generator(
-            scheduler, batch_size, latent_dim, latent_len,
+            chunk_schedulers[c_idx], batch_size, latent_dim, latent_len,
             target_dtype, device, generator
         )
         chunk_latents.append(latent)
@@ -433,7 +445,7 @@ def chunked_denoise_process(
                     uncond_pred, text_pred = noise_pred.chunk(2)
                     noise_pred = uncond_pred + guidance_scale * (text_pred - uncond_pred)
 
-                chunk_latents[c_idx] = scheduler.step(noise_pred, t, latents)[0]
+                chunk_latents[c_idx] = chunk_schedulers[c_idx].step(noise_pred, t, latents)[0]
                 pbar.update(1)
 
             # SaFa swap after all chunks are updated this step
@@ -448,20 +460,23 @@ def chunked_denoise_process(
     if crossfade_mode == "safa":
         # Assemble: take non-overlap from each chunk, overlap already consistent
         parts = []
+        # Use ceiling division for right side to avoid losing a frame on odd overlap
+        overlap_left = overlap_frames // 2
+        overlap_right = overlap_frames - overlap_left  # ceiling half
         for c_idx in range(len(chunks)):
             lat = chunk_latents[c_idx]
-            if c_idx == 0:
+            if overlap_frames == 0:
+                # No overlap — pure concatenation
+                parts.append(lat)
+            elif c_idx == 0:
                 # First chunk: keep everything except right half of overlap
-                if len(chunks) > 1:
-                    parts.append(lat[:, :, :-(overlap_frames // 2)])
-                else:
-                    parts.append(lat)
+                parts.append(lat[:, :, :-overlap_right])
             elif c_idx == len(chunks) - 1:
                 # Last chunk: skip left half of overlap
-                parts.append(lat[:, :, overlap_frames // 2:])
+                parts.append(lat[:, :, overlap_left:])
             else:
                 # Middle chunks: skip both halves of overlap
-                parts.append(lat[:, :, overlap_frames // 2:-(overlap_frames // 2)])
+                parts.append(lat[:, :, overlap_left:-overlap_right])
         full_latent = torch.cat(parts, dim=-1)
 
         with torch.inference_mode():

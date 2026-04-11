@@ -15,6 +15,8 @@ Typical chain:
       ↓ FOLEY_AUDIO_DATASET
   FoleyDatasetInspector       (optional)
       ↓ FOLEY_AUDIO_DATASET  +  STRING report
+  FoleyDatasetQualityFilter   (optional)
+      ↓ FOLEY_AUDIO_DATASET  +  STRING report
   FoleyDatasetSaver           (optional)
       ↓ STRING report
   FoleyDatasetItemExtractor   → AUDIO (bridges to standard nodes)
@@ -424,6 +426,260 @@ class FoleyDatasetInspector:
         report = "\n".join(lines)
         print(f"[FoleyDatasetInspector]\n{report}", flush=True)
         return (clean, report)
+
+
+# ─── Node 5b: Dataset Quality Filter ────────────────────────────────────────
+
+
+def _bandwidth_score(wav: torch.Tensor, sr: int) -> float:
+    """Score 0-1 based on effective audio bandwidth via spectral rolloff at 85%.
+
+    Maps rolloff >= 16 kHz -> 1.0, <= 4 kHz -> 0.0, linear between.
+    Detects bandwidth-limited or upsampled clips.
+    """
+    mono = wav[0].mean(0)
+    n_fft = 2048
+    hop = 512
+    if mono.shape[0] < n_fft:
+        return 0.0
+    window = torch.hann_window(n_fft, device=mono.device)
+    stft = torch.stft(mono, n_fft, hop, n_fft, window, return_complex=True)
+    power = stft.abs().pow(2).mean(-1)  # average over time -> [n_freqs]
+    freqs = torch.linspace(0, sr / 2, n_fft // 2 + 1, device=mono.device)
+    cumsum = torch.cumsum(power, dim=0)
+    total = cumsum[-1].clamp(min=1e-12)
+    rolloff_idx = torch.searchsorted(cumsum, 0.85 * total).item()
+    rolloff_hz = freqs[min(rolloff_idx, len(freqs) - 1)].item()
+    # Linear map: 4 kHz -> 0.0, 16 kHz -> 1.0
+    score = (rolloff_hz - 4000.0) / (16000.0 - 4000.0)
+    return max(0.0, min(1.0, score))
+
+
+def _spectral_quality_score(wav: torch.Tensor, sr: int) -> float:
+    """Score 0-1 based on spectral naturalness.
+
+    Average of three sub-metrics (each min-max scaled to 0-1):
+    - Spectral flatness: higher = more natural broadband content
+    - Temporal variance: higher = dynamic audio
+    - HF energy ratio: presence of high-frequency content
+    """
+    mono = wav[0].mean(0).numpy()
+    n_fft = 2048
+    hop = 512
+    n_frames = 1 + (len(mono) - n_fft) // hop
+    if n_frames < 1:
+        return 0.0
+
+    window = np.hanning(n_fft)
+    frames = np.stack([mono[i * hop: i * hop + n_fft] * window for i in range(n_frames)])
+    spec = np.abs(np.fft.rfft(frames, n=n_fft))
+    power = spec ** 2
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+
+    total_energy = power.sum()
+    if total_energy < 1e-10:
+        return 0.0
+
+    # Spectral flatness (Wiener entropy) — typical range 0.0001-0.1 for audio
+    mean_power = power.mean(axis=0) + 1e-10
+    geo_mean = np.exp(np.mean(np.log(mean_power)))
+    arith_mean = np.mean(mean_power)
+    flatness = geo_mean / (arith_mean + 1e-10)
+    # Map: 0.0 -> 0.0, 0.05+ -> 1.0 (over-cleaned audio has flatness < 0.001)
+    flatness_score = min(1.0, flatness / 0.05)
+
+    # Temporal variance (CoV of frame RMS) — typical range 0.1-2.0
+    frame_rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    mean_rms = frame_rms.mean()
+    temporal_var = frame_rms.std() / (mean_rms + 1e-10)
+    # Map: 0.0 -> 0.0, 0.5+ -> 1.0
+    temporal_score = min(1.0, temporal_var / 0.5)
+
+    # HF energy ratio (>4kHz) — typical range 0.01-0.3
+    hf_mask = freqs > 4000
+    hf_ratio = float(power[:, hf_mask].sum() / total_energy)
+    # Map: 0.0 -> 0.0, 0.1+ -> 1.0
+    hf_score = min(1.0, hf_ratio / 0.1)
+
+    return (flatness_score + temporal_score + hf_score) / 3.0
+
+
+class FoleyDatasetQualityFilter:
+    """Research-backed quality scoring and filtering for Foley audio datasets.
+
+    Computes three quality sub-scores per clip:
+    - Bandwidth: effective audio bandwidth via spectral rolloff
+    - Spectral quality: naturalness via flatness, temporal variance, HF energy
+    - CLAP similarity: text-audio alignment (optional, requires clap_prompt)
+
+    Clips are rejected if their composite score or any individual sub-score
+    falls below the configured thresholds.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "dataset": (FOLEY_AUDIO_DATASET,),
+                "min_quality_score": ("FLOAT", {
+                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Minimum composite quality score to pass.",
+                }),
+                "skip_rejected": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "If True, rejected clips are removed from output.",
+                }),
+            },
+            "optional": {
+                "clap_prompt": ("STRING", {
+                    "default": "",
+                    "tooltip": "Global text prompt for CLAP similarity. Empty = skip CLAP.",
+                }),
+                "min_bandwidth_score": ("FLOAT", {
+                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Minimum bandwidth sub-score (~0.3 = 7.5 kHz effective).",
+                }),
+                "min_spectral_score": ("FLOAT", {
+                    "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Minimum spectral quality sub-score.",
+                }),
+                "min_clap_score": ("FLOAT", {
+                    "default": 0.1, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Minimum CLAP similarity sub-score (per GenAU paper).",
+                }),
+                "weight_bandwidth": ("FLOAT", {
+                    "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1,
+                    "tooltip": "Weight of bandwidth score in composite.",
+                }),
+                "weight_spectral": ("FLOAT", {
+                    "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1,
+                    "tooltip": "Weight of spectral quality score in composite.",
+                }),
+                "weight_clap": ("FLOAT", {
+                    "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.1,
+                    "tooltip": "Weight of CLAP similarity score in composite.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = (FOLEY_AUDIO_DATASET, "STRING")
+    RETURN_NAMES = ("dataset", "report")
+    FUNCTION = "filter_quality"
+    CATEGORY = FOLEY_DS_CATEGORY
+    DESCRIPTION = (
+        "Research-backed quality filtering: scores clips on effective bandwidth, "
+        "spectral naturalness, and optional CLAP text-audio similarity. "
+        "Rejects clips below quality thresholds."
+    )
+
+    def filter_quality(self, dataset, min_quality_score: float,
+                       skip_rejected: bool, clap_prompt: str = "",
+                       min_bandwidth_score: float = 0.3,
+                       min_spectral_score: float = 0.2,
+                       min_clap_score: float = 0.1,
+                       weight_bandwidth: float = 0.4,
+                       weight_spectral: float = 0.4,
+                       weight_clap: float = 0.2):
+        use_clap = bool(clap_prompt.strip())
+        clap_model = None
+        clap_processor = None
+        text_embed = None
+
+        if use_clap:
+            from transformers import ClapModel, ClapProcessor
+            print("[QualityFilter] Loading CLAP model for text-audio scoring...",
+                  flush=True)
+            clap_model = ClapModel.from_pretrained("laion/larger_clap_general")
+            clap_processor = ClapProcessor.from_pretrained("laion/larger_clap_general")
+            clap_model.eval()
+            # Pre-compute text embedding once
+            text_inputs = clap_processor(
+                text=[clap_prompt], return_tensors="pt", padding=True
+            )
+            with torch.no_grad():
+                text_embed = clap_model.get_text_features(**text_inputs)
+                text_embed = text_embed / text_embed.norm(dim=-1, keepdim=True)
+
+        # Normalize weights
+        if use_clap:
+            w_total = weight_bandwidth + weight_spectral + weight_clap
+        else:
+            w_total = weight_bandwidth + weight_spectral
+        if w_total < 1e-8:
+            w_total = 1.0
+        w_bw = weight_bandwidth / w_total
+        w_sq = weight_spectral / w_total
+        w_cl = (weight_clap / w_total) if use_clap else 0.0
+
+        passed = []
+        rejected = []
+        lines = ["=== Quality Filter Report ==="]
+        scores_all = []
+
+        for item in dataset:
+            wav = item["waveform"]
+            sr = item["sample_rate"]
+            name = item["name"]
+
+            bw = _bandwidth_score(wav, sr)
+            sq = _spectral_quality_score(wav, sr)
+
+            cl = None
+            if use_clap:
+                # Resample to 48 kHz for CLAP if needed
+                mono = wav[0].mean(0, keepdim=True)  # [1, L]
+                if sr != 48000:
+                    mono = torchaudio.functional.resample(mono, sr, 48000)
+                audio_inputs = clap_processor(
+                    audios=[mono.squeeze(0).numpy()],
+                    sampling_rate=48000,
+                    return_tensors="pt",
+                )
+                with torch.no_grad():
+                    audio_embed = clap_model.get_audio_features(**audio_inputs)
+                    audio_embed = audio_embed / audio_embed.norm(dim=-1, keepdim=True)
+                cl = float((audio_embed @ text_embed.T).squeeze())
+
+            # Composite score
+            composite = w_bw * bw + w_sq * sq
+            if cl is not None:
+                composite += w_cl * cl
+            scores_all.append(composite)
+
+            # Check rejection reasons
+            reasons = []
+            if composite < min_quality_score:
+                reasons.append(f"below {min_quality_score:.2f}")
+            if bw < min_bandwidth_score:
+                reasons.append(f"bandwidth < {min_bandwidth_score:.2f}")
+            if sq < min_spectral_score:
+                reasons.append(f"spectral < {min_spectral_score:.2f}")
+            if cl is not None and cl < min_clap_score:
+                reasons.append(f"CLAP < {min_clap_score:.2f}")
+
+            cl_str = f"{cl:.2f}" if cl is not None else "--"
+            status = "PASS" if not reasons else f"REJECT: {', '.join(reasons)}"
+            lines.append(
+                f"  {name}: BW={bw:.2f} SQ={sq:.2f} CLAP={cl_str} "
+                f"SCORE={composite:.2f} [{status}]"
+            )
+
+            if reasons:
+                rejected.append(name)
+                if not skip_rejected:
+                    passed.append(item)
+            else:
+                passed.append(item)
+
+        avg_score = sum(scores_all) / len(scores_all) if scores_all else 0.0
+        lines.append("---")
+        lines.append(
+            f"Passed: {len(passed)}/{len(dataset)} | "
+            f"Rejected: {len(rejected)} | Avg score: {avg_score:.2f}"
+        )
+        report = "\n".join(lines)
+        print(f"[FoleyDatasetQualityFilter]\n{report}", flush=True)
+        return (passed, report)
 
 
 # ─── Node 6: Dataset HF Smoother (batch) ─────────────────────────────────────
@@ -1323,6 +1579,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyDatasetLUFSNormalizer": FoleyDatasetLUFSNormalizer,
     "FoleyDatasetCompressor": FoleyDatasetCompressor,
     "FoleyDatasetInspector": FoleyDatasetInspector,
+    "FoleyDatasetQualityFilter": FoleyDatasetQualityFilter,
     "FoleyDatasetHfSmoother": FoleyDatasetHfSmoother,
     "FoleyDatasetAugmenter": FoleyDatasetAugmenter,
     "FoleyDatasetSaver": FoleyDatasetSaver,
@@ -1340,6 +1597,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyDatasetLUFSNormalizer": "Foley Dataset LUFS Normalizer",
     "FoleyDatasetCompressor": "Foley Dataset Compressor",
     "FoleyDatasetInspector": "Foley Dataset Inspector",
+    "FoleyDatasetQualityFilter": "Foley Dataset Quality Filter",
     "FoleyDatasetHfSmoother": "Foley Dataset HF Smoother",
     "FoleyDatasetAugmenter": "Foley Dataset Augmenter",
     "FoleyDatasetSaver": "Foley Dataset Saver",

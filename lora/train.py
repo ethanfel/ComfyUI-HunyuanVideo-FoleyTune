@@ -139,6 +139,67 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16):
     return dataset
 
 
+def prepare_single_entry(npz_path: str, dac_model, device, dtype=torch.bfloat16):
+    """Load a single NPZ + its audio file and DAC-encode it.
+
+    Same format as prepare_dataset entries but for a single file (e.g. validation).
+    The audio file must be alongside the NPZ with matching stem.
+    """
+    npz_path = Path(npz_path)
+    if not npz_path.exists():
+        raise FileNotFoundError(f"NPZ not found: {npz_path}")
+
+    stem = npz_path.stem
+    parent = npz_path.parent
+
+    audio_path = None
+    for ext in (".wav", ".flac", ".ogg", ".aiff", ".aif"):
+        candidate = parent / f"{stem}{ext}"
+        if candidate.exists():
+            audio_path = candidate
+            break
+    if audio_path is None:
+        raise FileNotFoundError(f"No audio file found for {stem} in {parent}")
+
+    data = np.load(str(npz_path), allow_pickle=True)
+    clip_features = torch.from_numpy(data["clip_features"]).float()
+    sync_features = torch.from_numpy(data["sync_features"]).float()
+    text_embedding = torch.from_numpy(data["text_embedding"]).float()
+    prompt = str(data.get("prompt", stem))
+
+    wav_np, sr = sf.read(str(audio_path))
+    if wav_np.ndim == 1:
+        wav_np = wav_np[:, None]
+    if sr != 48000:
+        wav_np = soxr.resample(wav_np, sr, 48000, quality="VHQ")
+    waveform = torch.from_numpy(wav_np.T).float()
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+
+    dac_model.to(device)
+    with torch.no_grad():
+        audio_input = waveform.unsqueeze(0).to(device=device, dtype=torch.float32)
+        z_dist, _, _, _, _ = dac_model.encode(audio_input)
+        latents = z_dist.sample().cpu().float()
+    dac_model.cpu()
+    torch.cuda.empty_cache()
+
+    # Pad sync to multiple of 8
+    sync_len = sync_features.shape[1]
+    pad_sync = ((sync_len + 7) // 8) * 8 - sync_len
+    if pad_sync > 0:
+        sync_features = F.pad(sync_features, (0, 0, 0, pad_sync))
+
+    return {
+        "latents": latents,
+        "clip_features": clip_features,
+        "sync_features": sync_features,
+        "text_embedding": text_embedding,
+        "prompt": prompt,
+        "name": stem,
+    }
+
+
 # -- Timestep sampling -------------------------------------------------------
 
 def sample_timesteps(batch_size, mode, device, dtype,

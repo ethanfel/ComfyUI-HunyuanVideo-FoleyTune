@@ -23,7 +23,7 @@ from .lora.lora import (
     FOLEY_TARGET_PRESETS, LoRALinear,
 )
 from .lora.train import (
-    prepare_dataset, sample_timesteps, flow_matching_loss,
+    prepare_dataset, prepare_single_entry, sample_timesteps, flow_matching_loss,
     generate_eval_sample, save_checkpoint, save_meta_json,
 )
 from .lora.spectral_metrics import spectral_metrics, reference_metrics, clap_similarity
@@ -927,6 +927,32 @@ class FoleyLoRAScheduler:
         logger.info(f"Preparing shared dataset from {data_dir}...")
         dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype)
 
+        # Load optional validation sample (external NPZ not in training set)
+        val_entry = None
+        val_ref_wav = None
+        eval_npz = sweep.get("eval_npz") or base_config.get("eval_npz")
+        if eval_npz and os.path.exists(eval_npz):
+            logger.info(f"Loading validation sample from {eval_npz}...")
+            val_entry = prepare_single_entry(eval_npz, hunyuan_deps.dac_model, device, dtype)
+            # Load reference audio for val spectrogram
+            val_stem = Path(eval_npz).stem
+            val_parent = Path(eval_npz).parent
+            for ext in (".flac", ".wav", ".ogg"):
+                candidate = val_parent / f"{val_stem}{ext}"
+                if candidate.exists():
+                    import soundfile as _sf
+                    _raw, _sr = _sf.read(str(candidate))
+                    if _raw.ndim > 1:
+                        _raw = _raw.mean(axis=1)
+                    if _sr != 48000:
+                        import soxr as _soxr
+                        _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
+                    val_ref_wav = _raw
+                    break
+            logger.info(f"Validation sample loaded: {val_entry['name']}")
+        elif eval_npz:
+            logger.warning(f"eval_npz path not found, skipping validation sample: {eval_npz}")
+
         # Collect loss histories for comparison chart
         all_loss_histories = {}
 
@@ -1038,6 +1064,22 @@ class FoleyLoRAScheduler:
                     _save_wav(samples_dir_0 / "step_00000.wav", wav0_t, sr0)
                     _save_spectrogram(wav0_mono, sr0, samples_dir_0 / "step_00000")
                     logger.info(f"[{exp_id}] Step 0 eval sample saved")
+
+                    # Step-0 validation eval (external sample)
+                    if val_entry is not None:
+                        wav0v, sr0v = generate_eval_sample(
+                            model, hunyuan_deps.dac_model, val_entry, device, dtype,
+                        )
+                        wav0v_mono = wav0v.squeeze()
+                        wav0v_t = torch.from_numpy(wav0v)
+                        if wav0v_t.ndim == 1:
+                            wav0v_t = wav0v_t.unsqueeze(0)
+                        _save_wav(samples_dir_0 / "val_step_00000.wav", wav0v_t, sr0v)
+                        _save_spectrogram(wav0v_mono, sr0v, samples_dir_0 / "val_step_00000")
+                        if val_ref_wav is not None:
+                            _save_spectrogram(val_ref_wav, 48000, samples_dir_0 / "val_reference")
+                        logger.info(f"[{exp_id}] Step 0 val sample saved")
+
                     model.train()
 
                     for step in range(config["steps"]):
@@ -1128,6 +1170,19 @@ class FoleyLoRAScheduler:
                             metrics_history.append(step_metrics)
                             with open(exp_dir / "metrics_history.json", "w") as _mf:
                                 json.dump(metrics_history, _mf, indent=2)
+
+                            # Validation sample (external)
+                            if val_entry is not None:
+                                wav_v, sr_v = generate_eval_sample(
+                                    model, hunyuan_deps.dac_model, val_entry, device, dtype,
+                                )
+                                wav_v_mono = wav_v.squeeze()
+                                wav_v_t = torch.from_numpy(wav_v)
+                                if wav_v_t.ndim == 1:
+                                    wav_v_t = wav_v_t.unsqueeze(0)
+                                _save_wav(samples_dir / f"val_step_{step+1:05d}.wav", wav_v_t, sr_v)
+                                _save_spectrogram(wav_v_mono, sr_v, samples_dir / f"val_step_{step+1:05d}")
+
                             model.train()
 
                             logger.info(f"[{exp_id}] Step {step+1}: "

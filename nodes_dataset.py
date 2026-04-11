@@ -451,8 +451,8 @@ def _bandwidth_score(wav: torch.Tensor, sr: int) -> float:
     total = cumsum[-1].clamp(min=1e-12)
     rolloff_idx = torch.searchsorted(cumsum, 0.85 * total).item()
     rolloff_hz = freqs[min(rolloff_idx, len(freqs) - 1)].item()
-    # Linear map: 4 kHz -> 0.0, 16 kHz -> 1.0
-    score = (rolloff_hz - 4000.0) / (16000.0 - 4000.0)
+    # Linear map: 2 kHz -> 0.0, 16 kHz -> 1.0
+    score = (rolloff_hz - 2000.0) / (16000.0 - 2000.0)
     return max(0.0, min(1.0, score))
 
 
@@ -538,7 +538,7 @@ class FoleyDatasetQualityFilter:
                 }),
                 "min_bandwidth_score": ("FLOAT", {
                     "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Minimum bandwidth sub-score (~0.3 = 7.5 kHz effective).",
+                    "tooltip": "Minimum bandwidth sub-score (~0.3 = 6.2 kHz effective).",
                 }),
                 "min_spectral_score": ("FLOAT", {
                     "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05,
@@ -761,7 +761,7 @@ class FoleyVideoQualityFilter:
                 }),
                 "min_bandwidth_score": ("FLOAT", {
                     "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Minimum bandwidth sub-score (~0.3 = 7.5 kHz effective).",
+                    "tooltip": "Minimum bandwidth sub-score (~0.3 = 6.2 kHz effective).",
                 }),
                 "min_spectral_score": ("FLOAT", {
                     "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05,

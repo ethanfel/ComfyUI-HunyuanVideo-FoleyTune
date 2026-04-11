@@ -763,6 +763,14 @@ class FoleyVideoQualityFilter:
                     "default": "",
                     "tooltip": "Global text prompt for CLAP similarity. Empty = skip CLAP.",
                 }),
+                "clap_negative_prompt": ("STRING", {
+                    "default": "",
+                    "tooltip": "Reject clips matching this description (e.g. 'voice, speech, talking'). Empty = skip.",
+                }),
+                "max_negative_clap_score": ("FLOAT", {
+                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Reject clips scoring above this against the negative prompt.",
+                }),
                 "min_bandwidth_score": ("FLOAT", {
                     "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "Minimum bandwidth sub-score (~0.3 = 6.2 kHz effective).",
@@ -802,6 +810,8 @@ class FoleyVideoQualityFilter:
     def filter_videos(self, video_folder: str, min_quality_score: float,
                       skip_rejected: bool, output_folder: str = "",
                       clap_prompt: str = "",
+                      clap_negative_prompt: str = "",
+                      max_negative_clap_score: float = 0.3,
                       min_bandwidth_score: float = 0.3,
                       min_spectral_score: float = 0.2,
                       min_clap_score: float = 0.1,
@@ -825,23 +835,35 @@ class FoleyVideoQualityFilter:
 
         # CLAP setup
         use_clap = bool(clap_prompt.strip())
+        use_neg_clap = bool(clap_negative_prompt.strip())
         clap_model = None
         clap_processor = None
         text_embed = None
-        if use_clap:
+        neg_text_embed = None
+        if use_clap or use_neg_clap:
             from transformers import ClapModel, ClapProcessor
             print("[VideoQualityFilter] Loading CLAP model...", flush=True)
             clap_model = ClapModel.from_pretrained("laion/larger_clap_general")
             clap_processor = ClapProcessor.from_pretrained("laion/larger_clap_general")
             clap_model.eval()
-            text_inputs = clap_processor(
-                text=[clap_prompt], return_tensors="pt", padding=True
-            )
-            with torch.no_grad():
-                text_embed = clap_model.get_text_features(**text_inputs)
-                if not isinstance(text_embed, torch.Tensor):
-                    text_embed = text_embed.pooler_output
-                text_embed = text_embed / text_embed.norm(dim=-1, keepdim=True)
+            if use_clap:
+                text_inputs = clap_processor(
+                    text=[clap_prompt], return_tensors="pt", padding=True
+                )
+                with torch.no_grad():
+                    text_embed = clap_model.get_text_features(**text_inputs)
+                    if not isinstance(text_embed, torch.Tensor):
+                        text_embed = text_embed.pooler_output
+                    text_embed = text_embed / text_embed.norm(dim=-1, keepdim=True)
+            if use_neg_clap:
+                neg_inputs = clap_processor(
+                    text=[clap_negative_prompt], return_tensors="pt", padding=True
+                )
+                with torch.no_grad():
+                    neg_text_embed = clap_model.get_text_features(**neg_inputs)
+                    if not isinstance(neg_text_embed, torch.Tensor):
+                        neg_text_embed = neg_text_embed.pooler_output
+                    neg_text_embed = neg_text_embed / neg_text_embed.norm(dim=-1, keepdim=True)
 
         # Normalize weights
         if use_clap:
@@ -882,7 +904,9 @@ class FoleyVideoQualityFilter:
             sq = _spectral_quality_score(wav, sr)
 
             cl = None
-            if use_clap:
+            neg_cl = None
+            audio_embed = None
+            if use_clap or use_neg_clap:
                 mono = wav[0].mean(0, keepdim=True)
                 if sr != 48000:
                     mono = torchaudio.functional.resample(mono, sr, 48000)
@@ -896,7 +920,10 @@ class FoleyVideoQualityFilter:
                     if not isinstance(audio_embed, torch.Tensor):
                         audio_embed = audio_embed.pooler_output
                     audio_embed = audio_embed / audio_embed.norm(dim=-1, keepdim=True)
-                cl = float((audio_embed @ text_embed.T).squeeze())
+                if use_clap:
+                    cl = float((audio_embed @ text_embed.T).squeeze())
+                if use_neg_clap:
+                    neg_cl = float((audio_embed @ neg_text_embed.T).squeeze())
 
             composite = w_bw * bw + w_sq * sq
             if cl is not None:
@@ -913,15 +940,18 @@ class FoleyVideoQualityFilter:
                 reasons.append(f"spectral < {min_spectral_score:.2f}")
             if cl is not None and cl < min_clap_score:
                 reasons.append(f"CLAP < {min_clap_score:.2f}")
+            if neg_cl is not None and neg_cl > max_negative_clap_score:
+                reasons.append(f"NEG_CLAP {neg_cl:.2f} > {max_negative_clap_score:.2f}")
 
             cl_str = f"{cl:.2f}" if cl is not None else "--"
+            neg_cl_str = f"{neg_cl:.2f}" if neg_cl is not None else "--"
             passed = not reasons
 
             if passed:
                 n_passed += 1
                 lines.append(
                     f"  PASS    {rel} ({duration:.1f}s): "
-                    f"BW={bw:.2f} SQ={sq:.2f} CLAP={cl_str} SCORE={composite:.2f}"
+                    f"BW={bw:.2f} SQ={sq:.2f} CLAP={cl_str} NEG={neg_cl_str} SCORE={composite:.2f}"
                 )
                 if do_copy:
                     dst = out_dir / rel
@@ -932,7 +962,7 @@ class FoleyVideoQualityFilter:
                 status = f"REJECT: {', '.join(reasons)}"
                 lines.append(
                     f"  {status}  {rel} ({duration:.1f}s): "
-                    f"BW={bw:.2f} SQ={sq:.2f} CLAP={cl_str} SCORE={composite:.2f}"
+                    f"BW={bw:.2f} SQ={sq:.2f} CLAP={cl_str} NEG={neg_cl_str} SCORE={composite:.2f}"
                 )
                 if do_copy and not skip_rejected:
                     dst = out_dir / rel

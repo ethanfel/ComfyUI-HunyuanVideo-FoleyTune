@@ -253,8 +253,8 @@ def denoise_process_with_generator(
         latents_dec = latents.to(device=dac_weight.device, dtype=dac_weight.dtype)
         audio = model_dict.dac_model.decode(latents_dec)
 
-    # Trim to exact length
-    audio = audio[:, :int(audio_len_in_s * model_dict.dac_model.sample_rate)]
+    # Trim to exact length (DAC output is [B, 1, T])
+    audio = audio[:, :, :int(audio_len_in_s * model_dict.dac_model.sample_rate)]
     return audio, model_dict.dac_model.sample_rate
 
 
@@ -320,6 +320,17 @@ def compute_chunk_boundaries(duration: float, chunk_duration: float, overlap_sec
         if t_end >= duration:
             break
         t_start += stride
+
+    # Merge tiny last chunk into previous to avoid wasting a full forward pass
+    # on a chunk that's mostly overlap with little unique content
+    if len(chunks) >= 2:
+        last_dur = chunks[-1][1] - chunks[-1][0]
+        if last_dur < overlap_seconds + 0.5:
+            # Extend previous chunk to cover the remainder
+            prev_start = chunks[-2][0]
+            chunks[-2] = (prev_start, duration)
+            chunks.pop()
+
     return chunks
 
 

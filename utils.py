@@ -366,6 +366,305 @@ def slice_features_for_chunk(features: dict, t_start: float, t_end: float):
     }
 
 
+def safa_binary_swap(left_latents, right_latents, overlap_len, step_idx):
+    """SaFa-style binary swap in overlap region during denoising.
+
+    Alternating frames taken from left/right chunk with per-step shift.
+    No averaging — preserves high-frequency spectral content.
+
+    Args:
+        left_latents: [B, 128, T_left] — left chunk latents (modified in-place)
+        right_latents: [B, 128, T_right] — right chunk latents (modified in-place)
+        overlap_len: number of overlapping latent frames
+        step_idx: current denoising step index (for shift pattern)
+    """
+    shift = (step_idx * 5) % overlap_len
+    mask = ((torch.arange(overlap_len, device=left_latents.device) + shift) % 2).bool()
+    # mask shape: [overlap_len] -> broadcast to [1, 1, overlap_len]
+    mask = mask.unsqueeze(0).unsqueeze(0)
+
+    left_overlap = left_latents[:, :, -overlap_len:]
+    right_overlap = right_latents[:, :, :overlap_len]
+
+    merged = torch.where(mask, right_overlap, left_overlap)
+    left_latents[:, :, -overlap_len:] = merged
+    right_latents[:, :, :overlap_len] = merged
+
+
+def equal_power_crossfade(left, right, overlap_len, dim=-1):
+    """Equal-power crossfade in overlap region.
+
+    Works on both latents [B, 128, T] and audio [B, 1, T].
+
+    Args:
+        left: tensor — left chunk
+        right: tensor — right chunk
+        overlap_len: number of overlapping frames/samples
+        dim: temporal dimension (default -1)
+
+    Returns:
+        Stitched tensor with crossfaded overlap.
+    """
+    # No overlap — pure concatenation
+    if overlap_len <= 0:
+        return torch.cat([left, right], dim=dim)
+
+    t = torch.linspace(0, 1, overlap_len, device=left.device, dtype=left.dtype)
+    # Reshape for broadcasting: add dims for batch and channel
+    shape = [1] * left.ndim
+    shape[dim] = overlap_len
+    t = t.reshape(shape)
+
+    w_right = torch.sqrt(t)
+    w_left = torch.sqrt(1.0 - t)
+
+    left_body = left.narrow(dim, 0, left.shape[dim] - overlap_len)
+    left_tail = left.narrow(dim, left.shape[dim] - overlap_len, overlap_len)
+    right_head = right.narrow(dim, 0, overlap_len)
+    right_body = right.narrow(dim, overlap_len, right.shape[dim] - overlap_len)
+
+    blended = w_left * left_tail + w_right * right_head
+    return torch.cat([left_body, blended, right_body], dim=dim)
+
+
+def chunked_denoise_process(
+    features,
+    chunks,
+    overlap_seconds,
+    crossfade_mode,
+    model_dict,
+    cfg,
+    guidance_scale,
+    num_inference_steps,
+    batch_size,
+    sampler,
+    generator=None,
+):
+    """Chunked denoising with overlap stitching for long-form generation.
+
+    Args:
+        features: FOLEY_FEATURES dict (full video features)
+        chunks: list of (t_start, t_end) tuples from compute_chunk_boundaries
+        overlap_seconds: overlap duration in seconds
+        crossfade_mode: "safa", "latent", or "waveform"
+        model_dict: dict with foley_model, dac_model, device
+        cfg: model config (loaded YAML)
+        guidance_scale: CFG scale
+        num_inference_steps: denoising steps
+        batch_size: number of variations
+        sampler: solver name string
+        generator: torch.Generator for reproducibility
+
+    Returns:
+        (audio_waveform, sample_rate) tuple
+    """
+    target_dtype = model_dict.foley_model.dtype
+    device = model_dict.device
+    audio_frame_rate = cfg.model_config.model_kwargs.audio_frame_rate
+    latent_dim = cfg.model_config.model_kwargs.audio_vae_latent_dim
+    overlap_frames = int(overlap_seconds * audio_frame_rate)
+    sample_rate = model_dict.dac_model.sample_rate
+
+    # Single chunk — delegate to standard denoise
+    if len(chunks) == 1:
+        t_start, t_end = chunks[0]
+        chunk_feats = slice_features_for_chunk(features, t_start, t_end)
+        chunk_dur = t_end - t_start
+        # Map to keys expected by denoise_process_with_generator
+        visual = {
+            "siglip2_feat": chunk_feats["clip_feat"].to(device),
+            "syncformer_feat": chunk_feats["sync_feat"].to(device),
+        }
+        text = {
+            "text_feat": chunk_feats["text_feat"].to(device),
+            "uncond_text_feat": chunk_feats["uncond_text_feat"].to(device),
+        }
+        return denoise_process_with_generator(
+            visual, text, chunk_dur, model_dict, cfg,
+            guidance_scale, num_inference_steps, batch_size, sampler, generator
+        )
+
+    # --- Multi-chunk: set up per-chunk schedulers and latents ---
+    # CRITICAL: each chunk needs its own scheduler instance because
+    # FlowMatchDiscreteScheduler.step() increments an internal _step_index.
+    chunk_schedulers = []
+    for _ in chunks:
+        sched = FlowMatchDiscreteScheduler(
+            shift=cfg.diffusion_config.sample_flow_shift,
+            solver=sampler
+        )
+        sched.set_timesteps(num_inference_steps, device=device)
+        chunk_schedulers.append(sched)
+    timesteps = chunk_schedulers[0].timesteps  # all identical
+
+    # Prepare per-chunk latents and features
+    chunk_latents = []
+    chunk_visual_feats = []
+    chunk_text_feats = []
+
+    for c_idx, (t_start, t_end) in enumerate(chunks):
+        chunk_dur = t_end - t_start
+        latent_len = int(chunk_dur * audio_frame_rate)
+
+        latent = prepare_latents_with_generator(
+            chunk_schedulers[c_idx], batch_size, latent_dim, latent_len,
+            target_dtype, device, generator
+        )
+        chunk_latents.append(latent)
+
+        c_feats = slice_features_for_chunk(features, t_start, t_end)
+        chunk_visual_feats.append({k: c_feats[k].to(device) for k in ["clip_feat", "sync_feat"]})
+        chunk_text_feats.append({k: c_feats[k].to(device) for k in ["text_feat", "uncond_text_feat"]})
+
+    # --- Precompute per-chunk CFG features ---
+    chunk_cfg_inputs = []
+    for i in range(len(chunks)):
+        vis = chunk_visual_feats[i]
+        txt = chunk_text_feats[i]
+
+        siglip2_rep = vis["clip_feat"].repeat(batch_size, 1, 1)
+        sync_rep = vis["sync_feat"].repeat(batch_size, 1, 1)
+        text_rep = txt["text_feat"].repeat(batch_size, 1, 1)
+        uncond_rep = txt["uncond_text_feat"].repeat(batch_size, 1, 1)
+
+        # Pad/trim text to fixed bucket
+        T_cur = text_rep.shape[1]
+        cap = _caps(model_dict, cfg)
+        T_fixed = min(77, cap) if T_cur <= 77 else min(128, cap)
+        text_rep = _pad_or_trim_time(text_rep, T_fixed)
+        uncond_rep = _pad_or_trim_time(uncond_rep, T_fixed)
+
+        uncond_clip = model_dict.foley_model.get_empty_clip_sequence(
+            bs=batch_size, len=siglip2_rep.shape[1]
+        ).to(device)
+        uncond_sync = model_dict.foley_model.get_empty_sync_sequence(
+            bs=batch_size, len=sync_rep.shape[1]
+        ).to(device)
+
+        if guidance_scale > 1.0:
+            cfg_clip = torch.cat([uncond_clip, siglip2_rep])
+            cfg_sync = torch.cat([uncond_sync, sync_rep])
+            cfg_text = torch.cat([uncond_rep, text_rep])
+        else:
+            cfg_clip = siglip2_rep
+            cfg_sync = sync_rep
+            cfg_text = text_rep
+
+        chunk_cfg_inputs.append({
+            "clip": cfg_clip, "sync": cfg_sync, "text": cfg_text,
+        })
+
+    # --- Denoising loop ---
+    total_steps = len(timesteps) * len(chunks)
+    pbar = ProgressBar(total_steps)
+
+    with torch.inference_mode():
+        for step_idx, t in enumerate(timesteps):
+            if not torch.is_tensor(t):
+                t = torch.tensor(t, dtype=torch.long, device=device)
+            else:
+                t = t.to(device=device)
+
+            for c_idx in range(len(chunks)):
+                latents = chunk_latents[c_idx]
+                cfg_in = chunk_cfg_inputs[c_idx]
+
+                latent_input = torch.cat([latents] * 2) if guidance_scale > 1.0 else latents
+                t_expand = t.expand(latent_input.shape[0]).contiguous()
+
+                compute_dtype = next(model_dict.foley_model.parameters()).dtype
+                latent_input = latent_input.to(dtype=compute_dtype)
+
+                if compute_dtype in (torch.float16, torch.bfloat16):
+                    with torch.autocast(device_type=device.type, dtype=compute_dtype):
+                        noise_pred = model_dict.foley_model(
+                            x=latent_input, t=t_expand, cond=cfg_in["text"].to(compute_dtype),
+                            clip_feat=cfg_in["clip"].to(compute_dtype),
+                            sync_feat=cfg_in["sync"].to(compute_dtype),
+                        )["x"]
+                else:
+                    noise_pred = model_dict.foley_model(
+                        x=latent_input, t=t_expand, cond=cfg_in["text"],
+                        clip_feat=cfg_in["clip"], sync_feat=cfg_in["sync"],
+                    )["x"]
+
+                if guidance_scale > 1.0:
+                    uncond_pred, text_pred = noise_pred.chunk(2)
+                    noise_pred = uncond_pred + guidance_scale * (text_pred - uncond_pred)
+
+                chunk_latents[c_idx] = chunk_schedulers[c_idx].step(noise_pred, t, latents)[0]
+                pbar.update(1)
+
+            # SaFa swap after all chunks are updated this step
+            if crossfade_mode == "safa" and overlap_frames > 0:
+                for c_idx in range(len(chunks) - 1):
+                    safa_binary_swap(
+                        chunk_latents[c_idx], chunk_latents[c_idx + 1],
+                        overlap_frames, step_idx
+                    )
+
+    # --- Stitch results ---
+    if crossfade_mode == "safa":
+        # Assemble: take non-overlap from each chunk, overlap already consistent
+        parts = []
+        overlap_left = overlap_frames // 2
+        overlap_right = overlap_frames - overlap_left  # ceiling half
+        for c_idx in range(len(chunks)):
+            lat = chunk_latents[c_idx]
+            if overlap_frames == 0:
+                parts.append(lat)
+            elif c_idx == 0:
+                parts.append(lat[:, :, :-overlap_right])
+            elif c_idx == len(chunks) - 1:
+                parts.append(lat[:, :, overlap_left:])
+            else:
+                parts.append(lat[:, :, overlap_left:-overlap_right])
+        full_latent = torch.cat(parts, dim=-1)
+
+        with torch.inference_mode():
+            dac_weight = next(model_dict.dac_model.parameters())
+            latents_dec = full_latent.to(device=dac_weight.device, dtype=dac_weight.dtype)
+            audio = model_dict.dac_model.decode(latents_dec)
+        total_duration = features["duration"]
+        audio = audio[:, :, :int(total_duration * sample_rate)]
+        return audio, sample_rate
+
+    elif crossfade_mode == "latent":
+        # Equal-power crossfade on latents, then single DAC decode
+        full_latent = chunk_latents[0]
+        for c_idx in range(1, len(chunks)):
+            full_latent = equal_power_crossfade(
+                full_latent, chunk_latents[c_idx], overlap_frames, dim=-1
+            )
+
+        with torch.inference_mode():
+            dac_weight = next(model_dict.dac_model.parameters())
+            latents_dec = full_latent.to(device=dac_weight.device, dtype=dac_weight.dtype)
+            audio = model_dict.dac_model.decode(latents_dec)
+        total_duration = features["duration"]
+        audio = audio[:, :, :int(total_duration * sample_rate)]
+        return audio, sample_rate
+
+    else:  # waveform
+        # DAC decode each chunk, then equal-power crossfade on audio
+        overlap_samples = int(overlap_seconds * sample_rate)
+        with torch.inference_mode():
+            dac_weight = next(model_dict.dac_model.parameters())
+            chunk_audios = []
+            for c_idx in range(len(chunks)):
+                lat = chunk_latents[c_idx].to(device=dac_weight.device, dtype=dac_weight.dtype)
+                chunk_audios.append(model_dict.dac_model.decode(lat))
+
+        full_audio = chunk_audios[0]
+        for c_idx in range(1, len(chunk_audios)):
+            full_audio = equal_power_crossfade(
+                full_audio, chunk_audios[c_idx], overlap_samples, dim=-1
+            )
+        total_duration = features["duration"]
+        full_audio = full_audio[:, :, :int(total_duration * sample_rate)]
+        return full_audio, sample_rate
+
+
 # -----------------------------------------------------------------------------------
 # FP8 WEIGHT-ONLY QUANTIZATION HELPERS (storage in fp8, compute in fp16/bf16)
 # -----------------------------------------------------------------------------------

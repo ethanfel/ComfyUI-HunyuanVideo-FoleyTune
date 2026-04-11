@@ -89,6 +89,8 @@ except ImportError as e:
 from .utils import (
     denoise_process_with_generator,
     feature_process_from_tensors,
+    compute_chunk_boundaries,
+    chunked_denoise_process,
     _wrap_fp8_inplace,
     _detect_ckpt_fp8,
     _detect_ckpt_major_precision,
@@ -472,6 +474,148 @@ class HunyuanFoleySampler:
         return (audio_output_first, audio_output_batch)
     
 # -----------------------------------------------------------------------------------
+# NODE: Chunked Sampler for Long-Form Generation
+# -----------------------------------------------------------------------------------
+
+class FoleyChunkedSampler:
+    """Generate audio for long videos by chunking with overlap and crossfade.
+
+    Connects to FoleyFeatureExtractor's FOLEY_FEATURES output. Splits denoising
+    into overlapping chunks and stitches with SaFa binary swap (best quality),
+    latent-space crossfade, or waveform crossfade.
+
+    For clips shorter than chunk_duration, runs a single pass with no overhead.
+    """
+    SAMPLER_NAMES = ["euler", "heun-2", "midpoint-2", "kutta-4"]
+    CROSSFADE_MODES = ["safa", "latent", "waveform"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "hunyuan_model": ("HUNYUAN_MODEL",),
+                "hunyuan_deps": ("HUNYUAN_DEPS",),
+                "features": ("FOLEY_FEATURES",),
+                "cfg_scale": ("FLOAT", {"default": 4.5, "min": 1.0, "max": 10.0, "step": 0.1}),
+                "steps": ("INT", {"default": 50, "min": 10, "max": 100, "step": 1}),
+                "sampler": (cls.SAMPLER_NAMES, {"default": "euler"}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 6, "step": 1}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "chunk_duration": ("FLOAT", {"default": 8.0, "min": 1.0, "max": 15.0, "step": 0.1,
+                                    "tooltip": "Duration of each chunk in seconds. 8s matches training length."}),
+                "overlap_seconds": ("FLOAT", {"default": 1.6, "min": 0.0, "max": 5.0, "step": 0.1,
+                                     "tooltip": "Overlap between chunks in seconds. 1.6s = 20% of 8s chunk."}),
+                "crossfade_mode": (cls.CROSSFADE_MODES, {"default": "safa",
+                                    "tooltip": "safa: binary swap during denoising (best). latent: blend before DAC. waveform: blend after DAC."}),
+                "force_offload": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "torch_compile_cfg": ("TORCH_COMPILE_CFG",),
+                "block_swap_args": ("BLOCKSWAPARGS",),
+            }
+        }
+
+    RETURN_TYPES = ("AUDIO", "AUDIO")
+    RETURN_NAMES = ("audio_first", "audio_batch")
+    FUNCTION = "generate_audio"
+    CATEGORY = "audio/HunyuanFoley"
+
+    def generate_audio(
+        self,
+        hunyuan_model,
+        hunyuan_deps,
+        features,
+        cfg_scale,
+        steps,
+        sampler,
+        batch_size,
+        seed,
+        chunk_duration,
+        overlap_seconds,
+        crossfade_mode,
+        force_offload,
+        torch_compile_cfg=None,
+        block_swap_args=None,
+    ):
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+
+        if hasattr(hunyuan_model, "_compilation_progress_counter"):
+            hunyuan_model._compilation_progress_counter[0] = 0
+
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "configs", "hunyuanvideo-foley-xxl.yaml")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Config not found at {config_path}")
+        hunyuan_cfg = load_yaml(config_path)
+
+        rng = torch.Generator(device="cpu").manual_seed(seed)
+        duration = features["duration"]
+
+        # Compute chunk boundaries
+        chunks = compute_chunk_boundaries(duration, chunk_duration, overlap_seconds)
+        logger.info(f"Chunked generation: {len(chunks)} chunks for {duration:.1f}s "
+                     f"(chunk={chunk_duration}s, overlap={overlap_seconds}s, mode={crossfade_mode})")
+        for i, (ts, te) in enumerate(chunks):
+            logger.info(f"  Chunk {i}: [{ts:.1f}, {te:.1f}]s ({te-ts:.1f}s)")
+
+        # Apply torch.compile if configured
+        if torch_compile_cfg is not None and not getattr(hunyuan_model, "_blocks_are_compiled", False):
+            try:
+                hunyuan_model = HunyuanFoleyTorchCompile._apply_torch_compile(
+                    hunyuan_model, torch_compile_cfg
+                )
+            except Exception as e:
+                logger.error(f"TorchCompile failed: {e}")
+
+        # Place model on device
+        if block_swap_args is not None:
+            hunyuan_model.block_swap(
+                blocks_to_swap=block_swap_args.get("blocks_to_swap", 0),
+                use_non_blocking=block_swap_args.get("use_non_blocking", False),
+                prefetch_blocks=block_swap_args.get("prefetch_blocks", 0),
+                block_swap_debug=block_swap_args.get("block_swap_debug", False),
+            )
+        else:
+            hunyuan_model.to(device)
+
+        # Build model_dict
+        model_dict_for_process = AttributeDict(dict(hunyuan_deps))
+        model_dict_for_process["foley_model"] = hunyuan_model
+        model_dict_for_process["device"] = device
+
+        # Ensure DAC is on GPU
+        hunyuan_deps["dac_model"].to(device=device, dtype=torch.float32)
+
+        # Run chunked denoising
+        decoded_waveform, sample_rate = chunked_denoise_process(
+            features=features,
+            chunks=chunks,
+            overlap_seconds=overlap_seconds,
+            crossfade_mode=crossfade_mode,
+            model_dict=model_dict_for_process,
+            cfg=hunyuan_cfg,
+            guidance_scale=cfg_scale,
+            num_inference_steps=steps,
+            batch_size=batch_size,
+            sampler=sampler,
+            generator=rng,
+        )
+
+        waveform_batch = decoded_waveform.float().cpu()
+
+        if force_offload:
+            hunyuan_model.to(offload_device)
+            hunyuan_deps["dac_model"].to(offload_device)
+            mm.soft_empty_cache()
+
+        first_waveform = waveform_batch[0].unsqueeze(0)
+        audio_first = {"waveform": first_waveform, "sample_rate": sample_rate}
+        audio_batch = {"waveform": waveform_batch, "sample_rate": sample_rate}
+
+        return (audio_first, audio_batch)
+
+# -----------------------------------------------------------------------------------
 # NODE: Hunyuan Foley Torch Compile (optional accelerator)
 # -----------------------------------------------------------------------------------
 
@@ -714,6 +858,7 @@ NODE_CLASS_MAPPINGS = {
     "HunyuanModelLoader": HunyuanModelLoader,
     "HunyuanDependenciesLoader": HunyuanDependenciesLoader,
     "HunyuanFoleySampler": HunyuanFoleySampler,
+    "FoleyChunkedSampler": FoleyChunkedSampler,
     "HunyuanFoleyTorchCompile": HunyuanFoleyTorchCompile,
     "HunyuanBlockSwap": HunyuanBlockSwap,
     "SelectAudioFromBatch": SelectAudioFromBatch,
@@ -722,6 +867,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "HunyuanModelLoader": "Hunyuan-Foley Model Loader",
     "HunyuanDependenciesLoader": "Hunyuan-Foley Dependencies Loader",
     "HunyuanFoleySampler": "Hunyuan-Foley Sampler",
+    "FoleyChunkedSampler": "Foley Chunked Sampler",
     "HunyuanFoleyTorchCompile": "Hunyuan-Foley Torch Compile",
     "HunyuanBlockSwap": "Hunyuan-Foley BlockSwap Settings",
     "SelectAudioFromBatch": "Select Audio From Batch",

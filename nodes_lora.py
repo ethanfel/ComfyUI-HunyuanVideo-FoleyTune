@@ -1,4 +1,4 @@
-"""LoRA training nodes for HunyuanVideo-Foley."""
+"""LoRA training nodes for FoleyTune."""
 
 import os
 import sys
@@ -236,19 +236,19 @@ def _draw_comparison_curves(experiments_data):
 
 
 logger.remove()
-logger.add(sys.stdout, level="INFO", format="HunyuanVideo-Foley LoRA: {message}")
+logger.add(sys.stdout, level="INFO", format="FoleyTune LoRA: {message}")
 
 
 # --- Node 1: Feature Extractor ----------------------------------------------
 
-class FoleyFeatureExtractor:
+class FoleyTuneFeatureExtractor:
     """Extract and cache SigLIP2/Synchformer/CLAP features + audio for LoRA training."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "hunyuan_deps": ("HUNYUAN_DEPS",),
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
                 "image": ("IMAGE",),
                 "prompt": ("STRING", {"default": "", "multiline": True}),
                 "negative_prompt": ("STRING", {"default": "", "multiline": True}),
@@ -261,10 +261,10 @@ class FoleyFeatureExtractor:
             },
         }
 
-    RETURN_TYPES = ("STRING", "FOLEY_FEATURES")
+    RETURN_TYPES = ("STRING", "FOLEYTUNE_FEATURES")
     RETURN_NAMES = ("npz_path", "features")
     FUNCTION = "extract_features"
-    CATEGORY = "audio/HunyuanFoley/LoRA"
+    CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
     def extract_features(self, hunyuan_deps, image, prompt, negative_prompt, frame_rate,
@@ -475,7 +475,7 @@ def _extract_audio_wav(video_path: Path, wav_path: Path):
 
 # --- Node: Batch Feature Extractor ------------------------------------------
 
-class FoleyBatchFeatureExtractor:
+class FoleyTuneBatchFeatureExtractor:
     """Extract SigLIP2/Synchformer/CLAP features from a folder of video clips.
 
     Auto-detects duration and frame rate via FFprobe. Saves one .npz per clip
@@ -487,7 +487,7 @@ class FoleyBatchFeatureExtractor:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "hunyuan_deps": ("HUNYUAN_DEPS",),
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
                 "video_folder": ("STRING", {
                     "default": "",
                     "tooltip": "Folder containing video clips. Scans 1 level of subfolders.",
@@ -509,7 +509,7 @@ class FoleyBatchFeatureExtractor:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("report",)
     FUNCTION = "extract_batch"
-    CATEGORY = "audio/HunyuanFoley/LoRA"
+    CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
     def extract_batch(self, hunyuan_deps, video_folder, output_folder,
@@ -730,21 +730,21 @@ class FoleyBatchFeatureExtractor:
 
 # --- Node 6: VAE Roundtrip --------------------------------------------------
 
-class FoleyVAERoundtrip:
+class FoleyTuneVAERoundtrip:
     """Encode audio through DAC, decode back. Reveals codec quality ceiling."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "hunyuan_deps": ("HUNYUAN_DEPS",),
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
                 "audio": ("AUDIO",),
             }
         }
 
     RETURN_TYPES = ("AUDIO",)
     FUNCTION = "roundtrip"
-    CATEGORY = "audio/HunyuanFoley/LoRA"
+    CATEGORY = "FoleyTune"
 
     def roundtrip(self, hunyuan_deps, audio):
         device = mm.get_torch_device()
@@ -788,15 +788,15 @@ class FoleyVAERoundtrip:
 
 # --- Node 2: LoRA Trainer ---------------------------------------------------
 
-class FoleyLoRATrainer:
-    """Train a LoRA adapter for HunyuanVideo-Foley via flow matching."""
+class FoleyTuneLoRATrainer:
+    """Train a LoRA adapter for FoleyTune via flow matching."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "hunyuan_model": ("HUNYUAN_MODEL",),
-                "hunyuan_deps": ("HUNYUAN_DEPS",),
+                "hunyuan_model": ("FOLEYTUNE_MODEL",),
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
                 "data_dir": ("STRING", {"default": ""}),
                 "output_dir": ("STRING", {"default": ""}),
                 "target": (list(FOLEY_TARGET_PRESETS.keys()), {"default": "all_attn_mlp"}),
@@ -828,14 +828,14 @@ class FoleyLoRATrainer:
             },
         }
 
-    RETURN_TYPES = ("HUNYUAN_MODEL", "IMAGE")
+    RETURN_TYPES = ("FOLEYTUNE_MODEL", "IMAGE")
     RETURN_NAMES = ("model", "loss_curve")
     OUTPUT_TOOLTIPS = (
         "Model with trained LoRA adapter applied.",
         "Training loss curve (smoothed).",
     )
     FUNCTION = "train"
-    CATEGORY = "audio/HunyuanFoley/LoRA"
+    CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
     def train(self, hunyuan_model, hunyuan_deps, data_dir, output_dir, target, rank,
@@ -1154,22 +1154,22 @@ class FoleyLoRATrainer:
 
 # --- Node 3: LoRA Loader ----------------------------------------------------
 
-class FoleyLoRALoader:
-    """Load a trained LoRA adapter into a Foley model for inference."""
+class FoleyTuneLoRALoader:
+    """Load a trained LoRA adapter into a FoleyTune model for inference."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "hunyuan_model": ("HUNYUAN_MODEL",),
+                "hunyuan_model": ("FOLEYTUNE_MODEL",),
                 "adapter_path": ("STRING", {"default": ""}),
                 "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
             }
         }
 
-    RETURN_TYPES = ("HUNYUAN_MODEL",)
+    RETURN_TYPES = ("FOLEYTUNE_MODEL",)
     FUNCTION = "load_adapter"
-    CATEGORY = "audio/HunyuanFoley/LoRA"
+    CATEGORY = "FoleyTune"
 
     def load_adapter(self, hunyuan_model, adapter_path, strength):
         if not adapter_path or not os.path.exists(adapter_path):
@@ -1232,15 +1232,15 @@ class FoleyLoRALoader:
 
 # --- Node 4: LoRA Scheduler -------------------------------------------------
 
-class FoleyLoRAScheduler:
+class FoleyTuneLoRAScheduler:
     """Run multiple LoRA training experiments from a JSON sweep configuration."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "hunyuan_model": ("HUNYUAN_MODEL",),
-                "hunyuan_deps": ("HUNYUAN_DEPS",),
+                "hunyuan_model": ("FOLEYTUNE_MODEL",),
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
                 "sweep_json": ("STRING", {"default": ""}),
             }
         }
@@ -1252,7 +1252,7 @@ class FoleyLoRAScheduler:
         "All smoothed loss curves overlaid on the same axes.",
     )
     FUNCTION = "run_sweep"
-    CATEGORY = "audio/HunyuanFoley/LoRA"
+    CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
     # Default training params (mirrors trainer node defaults)
@@ -1709,22 +1709,22 @@ class _SkipExperiment(Exception):
 
 # --- Node 5: LoRA Evaluator -------------------------------------------------
 
-class FoleyLoRAEvaluator:
+class FoleyTuneLoRAEvaluator:
     """Compare multiple LoRA adapters by generating audio and computing spectral metrics."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "hunyuan_model": ("HUNYUAN_MODEL",),
-                "hunyuan_deps": ("HUNYUAN_DEPS",),
+                "hunyuan_model": ("FOLEYTUNE_MODEL",),
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
                 "eval_json": ("STRING", {"default": ""}),
             }
         }
 
     RETURN_TYPES = ()
     FUNCTION = "evaluate"
-    CATEGORY = "audio/HunyuanFoley/LoRA"
+    CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
     def evaluate(self, hunyuan_model, hunyuan_deps, eval_json):
@@ -1913,21 +1913,21 @@ def _save_eval_chart(ref_avg, adapter_results, path):
 # --- Node Mappings -----------------------------------------------------------
 
 NODE_CLASS_MAPPINGS = {
-    "FoleyFeatureExtractor": FoleyFeatureExtractor,
-    "FoleyBatchFeatureExtractor": FoleyBatchFeatureExtractor,
-    "FoleyLoRATrainer": FoleyLoRATrainer,
-    "FoleyLoRALoader": FoleyLoRALoader,
-    "FoleyLoRAScheduler": FoleyLoRAScheduler,
-    "FoleyLoRAEvaluator": FoleyLoRAEvaluator,
-    "FoleyVAERoundtrip": FoleyVAERoundtrip,
+    "FoleyTuneFeatureExtractor": FoleyTuneFeatureExtractor,
+    "FoleyTuneBatchFeatureExtractor": FoleyTuneBatchFeatureExtractor,
+    "FoleyTuneLoRATrainer": FoleyTuneLoRATrainer,
+    "FoleyTuneLoRALoader": FoleyTuneLoRALoader,
+    "FoleyTuneLoRAScheduler": FoleyTuneLoRAScheduler,
+    "FoleyTuneLoRAEvaluator": FoleyTuneLoRAEvaluator,
+    "FoleyTuneVAERoundtrip": FoleyTuneVAERoundtrip,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "FoleyFeatureExtractor": "Foley Feature Extractor",
-    "FoleyBatchFeatureExtractor": "Foley Batch Feature Extractor",
-    "FoleyLoRATrainer": "Foley LoRA Trainer",
-    "FoleyLoRALoader": "Foley LoRA Loader",
-    "FoleyLoRAScheduler": "Foley LoRA Scheduler",
-    "FoleyLoRAEvaluator": "Foley LoRA Evaluator",
-    "FoleyVAERoundtrip": "Foley VAE Roundtrip",
+    "FoleyTuneFeatureExtractor": "FoleyTune Feature Extractor",
+    "FoleyTuneBatchFeatureExtractor": "FoleyTune Batch Feature Extractor",
+    "FoleyTuneLoRATrainer": "FoleyTune LoRA Trainer",
+    "FoleyTuneLoRALoader": "FoleyTune LoRA Loader",
+    "FoleyTuneLoRAScheduler": "FoleyTune LoRA Scheduler",
+    "FoleyTuneLoRAEvaluator": "FoleyTune LoRA Evaluator",
+    "FoleyTuneVAERoundtrip": "FoleyTune VAE Roundtrip",
 }

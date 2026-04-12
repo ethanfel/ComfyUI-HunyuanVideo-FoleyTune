@@ -971,13 +971,15 @@ class FoleyTuneVideoQualityFilter:
         if need_clap:
             from transformers import ClapModel, ClapProcessor
             print("[VideoQualityFilter] Loading CLAP model...", flush=True)
-            clap_model = ClapModel.from_pretrained("laion/larger_clap_general")
+            clap_device = "cuda" if torch.cuda.is_available() else "cpu"
+            clap_model = ClapModel.from_pretrained("laion/larger_clap_general").to(clap_device)
             clap_processor = ClapProcessor.from_pretrained("laion/larger_clap_general")
             clap_model.eval()
             if use_clap:
                 text_inputs = clap_processor(
                     text=[clap_prompt], return_tensors="pt", padding=True
                 )
+                text_inputs = {k: v.to(clap_device) for k, v in text_inputs.items()}
                 with torch.no_grad():
                     text_embed = clap_model.get_text_features(**text_inputs)
                     if not isinstance(text_embed, torch.Tensor):
@@ -987,6 +989,7 @@ class FoleyTuneVideoQualityFilter:
                 neg_inputs = clap_processor(
                     text=[clap_negative_prompt], return_tensors="pt", padding=True
                 )
+                neg_inputs = {k: v.to(clap_device) for k, v in neg_inputs.items()}
                 with torch.no_grad():
                     neg_text_embed = clap_model.get_text_features(**neg_inputs)
                     if not isinstance(neg_text_embed, torch.Tensor):
@@ -1032,7 +1035,7 @@ class FoleyTuneVideoQualityFilter:
                               dtype=mel_features[0].dtype)
             for j, f in enumerate(mel_features):
                 padded[j, :f.shape[0], :] = f
-            input_features = torch.from_numpy(padded).unsqueeze(1)  # (B,T,F) → (B,1,T,F)
+            input_features = torch.from_numpy(padded).unsqueeze(1).to(clap_device)  # (B,1,T,F)
 
             with torch.no_grad():
                 audio_embeds = clap_model.get_audio_features(input_features=input_features)

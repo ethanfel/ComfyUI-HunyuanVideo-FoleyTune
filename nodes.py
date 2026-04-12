@@ -101,7 +101,7 @@ from .utils import (
 # -----------------------------------------------------------------------------------
 # NODE 1: Hunyuan Model Loader (refactored: pure load)
 # -----------------------------------------------------------------------------------
-class HunyuanModelLoader:
+class FoleyTuneModelLoader:
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -112,9 +112,9 @@ class HunyuanModelLoader:
             },
         }
 
-    RETURN_TYPES = ("HUNYUAN_MODEL",)
+    RETURN_TYPES = ("FOLEYTUNE_MODEL",)
     FUNCTION = "build_model"
-    CATEGORY = "audio/HunyuanFoley"
+    CATEGORY = "FoleyTune"
 
     def load_model(self, model_name, precision, quantization):
         device = mm.get_torch_device()
@@ -200,7 +200,7 @@ class HunyuanModelLoader:
 # -----------------------------------------------------------------------------------
 # NODE 2: Hunyuan Dependencies Loader
 # -----------------------------------------------------------------------------------
-class HunyuanDependenciesLoader:
+class FoleyTuneDependenciesLoader:
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -210,9 +210,9 @@ class HunyuanDependenciesLoader:
                 }
             }
 
-    RETURN_TYPES = ("HUNYUAN_DEPS",)
+    RETURN_TYPES = ("FOLEYTUNE_DEPS",)
     FUNCTION = "load_dependencies"
-    CATEGORY = "audio/HunyuanFoley"
+    CATEGORY = "FoleyTune"
 
     def load_dependencies(self, vae_name, synchformer_name):
         device = mm.get_torch_device()
@@ -252,232 +252,13 @@ class HunyuanDependenciesLoader:
         logger.info("Loaded all HunyuanVideoFoley dependencies.")
         return (AttributeDict(deps),)
 
-# -----------------------------------------------------------------------------------
-# NODE 3: Hunyuan Foley Sampler
-# -----------------------------------------------------------------------------------
-class HunyuanFoleySampler:
-    # Define the list of available samplers for the dropdown
-    SAMPLER_NAMES = ["euler", "heun-2", "midpoint-2", "kutta-4"]
+# (HunyuanFoleySampler removed — FoleyTuneChunkedSampler handles single-shot as a special case)
 
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "hunyuan_model": ("HUNYUAN_MODEL",),
-                "hunyuan_deps": ("HUNYUAN_DEPS",),
-                "frame_rate": ("FLOAT", {"default": 16, "min": 1, "max": 120, "step": 0.1, "tooltip": "The framerate of the input image sequence"}),
-                "duration": ("FLOAT", {"default": 5.0, "min": 1, "max": 60.0, "step": 0.1, "tooltip": "Duration of the audio to generate in seconds"}),
-                "prompt": ("STRING", {"multiline": True, "default": "A person walks on frozen ice"}),
-                "negative_prompt": ("STRING", {"multiline": True, "default": "noisy, harsh"}),
-                "cfg_scale": ("FLOAT", {"default": 4.5, "min": 1.0, "max": 10.0, "step": 0.1, "tooltip": "Classifier-Free Guidance scale"}),
-                "steps": ("INT", {"default": 50, "min": 10, "max": 100, "step": 1, "tooltip": "Number of denoising steps"}),
-                "sampler": (cls.SAMPLER_NAMES, {"default": "euler", "tooltip": "These were included with the official repo, but only Euler seems decent..."}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 6, "step": 1, "tooltip": "Number of audio variations to generate at once"}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Offload models from VRAM after generation"}),
-            },
-            "optional": {
-                "image": ("IMAGE",),
-                "torch_compile_cfg": ("TORCH_COMPILE_CFG", {"tooltip": "Compile the model blocks with this configuration (applied lazily before denoising)."}),
-                "block_swap_args": ("BLOCKSWAPARGS", {"tooltip": "Enable BlockSwap VRAM optimization during sampling."}),
-            }
-        }
-
-    RETURN_TYPES = ("AUDIO", "AUDIO")
-    RETURN_NAMES = ("audio_first", "audio_batch")
-    FUNCTION = "generate_audio"
-    CATEGORY = "audio/HunyuanFoley"
-
-    def generate_audio(
-        self,
-        hunyuan_model,
-        hunyuan_deps,
-        frame_rate,
-        duration,
-        prompt,
-        negative_prompt,
-        cfg_scale,
-        steps,
-        sampler,
-        batch_size,
-        seed,
-        force_offload,
-        image=None,
-        torch_compile_cfg=None,
-        block_swap_args=None,
-    ):
-        device = mm.get_torch_device()
-        offload_device = mm.unet_offload_device()
-        
-        # Reset the compilation progress counter at the start of every run.
-        if hasattr(hunyuan_model, "_compilation_progress_counter"):
-            hunyuan_model._compilation_progress_counter[0] = 0
-
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "hunyuanvideo-foley-xxl.yaml")
-        if not os.path.exists(config_path): raise FileNotFoundError(f"Hunyuan config file not found at {config_path}")
-        hunyuan_cfg = load_yaml(config_path)
-
-        rng = torch.Generator(device="cpu").manual_seed(seed)
-
-        # Determine target dtype from main model, and keep it for deps
-        target_dtype = hunyuan_model.dtype
-
-        # \- PHASE 1 -------------------------------------------------------
-        # Feature extraction on GPU with only extractor models resident
-        logger.info("Phase 1: Extracting features")
-
-        # Move extractors to GPU in target dtype. Keep tokenizer on CPU.
-        for key in ['siglip2_model', 'syncformer_model', 'clap_model']:
-            hunyuan_deps[key].to(device=device, dtype=target_dtype)
-
-        visual_feats = {}
-        audio_len_in_s = duration
-
-        # Handle optional image input
-        if image is not None:
-            # --- Frame Preparation and Resampling for Video-to-Audio ---
-            logger.info("Image input provided. Running in Video-to-Audio mode.")
-            total_input_frames = image.shape[0]
-            num_frames_to_process = int(duration * frame_rate)
-
-            # Pad frames by repeating the last frame if the input is shorter than the requested duration
-            if num_frames_to_process > total_input_frames:
-                logger.warning(f"Requested duration needs {num_frames_to_process} frames, but only {total_input_frames} are available. Padding by holding the last frame.")
-                padding_needed = num_frames_to_process - total_input_frames
-                last_frame = image[-1:].repeat(padding_needed, 1, 1, 1)
-                image_slice_base = image
-                image_slice = torch.cat((image_slice_base, last_frame), dim=0)
-            else:
-                image_slice = image[:num_frames_to_process]
-
-            # Convert ComfyUI's IMAGE tensor (B, H, W, C, float 0-1) to model's expected (T, C, H, W, byte 0-255)
-            image_slice = (image_slice * 255.0).byte().permute(0, 3, 1, 2)
-
-            # Resample to 8 FPS for SigLIP2 (content analysis)
-            indices_8fps = torch.linspace(0, num_frames_to_process - 1, int(duration * 8)).long()
-            indices_8fps = indices_8fps.to(device=image_slice.device, non_blocking=True)
-            frames_8fps = image_slice.index_select(0, indices_8fps)
-
-            # Resample to 25 FPS for Synchformer (sync analysis)
-            indices_25fps = torch.linspace(0, num_frames_to_process - 1, int(duration * 25)).long()
-            indices_25fps = indices_25fps.to(device=image_slice.device, non_blocking=True)
-            frames_25fps = image_slice.index_select(0, indices_25fps)
-
-            # Process features from the prepared frames
-            visual_feats, text_feats, audio_len_in_s = feature_process_from_tensors(frames_8fps, frames_25fps, prompt, negative_prompt, hunyuan_deps, hunyuan_cfg)
-
-        else:
-            # --- Feature Preparation for Text-to-Audio ---
-            logger.info("No image input provided. Running in Text-to-Audio mode.")
-            # Create empty (zero) tensors for visual features
-            clip_seq_len = int(duration * 8)
-            num_sync_frames = int(duration * 25)
-            num_sync_segments = (num_sync_frames - 16) // 8 + 1
-            sync_seq_len = int(num_sync_segments * 8)
-
-            # Keep empty features on CPU for now; move to GPU later just-in-time
-            visual_feats['siglip2_feat'] = hunyuan_model.get_empty_clip_sequence(bs=1, len=clip_seq_len).to('cpu', dtype=target_dtype)
-            visual_feats['syncformer_feat'] = hunyuan_model.get_empty_sync_sequence(bs=1, len=sync_seq_len).to('cpu', dtype=target_dtype)
-
-            # Process text features normally
-            prompts = [negative_prompt, prompt]
-            text_feat_res, _ = encode_text_feat(prompts, hunyuan_deps)
-            text_feats = {'text_feat': text_feat_res[1:], 'uncond_text_feat': text_feat_res[:1]}
-
-        # Immediately offload extractor models and free cache (ping-pong step)
-        for key in ['siglip2_model', 'syncformer_model', 'clap_model']:
-            hunyuan_deps[key].to("cpu")
-        mm.soft_empty_cache()
-
-        # Move features to CPU (pinned) to minimize residency between phases
-        # Ensure features are in target dtype and pinned for fast H2D copy later
-        for k in ['siglip2_feat', 'syncformer_feat']:
-            if visual_feats.get(k) is not None:
-                visual_feats[k] = visual_feats[k].to('cpu', dtype=target_dtype, copy=True).pin_memory()
-        for k in ['text_feat', 'uncond_text_feat']:
-            text_feats[k] = text_feats[k].to('cpu', dtype=target_dtype, copy=True).pin_memory()
-
-        # \- PHASE 2 -------------------------------------------------------
-        # Denoising with only the main model resident; delay DAC until decode
-        logger.info("Phase 2: Denoising with main model")
-
-        # Apply (optional) torch.compile policy lazily, just before sampling.
-        if torch_compile_cfg is not None and not getattr(hunyuan_model, "_blocks_are_compiled", False):
-            try:
-                # Reuse the loader's helper to avoid duplicating logic.
-                hunyuan_model = HunyuanFoleyTorchCompile._apply_torch_compile(hunyuan_model, torch_compile_cfg)
-                logger.info("HunyuanVideoFoley blocks prepared for torch.compile.")
-            except Exception as e:
-                logger.error(f"TorchCompile setup failed; continuing with eager model. Error: {e}")
-
-        # Apply BlockSwap if provided; otherwise place the model on the main device.
-        if block_swap_args is not None:
-            hunyuan_model.block_swap(
-                blocks_to_swap=block_swap_args.get("blocks_to_swap", 0),
-                use_non_blocking=block_swap_args.get("use_non_blocking", False),
-                prefetch_blocks=block_swap_args.get("prefetch_blocks", 0),
-                block_swap_debug=block_swap_args.get("block_swap_debug", False),
-            )
-        else:
-            # If not used, we must explicitly move the model to the main device.
-            hunyuan_model.to(device)
-
-        # Just-in-time copy features to GPU
-        visual_feats_gpu = {
-            'siglip2_feat': visual_feats['siglip2_feat'].to(device, non_blocking=True),
-            'syncformer_feat': visual_feats['syncformer_feat'].to(device, non_blocking=True),
-        }
-        text_feats_gpu = {
-            'text_feat': text_feats['text_feat'].to(device, non_blocking=True),
-            'uncond_text_feat': text_feats['uncond_text_feat'].to(device, non_blocking=True),
-        }
-
-        # Combine all necessary model components into one dictionary for the denoiser
-        # Avoid mutating shared deps; shallow-copy into a fresh AttributeDict for this call
-        model_dict_for_process = AttributeDict(dict(hunyuan_deps))
-        model_dict_for_process['foley_model'] = hunyuan_model
-        model_dict_for_process['device'] = device
-
-        logger.info(f"Generating {audio_len_in_s:.2f}s of audio...")
-        logger.debug(f"Visual features keys ready for denoiser: {list(visual_feats_gpu.keys())}")  # Added for debugging
-
-        # Ensure DAC is on GPU (and in a safe dtype) **before** denoise; decode happens inside the denoiser
-        hunyuan_deps['dac_model'].to(device=device, dtype=torch.float32)
-        # Run the denoising process on the GPU
-        decoded_waveform, sample_rate = denoise_process_with_generator(
-            visual_feats_gpu, text_feats_gpu, audio_len_in_s,
-            model_dict_for_process, hunyuan_cfg,
-            guidance_scale=cfg_scale, num_inference_steps=steps,
-            batch_size=batch_size, sampler=sampler, generator=rng
-        )
-
-        waveform_batch = decoded_waveform.float().cpu()
-
-        # --- Model Offloading for VRAM Management ---
-        if force_offload:
-            logger.info("Offloading models to save VRAM...")
-            hunyuan_model.to(offload_device)
-            for key in ['dac_model']:
-                hunyuan_deps[key].to(offload_device)
-            mm.soft_empty_cache()
-
-        # --- Prepare the two separate outputs ---
-        # Output 1: A standard AUDIO dict with only the first waveform.
-        # This is for convenience and direct connection to simple nodes like Preview Audio.
-        first_waveform = waveform_batch[0].unsqueeze(0)
-        audio_output_first = {"waveform": first_waveform, "sample_rate": sample_rate}
-
-        # Output 2: An AUDIO dict containing the entire batch of waveforms.
-        # This is for advanced workflows and compatibility with batch-aware nodes.
-        audio_output_batch = {"waveform": waveform_batch, "sample_rate": sample_rate}
-
-        return (audio_output_first, audio_output_batch)
-    
 # -----------------------------------------------------------------------------------
 # NODE: Chunked Sampler for Long-Form Generation
 # -----------------------------------------------------------------------------------
 
-class FoleyChunkedSampler:
+class FoleyTuneChunkedSampler:
     """Generate audio for long videos by chunking with overlap and crossfade.
 
     Connects to FoleyFeatureExtractor's FOLEY_FEATURES output. Splits denoising
@@ -493,9 +274,9 @@ class FoleyChunkedSampler:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "hunyuan_model": ("HUNYUAN_MODEL",),
-                "hunyuan_deps": ("HUNYUAN_DEPS",),
-                "features": ("FOLEY_FEATURES",),
+                "hunyuan_model": ("FOLEYTUNE_MODEL",),
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
+                "features": ("FOLEYTUNE_FEATURES",),
                 "cfg_scale": ("FLOAT", {"default": 4.5, "min": 1.0, "max": 10.0, "step": 0.1}),
                 "steps": ("INT", {"default": 50, "min": 10, "max": 100, "step": 1}),
                 "sampler": (cls.SAMPLER_NAMES, {"default": "euler"}),
@@ -510,15 +291,15 @@ class FoleyChunkedSampler:
                 "force_offload": ("BOOLEAN", {"default": True}),
             },
             "optional": {
-                "torch_compile_cfg": ("TORCH_COMPILE_CFG",),
-                "block_swap_args": ("BLOCKSWAPARGS",),
+                "torch_compile_cfg": ("FOLEYTUNE_COMPILE_CFG",),
+                "block_swap_args": ("FOLEYTUNE_BLOCKSWAP",),
             }
         }
 
     RETURN_TYPES = ("AUDIO", "AUDIO")
     RETURN_NAMES = ("audio_first", "audio_batch")
     FUNCTION = "generate_audio"
-    CATEGORY = "audio/HunyuanFoley"
+    CATEGORY = "FoleyTune"
 
     def generate_audio(
         self,
@@ -562,7 +343,7 @@ class FoleyChunkedSampler:
         # Apply torch.compile if configured
         if torch_compile_cfg is not None and not getattr(hunyuan_model, "_blocks_are_compiled", False):
             try:
-                hunyuan_model = HunyuanFoleyTorchCompile._apply_torch_compile(
+                hunyuan_model = FoleyTuneTorchCompile._apply_torch_compile(
                     hunyuan_model, torch_compile_cfg
                 )
             except Exception as e:
@@ -619,7 +400,7 @@ class FoleyChunkedSampler:
 # NODE: Hunyuan Foley Torch Compile (optional accelerator)
 # -----------------------------------------------------------------------------------
 
-class HunyuanFoleyTorchCompile:
+class FoleyTuneTorchCompile:
     """Torch Compile.
     
     If you change anything like duration, or batch, it'll compile again and takes about 2 minutes on a 3090.
@@ -641,9 +422,9 @@ class HunyuanFoleyTorchCompile:
         }
 
     # Emits a config object to be consumed by the Sampler
-    RETURN_TYPES = ("TORCH_COMPILE_CFG",)
+    RETURN_TYPES = ("FOLEYTUNE_COMPILE_CFG",)
     FUNCTION = "make_config"
-    CATEGORY = "audio/HunyuanFoley"
+    CATEGORY = "FoleyTune"
 
     def make_config(self, backend, mode, dynamic, fullgraph, dynamo_cache_limit):
         # Map tri-state string to Python value
@@ -795,7 +576,7 @@ class HunyuanFoleyTorchCompile:
         model._blocks_are_compiled = True
         return model
 
-class HunyuanBlockSwap:
+class FoleyTuneBlockSwap:
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -809,10 +590,10 @@ class HunyuanBlockSwap:
                 "block_swap_debug": ("BOOLEAN", {"default": False, "tooltip": "Enable debug logging for block swapping performance."}),
             },
         }
-    RETURN_TYPES = ("BLOCKSWAPARGS",)
+    RETURN_TYPES = ("FOLEYTUNE_BLOCKSWAP",)
     RETURN_NAMES = ("block_swap_args",)
     FUNCTION = "set_args"
-    CATEGORY = "audio/HunyuanFoley"
+    CATEGORY = "FoleyTune"
     DESCRIPTION = "Settings for block swapping to reduce VRAM by offloading transformer blocks to CPU."
 
     def set_args(self, **kwargs):
@@ -822,7 +603,7 @@ class HunyuanBlockSwap:
 # -----------------------------------------------------------------------------------
 # HELPER NODE: Select Audio From Batch
 # -----------------------------------------------------------------------------------
-class SelectAudioFromBatch:
+class FoleyTuneSelectAudioFromBatch:
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -833,7 +614,7 @@ class SelectAudioFromBatch:
         }
     RETURN_TYPES = ("AUDIO",)
     FUNCTION = "select_audio"
-    CATEGORY = "audio/utils"
+    CATEGORY = "FoleyTune"
 
     def select_audio(self, audio_batch, index):
         waveform_batch = audio_batch['waveform']
@@ -855,20 +636,18 @@ class SelectAudioFromBatch:
 # NODE MAPPINGS - This is how ComfyUI discovers the nodes.
 # -----------------------------------------------------------------------------------
 NODE_CLASS_MAPPINGS = {
-    "HunyuanModelLoader": HunyuanModelLoader,
-    "HunyuanDependenciesLoader": HunyuanDependenciesLoader,
-    "HunyuanFoleySampler": HunyuanFoleySampler,
-    "FoleyChunkedSampler": FoleyChunkedSampler,
-    "HunyuanFoleyTorchCompile": HunyuanFoleyTorchCompile,
-    "HunyuanBlockSwap": HunyuanBlockSwap,
-    "SelectAudioFromBatch": SelectAudioFromBatch,
+    "FoleyTuneModelLoader": FoleyTuneModelLoader,
+    "FoleyTuneDependenciesLoader": FoleyTuneDependenciesLoader,
+    "FoleyTuneChunkedSampler": FoleyTuneChunkedSampler,
+    "FoleyTuneTorchCompile": FoleyTuneTorchCompile,
+    "FoleyTuneBlockSwap": FoleyTuneBlockSwap,
+    "FoleyTuneSelectAudioFromBatch": FoleyTuneSelectAudioFromBatch,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "HunyuanModelLoader": "Hunyuan-Foley Model Loader",
-    "HunyuanDependenciesLoader": "Hunyuan-Foley Dependencies Loader",
-    "HunyuanFoleySampler": "Hunyuan-Foley Sampler",
-    "FoleyChunkedSampler": "Foley Chunked Sampler",
-    "HunyuanFoleyTorchCompile": "Hunyuan-Foley Torch Compile",
-    "HunyuanBlockSwap": "Hunyuan-Foley BlockSwap Settings",
-    "SelectAudioFromBatch": "Select Audio From Batch",
+    "FoleyTuneModelLoader": "FoleyTune Model Loader",
+    "FoleyTuneDependenciesLoader": "FoleyTune Dependencies Loader",
+    "FoleyTuneChunkedSampler": "FoleyTune Chunked Sampler",
+    "FoleyTuneTorchCompile": "FoleyTune Torch Compile",
+    "FoleyTuneBlockSwap": "FoleyTune BlockSwap Settings",
+    "FoleyTuneSelectAudioFromBatch": "FoleyTune Select Audio From Batch",
 }

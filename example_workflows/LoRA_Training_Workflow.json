@@ -4,7 +4,7 @@
   "nodes": [
     {
       "id": 1,
-      "type": "HunyuanModelLoader",
+      "type": "FoleyTuneModelLoader",
       "pos": [30, 50],
       "size": [440, 106],
       "flags": {},
@@ -16,14 +16,14 @@
         {"name": "quantization", "type": "COMBO", "widget": {"name": "quantization"}, "link": null}
       ],
       "outputs": [
-        {"name": "HUNYUAN_MODEL", "type": "HUNYUAN_MODEL", "links": [10, 12]}
+        {"name": "FOLEYTUNE_MODEL", "type": "FOLEYTUNE_MODEL", "links": [10, 12]}
       ],
-      "properties": {"Node name for S&R": "HunyuanModelLoader"},
+      "properties": {"Node name for S&R": "FoleyTuneModelLoader"},
       "widgets_values": ["hunyuanvideo_foley.pth", "bf16", "none"]
     },
     {
       "id": 2,
-      "type": "HunyuanDependenciesLoader",
+      "type": "FoleyTuneDependenciesLoader",
       "pos": [30, 210],
       "size": [440, 82],
       "flags": {},
@@ -34,14 +34,14 @@
         {"name": "synchformer_name", "type": "COMBO", "widget": {"name": "synchformer_name"}, "link": null}
       ],
       "outputs": [
-        {"name": "HUNYUAN_DEPS", "type": "HUNYUAN_DEPS", "links": [7, 11, 14, 17]}
+        {"name": "FOLEYTUNE_DEPS", "type": "FOLEYTUNE_DEPS", "links": [7, 11, 14, 17]}
       ],
-      "properties": {"Node name for S&R": "HunyuanDependenciesLoader"},
+      "properties": {"Node name for S&R": "FoleyTuneDependenciesLoader"},
       "widgets_values": ["vae_128d_48k.pth", "synchformer_state_dict.pth"]
     },
     {
       "id": 3,
-      "type": "FoleyDatasetLoader",
+      "type": "FoleyTuneDatasetLoader",
       "pos": [630, 50],
       "size": [440, 58],
       "flags": {},
@@ -51,58 +51,58 @@
         {"name": "folder", "type": "STRING", "widget": {"name": "folder"}, "link": null}
       ],
       "outputs": [
-        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "links": [1]}
+        {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "links": [1]}
       ],
-      "properties": {"Node name for S&R": "FoleyDatasetLoader"},
+      "properties": {"Node name for S&R": "FoleyTuneDatasetLoader"},
       "widgets_values": ["/path/to/raw/audio"]
     },
     {
       "id": 4,
-      "type": "FoleyDatasetResampler",
+      "type": "FoleyTuneDatasetResampler",
       "pos": [630, 160],
       "size": [440, 82],
       "flags": {},
       "order": 3,
       "mode": 0,
       "inputs": [
-        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "link": 1},
+        {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "link": 1},
         {"name": "target_sr", "type": "INT", "widget": {"name": "target_sr"}, "link": null}
       ],
       "outputs": [
-        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "links": [2]}
+        {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "links": [2]}
       ],
-      "properties": {"Node name for S&R": "FoleyDatasetResampler"},
+      "properties": {"Node name for S&R": "FoleyTuneDatasetResampler"},
       "widgets_values": [48000]
     },
     {
       "id": 5,
-      "type": "FoleyDatasetLUFSNormalizer",
+      "type": "FoleyTuneDatasetLUFSNormalizer",
       "pos": [630, 300],
       "size": [440, 106],
       "flags": {},
       "order": 4,
       "mode": 0,
       "inputs": [
-        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "link": 2},
+        {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "link": 2},
         {"name": "target_lufs", "type": "FLOAT", "widget": {"name": "target_lufs"}, "link": null},
         {"name": "true_peak_dbtp", "type": "FLOAT", "widget": {"name": "true_peak_dbtp"}, "link": null}
       ],
       "outputs": [
-        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "links": [3]}
+        {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "links": [3]}
       ],
-      "properties": {"Node name for S&R": "FoleyDatasetLUFSNormalizer"},
+      "properties": {"Node name for S&R": "FoleyTuneDatasetLUFSNormalizer"},
       "widgets_values": [-23.0, -1.0]
     },
     {
       "id": 6,
-      "type": "FoleyDatasetCompressor",
+      "type": "FoleyTuneDatasetCompressor",
       "pos": [630, 460],
       "size": [440, 178],
       "flags": {},
       "order": 5,
       "mode": 0,
       "inputs": [
-        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "link": 3},
+        {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "link": 3},
         {"name": "threshold_db", "type": "FLOAT", "widget": {"name": "threshold_db"}, "link": null},
         {"name": "ratio", "type": "FLOAT", "widget": {"name": "ratio"}, "link": null},
         {"name": "attack_ms", "type": "FLOAT", "widget": {"name": "attack_ms"}, "link": null},
@@ -110,69 +110,69 @@
         {"name": "mix", "type": "FLOAT", "widget": {"name": "mix"}, "link": null}
       ],
       "outputs": [
-        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "links": [4]}
+        {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "links": [4]}
       ],
-      "properties": {"Node name for S&R": "FoleyDatasetCompressor"},
+      "properties": {"Node name for S&R": "FoleyTuneDatasetCompressor"},
       "widgets_values": [-18.0, 2.5, 10.0, 100.0, 0.4]
     },
     {
       "id": 7,
-      "type": "FoleyDatasetHfSmoother",
+      "type": "FoleyTuneDatasetHfSmoother",
       "pos": [630, 700],
       "size": [440, 106],
       "flags": {},
       "order": 6,
       "mode": 0,
       "inputs": [
-        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "link": 4},
+        {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "link": 4},
         {"name": "cutoff_hz", "type": "FLOAT", "widget": {"name": "cutoff_hz"}, "link": null},
         {"name": "blend", "type": "FLOAT", "widget": {"name": "blend"}, "link": null}
       ],
       "outputs": [
-        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "links": [5]}
+        {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "links": [5]}
       ],
-      "properties": {"Node name for S&R": "FoleyDatasetHfSmoother"},
+      "properties": {"Node name for S&R": "FoleyTuneDatasetHfSmoother"},
       "widgets_values": [16000.0, 0.5]
     },
     {
       "id": 8,
-      "type": "FoleyDatasetInspector",
+      "type": "FoleyTuneDatasetInspector",
       "pos": [630, 860],
       "size": [440, 154],
       "flags": {},
       "order": 7,
       "mode": 0,
       "inputs": [
-        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "link": 5},
+        {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "link": 5},
         {"name": "skip_rejected", "type": "BOOLEAN", "widget": {"name": "skip_rejected"}, "link": null},
         {"name": "min_snr_db", "type": "FLOAT", "widget": {"name": "min_snr_db"}, "link": null},
         {"name": "check_codec_artifacts", "type": "BOOLEAN", "widget": {"name": "check_codec_artifacts"}, "link": null},
         {"name": "max_silence_fraction", "type": "FLOAT", "widget": {"name": "max_silence_fraction"}, "link": null}
       ],
       "outputs": [
-        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "links": [6]},
+        {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "links": [6]},
         {"name": "report", "type": "STRING", "links": null}
       ],
-      "properties": {"Node name for S&R": "FoleyDatasetInspector"},
+      "properties": {"Node name for S&R": "FoleyTuneDatasetInspector"},
       "widgets_values": [true, 15.0, true, 0.5]
     },
     {
       "id": 9,
-      "type": "FoleyDatasetSaver",
+      "type": "FoleyTuneDatasetSaver",
       "pos": [630, 1070],
       "size": [440, 106],
       "flags": {},
       "order": 8,
       "mode": 0,
       "inputs": [
-        {"name": "dataset", "type": "FOLEY_AUDIO_DATASET", "link": 6},
+        {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "link": 6},
         {"name": "output_dir", "type": "STRING", "widget": {"name": "output_dir"}, "link": null},
         {"name": "npz_source_dir", "type": "STRING", "widget": {"name": "npz_source_dir"}, "link": null}
       ],
       "outputs": [
         {"name": "report", "type": "STRING", "links": null}
       ],
-      "properties": {"Node name for S&R": "FoleyDatasetSaver"},
+      "properties": {"Node name for S&R": "FoleyTuneDatasetSaver"},
       "widgets_values": ["/path/to/cleaned/audio", ""]
     },
     {
@@ -205,14 +205,14 @@
     },
     {
       "id": 11,
-      "type": "FoleyFeatureExtractor",
+      "type": "FoleyTuneFeatureExtractor",
       "pos": [1280, 480],
       "size": [480, 280],
       "flags": {},
       "order": 10,
       "mode": 0,
       "inputs": [
-        {"name": "hunyuan_deps", "type": "HUNYUAN_DEPS", "link": 7},
+        {"name": "hunyuan_deps", "type": "FOLEYTUNE_DEPS", "link": 7},
         {"name": "image", "type": "IMAGE", "link": 8},
         {"name": "audio", "type": "AUDIO", "link": 9},
         {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": null},
@@ -224,20 +224,20 @@
       "outputs": [
         {"name": "npz_path", "type": "STRING", "links": null}
       ],
-      "properties": {"Node name for S&R": "FoleyFeatureExtractor"},
+      "properties": {"Node name for S&R": "FoleyTuneFeatureExtractor"},
       "widgets_values": ["a description of the sound", 25.0, 0.0, "/path/to/features/", "clip"]
     },
     {
       "id": 12,
-      "type": "FoleyLoRATrainer",
+      "type": "FoleyTuneLoRATrainer",
       "pos": [1930, 50],
       "size": [470, 820],
       "flags": {},
       "order": 11,
       "mode": 0,
       "inputs": [
-        {"name": "hunyuan_model", "type": "HUNYUAN_MODEL", "link": 10},
-        {"name": "hunyuan_deps", "type": "HUNYUAN_DEPS", "link": 11},
+        {"name": "hunyuan_model", "type": "FOLEYTUNE_MODEL", "link": 10},
+        {"name": "hunyuan_deps", "type": "FOLEYTUNE_DEPS", "link": 11},
         {"name": "data_dir", "type": "STRING", "widget": {"name": "data_dir"}, "link": null},
         {"name": "output_dir", "type": "STRING", "widget": {"name": "output_dir"}, "link": null},
         {"name": "target", "type": "COMBO", "widget": {"name": "target"}, "link": null},
@@ -264,28 +264,28 @@
         {"name": "resume_from", "type": "STRING", "widget": {"name": "resume_from"}, "link": null}
       ],
       "outputs": [
-        {"name": "HUNYUAN_MODEL", "type": "HUNYUAN_MODEL", "links": null}
+        {"name": "FOLEYTUNE_MODEL", "type": "FOLEYTUNE_MODEL", "links": null}
       ],
-      "properties": {"Node name for S&R": "FoleyLoRATrainer"},
+      "properties": {"Node name for S&R": "FoleyTuneLoRATrainer"},
       "widgets_values": ["/path/to/features/", "/path/to/lora_output/", "all_attn_mlp", 64, 64.0, 0.0001, 3000, 8, 1, 100, 500, "logit_normal", "bf16", 42, 1.0, 0.6, "standard", false, 0.0, 1.0, "constant", 0.0, 0.0, ""]
     },
     {
       "id": 13,
-      "type": "FoleyLoRALoader",
+      "type": "FoleyTuneLoRALoader",
       "pos": [2580, 50],
       "size": [450, 106],
       "flags": {},
       "order": 12,
       "mode": 0,
       "inputs": [
-        {"name": "hunyuan_model", "type": "HUNYUAN_MODEL", "link": 12},
+        {"name": "hunyuan_model", "type": "FOLEYTUNE_MODEL", "link": 12},
         {"name": "adapter_path", "type": "STRING", "widget": {"name": "adapter_path"}, "link": null},
         {"name": "strength", "type": "FLOAT", "widget": {"name": "strength"}, "link": null}
       ],
       "outputs": [
-        {"name": "HUNYUAN_MODEL", "type": "HUNYUAN_MODEL", "links": [13]}
+        {"name": "FOLEYTUNE_MODEL", "type": "FOLEYTUNE_MODEL", "links": [13]}
       ],
-      "properties": {"Node name for S&R": "FoleyLoRALoader"},
+      "properties": {"Node name for S&R": "FoleyTuneLoRALoader"},
       "widgets_values": ["/path/to/lora_output/adapter_final.pt", 1.0]
     },
     {
@@ -318,18 +318,18 @@
     },
     {
       "id": 15,
-      "type": "HunyuanFoleySampler",
+      "type": "FoleyTuneChunkedSampler",
       "pos": [2580, 640],
       "size": [450, 530],
       "flags": {},
       "order": 14,
       "mode": 0,
       "inputs": [
-        {"name": "hunyuan_model", "type": "HUNYUAN_MODEL", "link": 13},
-        {"name": "hunyuan_deps", "type": "HUNYUAN_DEPS", "link": 14},
+        {"name": "hunyuan_model", "type": "FOLEYTUNE_MODEL", "link": 13},
+        {"name": "hunyuan_deps", "type": "FOLEYTUNE_DEPS", "link": 14},
         {"name": "image", "shape": 7, "type": "IMAGE", "link": 15},
-        {"name": "torch_compile_cfg", "shape": 7, "type": "TORCH_COMPILE_CFG", "link": null},
-        {"name": "block_swap_args", "shape": 7, "type": "BLOCKSWAPARGS", "link": null},
+        {"name": "torch_compile_cfg", "shape": 7, "type": "FOLEYTUNE_COMPILE_CFG", "link": null},
+        {"name": "block_swap_args", "shape": 7, "type": "FOLEYTUNE_BLOCKSWAP", "link": null},
         {"name": "frame_rate", "type": "FLOAT", "widget": {"name": "frame_rate"}, "link": null},
         {"name": "duration", "type": "FLOAT", "widget": {"name": "duration"}, "link": null},
         {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": null},
@@ -345,7 +345,7 @@
         {"name": "audio_first", "type": "AUDIO", "links": [16]},
         {"name": "audio_batch", "type": "AUDIO", "links": null}
       ],
-      "properties": {"Node name for S&R": "HunyuanFoleySampler"},
+      "properties": {"Node name for S&R": "FoleyTuneChunkedSampler"},
       "widgets_values": [24, 10, "a description of the sound", "", 4.5, 50, "euler", 1, 42, "fixed", false]
     },
     {
@@ -382,20 +382,20 @@
     },
     {
       "id": 18,
-      "type": "FoleyVAERoundtrip",
+      "type": "FoleyTuneVAERoundtrip",
       "pos": [1280, 1220],
       "size": [480, 82],
       "flags": {},
       "order": 17,
       "mode": 0,
       "inputs": [
-        {"name": "hunyuan_deps", "type": "HUNYUAN_DEPS", "link": 17},
+        {"name": "hunyuan_deps", "type": "FOLEYTUNE_DEPS", "link": 17},
         {"name": "audio", "type": "AUDIO", "link": 18}
       ],
       "outputs": [
         {"name": "AUDIO", "type": "AUDIO", "links": [19]}
       ],
-      "properties": {"Node name for S&R": "FoleyVAERoundtrip"},
+      "properties": {"Node name for S&R": "FoleyTuneVAERoundtrip"},
       "widgets_values": []
     },
     {
@@ -415,23 +415,23 @@
     }
   ],
   "links": [
-    [1, 3, 0, 4, 0, "FOLEY_AUDIO_DATASET"],
-    [2, 4, 0, 5, 0, "FOLEY_AUDIO_DATASET"],
-    [3, 5, 0, 6, 0, "FOLEY_AUDIO_DATASET"],
-    [4, 6, 0, 7, 0, "FOLEY_AUDIO_DATASET"],
-    [5, 7, 0, 8, 0, "FOLEY_AUDIO_DATASET"],
-    [6, 8, 0, 9, 0, "FOLEY_AUDIO_DATASET"],
-    [7, 2, 0, 11, 0, "HUNYUAN_DEPS"],
+    [1, 3, 0, 4, 0, "FOLEYTUNE_AUDIO_DATASET"],
+    [2, 4, 0, 5, 0, "FOLEYTUNE_AUDIO_DATASET"],
+    [3, 5, 0, 6, 0, "FOLEYTUNE_AUDIO_DATASET"],
+    [4, 6, 0, 7, 0, "FOLEYTUNE_AUDIO_DATASET"],
+    [5, 7, 0, 8, 0, "FOLEYTUNE_AUDIO_DATASET"],
+    [6, 8, 0, 9, 0, "FOLEYTUNE_AUDIO_DATASET"],
+    [7, 2, 0, 11, 0, "FOLEYTUNE_DEPS"],
     [8, 10, 0, 11, 1, "IMAGE"],
     [9, 10, 2, 11, 2, "AUDIO"],
-    [10, 1, 0, 12, 0, "HUNYUAN_MODEL"],
-    [11, 2, 0, 12, 1, "HUNYUAN_DEPS"],
-    [12, 1, 0, 13, 0, "HUNYUAN_MODEL"],
-    [13, 13, 0, 15, 0, "HUNYUAN_MODEL"],
-    [14, 2, 0, 15, 1, "HUNYUAN_DEPS"],
+    [10, 1, 0, 12, 0, "FOLEYTUNE_MODEL"],
+    [11, 2, 0, 12, 1, "FOLEYTUNE_DEPS"],
+    [12, 1, 0, 13, 0, "FOLEYTUNE_MODEL"],
+    [13, 13, 0, 15, 0, "FOLEYTUNE_MODEL"],
+    [14, 2, 0, 15, 1, "FOLEYTUNE_DEPS"],
     [15, 14, 0, 15, 2, "IMAGE"],
     [16, 15, 0, 16, 0, "AUDIO"],
-    [17, 2, 0, 18, 0, "HUNYUAN_DEPS"],
+    [17, 2, 0, 18, 0, "FOLEYTUNE_DEPS"],
     [18, 17, 0, 18, 1, "AUDIO"],
     [19, 18, 0, 19, 0, "AUDIO"]
   ],

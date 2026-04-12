@@ -427,6 +427,20 @@ def _ffprobe_metadata(path: Path):
     raise RuntimeError(f"No video stream found in {path}")
 
 
+def _extract_audio_wav(video_path: Path, wav_path: Path):
+    """Extract audio from video as 48kHz mono WAV via FFmpeg."""
+    import subprocess
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(video_path),
+        "-vn", "-ac", "1", "-ar", "48000", "-f", "wav",
+        str(wav_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip())
+
+
 # --- Node: Batch Feature Extractor ------------------------------------------
 
 class FoleyBatchFeatureExtractor:
@@ -510,6 +524,7 @@ class FoleyBatchFeatureExtractor:
             clip_prompt = txt_path.read_text().strip() if txt_path.exists() else prompt
 
             out_name = rel.stem + ".npz"
+            wav_name = rel.stem + ".wav"
 
             # Deduplicate output names (e.g. clip.mp4 + clip.avi in same dir)
             if out_name in seen_names:
@@ -522,7 +537,7 @@ class FoleyBatchFeatureExtractor:
 
             clips.append({
                 "path": f, "rel": str(rel), "fps": fps, "duration": dur,
-                "prompt": clip_prompt, "out_name": out_name,
+                "prompt": clip_prompt, "out_name": out_name, "wav_name": wav_name,
                 "txt_source": str(txt_path.name) if txt_path.exists() else "global",
             })
 
@@ -610,7 +625,7 @@ class FoleyBatchFeatureExtractor:
         torch.cuda.empty_cache()
         logger.info(f"  {len(prompt_cache)} unique prompt(s) encoded")
 
-        # --- Phase 5: Save .npz files ---
+        # --- Phase 5: Save .npz + .wav files ---
         for clip in clips:
             out_path = out_dir / clip["out_name"]
             np.savez(
@@ -622,15 +637,23 @@ class FoleyBatchFeatureExtractor:
                 duration=clip["duration"],
                 fps=clip["fps"],
             )
+            # Extract audio as 48kHz mono WAV alongside the .npz
+            wav_path = out_dir / clip["wav_name"]
+            try:
+                _extract_audio_wav(clip["path"], wav_path)
+                audio_status = "audio OK"
+            except Exception as e:
+                audio_status = f"audio FAIL: {e}"
             lines.append(
                 f"  OK    {clip['rel']} ({clip['duration']:.1f}s @ "
-                f"{clip['fps']:.1f}fps) → {clip['out_name']}  "
-                f"prompt: {clip['txt_source']}"
+                f"{clip['fps']:.1f}fps) → {clip['out_name']} + "
+                f"{clip['wav_name']}  prompt: {clip['txt_source']}  "
+                f"{audio_status}"
             )
             del clip["clip_feat"], clip["sync_feat"], clip["text_feat"]
 
         lines.append("")
-        lines.append(f"Saved {n} .npz files to {out_dir}")
+        lines.append(f"Saved {n} .npz + .wav pairs to {out_dir}")
 
         report = "\n".join(lines)
         logger.info(f"[BatchFeatureExtractor]\n{report}")

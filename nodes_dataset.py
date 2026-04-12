@@ -705,7 +705,7 @@ def _extract_and_score(args):
     """Extract audio from video and compute spectral scores.
 
     Top-level function so it's picklable for ProcessPoolExecutor.
-    Returns a dict with path, rel, wav, sr, duration, bw, sq (or error).
+    Returns numpy arrays (not torch tensors) to avoid shared memory issues.
     """
     f, folder_str = args
     folder = Path(folder_str)
@@ -716,13 +716,14 @@ def _extract_and_score(args):
     try:
         wav, sr = _extract_audio_from_video(f)
     except Exception as e:
-        return {"path": f, "rel": rel, "error": str(e)}
+        return {"path": str(f), "rel": str(rel), "error": str(e)}
     duration = wav.shape[-1] / sr
     bw = _bandwidth_score(wav, sr)
     sq = _spectral_quality_score(wav, sr)
+    # Convert to numpy for pickle serialization (torch tensors need shm)
     return {
-        "path": f, "rel": rel, "duration": duration,
-        "bw": bw, "sq": sq, "wav": wav, "sr": sr,
+        "path": str(f), "rel": str(rel), "duration": duration,
+        "bw": bw, "sq": sq, "wav_np": wav.numpy(), "sr": sr,
     }
 
 
@@ -935,13 +936,22 @@ class FoleyTuneVideoQualityFilter:
         results = []
         with ProcessPoolExecutor(max_workers=num_workers) as pool:
             for r in pool.map(_extract_and_score, [(f, folder_str) for f in files]):
-                # Add CLAP mono (requires torchaudio, keep in main process)
-                if "error" not in r and (use_clap or use_neg_clap):
-                    mono = r["wav"][0].mean(0, keepdim=True)
-                    if r["sr"] != 48000:
-                        r["mono_48k"] = torchaudio.functional.resample(mono, r["sr"], 48000)
-                    else:
-                        r["mono_48k"] = mono
+                if "error" not in r:
+                    # Convert numpy back to torch (workers return numpy to avoid shm)
+                    r["wav"] = torch.from_numpy(r["wav_np"])
+                    del r["wav_np"]
+                    r["path"] = Path(r["path"])
+                    r["rel"] = Path(r["rel"])
+                    # CLAP mono resampling (torchaudio, main process only)
+                    if use_clap or use_neg_clap:
+                        mono = r["wav"][0].mean(0, keepdim=True)
+                        if r["sr"] != 48000:
+                            r["mono_48k"] = torchaudio.functional.resample(mono, r["sr"], 48000)
+                        else:
+                            r["mono_48k"] = mono
+                else:
+                    r["path"] = Path(r["path"])
+                    r["rel"] = Path(r["rel"])
                 results.append(r)
 
         # Sort by relative path to keep report deterministic

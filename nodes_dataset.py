@@ -701,6 +701,31 @@ class FoleyTuneDatasetQualityFilter:
 # ─── Node 5c: Video Quality Filter ────────────────────────────────────────────
 
 
+def _extract_and_score(args):
+    """Extract audio from video and compute spectral scores.
+
+    Top-level function so it's picklable for ProcessPoolExecutor.
+    Returns a dict with path, rel, wav, sr, duration, bw, sq (or error).
+    """
+    f, folder_str = args
+    folder = Path(folder_str)
+    try:
+        rel = f.relative_to(folder)
+    except ValueError:
+        rel = Path(f.name)
+    try:
+        wav, sr = _extract_audio_from_video(f)
+    except Exception as e:
+        return {"path": f, "rel": rel, "error": str(e)}
+    duration = wav.shape[-1] / sr
+    bw = _bandwidth_score(wav, sr)
+    sq = _spectral_quality_score(wav, sr)
+    return {
+        "path": f, "rel": rel, "duration": duration,
+        "bw": bw, "sq": sq, "wav": wav, "sr": sr,
+    }
+
+
 def _extract_audio_from_video(path: Path):
     """Extract audio from a video file via FFmpeg subprocess.
 
@@ -842,7 +867,6 @@ class FoleyTuneVideoQualityFilter:
                       weight_clap: float = 0.2,
                       seed: int = 42):
         import shutil
-        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         folder = Path(video_folder.strip())
         if not folder.exists():
@@ -900,52 +924,25 @@ class FoleyTuneVideoQualityFilter:
         w_sq = weight_spectral / w_total
         w_cl = (weight_clap / w_total) if use_clap else 0.0
 
-        # --- Phase 1: parallel FFmpeg extraction, then sequential scoring ---
-        # FFmpeg subprocess releases the GIL so threads run truly in parallel.
-        # Spectral scoring is CPU-bound numpy/torch (GIL-held), so run after.
-        def _extract_clip(f):
-            """Extract audio via FFmpeg. Returns (path, rel, wav, sr) or error."""
-            try:
-                rel = f.relative_to(folder)
-            except ValueError:
-                rel = Path(f.name)
-            try:
-                wav, sr = _extract_audio_from_video(f)
-            except Exception as e:
-                return {"path": f, "rel": rel, "error": str(e)}
-            return {"path": f, "rel": rel, "wav": wav, "sr": sr}
+        # --- Phase 1: parallel extraction + scoring via ProcessPoolExecutor ---
+        # Separate processes bypass the GIL so both FFmpeg I/O and
+        # numpy/torch spectral scoring run truly in parallel.
+        from concurrent.futures import ProcessPoolExecutor
 
-        print(f"[VideoQualityFilter] Extracting {len(files)} clips with {num_workers} workers...",
+        print(f"[VideoQualityFilter] Processing {len(files)} clips with {num_workers} workers...",
               flush=True)
-        extracted = []
-        with ThreadPoolExecutor(max_workers=num_workers) as pool:
-            futures = {pool.submit(_extract_clip, f): f for f in files}
-            for future in as_completed(futures):
-                extracted.append(future.result())
-
-        # Score sequentially (CPU-bound, avoids GIL contention)
-        print(f"[VideoQualityFilter] Scoring {len(extracted)} clips...", flush=True)
+        folder_str = str(folder)
         results = []
-        for r in extracted:
-            if "error" in r:
+        with ProcessPoolExecutor(max_workers=num_workers) as pool:
+            for r in pool.map(_extract_and_score, [(f, folder_str) for f in files]):
+                # Add CLAP mono (requires torchaudio, keep in main process)
+                if "error" not in r and (use_clap or use_neg_clap):
+                    mono = r["wav"][0].mean(0, keepdim=True)
+                    if r["sr"] != 48000:
+                        r["mono_48k"] = torchaudio.functional.resample(mono, r["sr"], 48000)
+                    else:
+                        r["mono_48k"] = mono
                 results.append(r)
-                continue
-            wav, sr = r["wav"], r["sr"]
-            duration = wav.shape[-1] / sr
-            bw = _bandwidth_score(wav, sr)
-            sq = _spectral_quality_score(wav, sr)
-            mono_48k = None
-            if use_clap or use_neg_clap:
-                mono = wav[0].mean(0, keepdim=True)
-                if sr != 48000:
-                    mono_48k = torchaudio.functional.resample(mono, sr, 48000)
-                else:
-                    mono_48k = mono
-            results.append({
-                "path": r["path"], "rel": r["rel"], "duration": duration,
-                "bw": bw, "sq": sq, "mono_48k": mono_48k,
-                "wav": wav, "sr": sr,
-            })
 
         # Sort by relative path to keep report deterministic
         results.sort(key=lambda r: str(r["rel"]))

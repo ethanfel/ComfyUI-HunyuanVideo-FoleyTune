@@ -928,14 +928,16 @@ class FoleyTuneVideoQualityFilter:
         # --- Phase 1: parallel extraction + scoring via ProcessPoolExecutor ---
         # Separate processes bypass the GIL so both FFmpeg I/O and
         # numpy/torch spectral scoring run truly in parallel.
-        from concurrent.futures import ProcessPoolExecutor
+        from concurrent.futures import ProcessPoolExecutor, as_completed
 
         print(f"[VideoQualityFilter] Processing {len(files)} clips with {num_workers} workers...",
               flush=True)
         folder_str = str(folder)
         results = []
         with ProcessPoolExecutor(max_workers=num_workers) as pool:
-            for r in pool.map(_extract_and_score, [(f, folder_str) for f in files]):
+            futures = [pool.submit(_extract_and_score, (f, folder_str)) for f in files]
+            for future in as_completed(futures):
+                r = future.result()
                 if "error" not in r:
                     # Convert numpy back to torch (workers return numpy to avoid shm)
                     r["wav"] = torch.from_numpy(r["wav_np"])

@@ -1,8 +1,10 @@
 """Foley Audio Dataset Pipeline — chainable in-memory preprocessing nodes.
 
 Typical chain:
-  FoleyTuneDatasetLoader
-      ↓ FOLEYTUNE_AUDIO_DATASET
+  FoleyTuneVideoQualityFilter
+      ↓ FOLEYTUNE_AUDIO_DATASET  (+ val clip from rejected)
+  FoleyTuneBatchFeatureExtractor
+      ↓ FOLEYTUNE_AUDIO_DATASET  (+ features attached)
   FoleyTuneDatasetResampler       (optional)
       ↓ FOLEYTUNE_AUDIO_DATASET
   FoleyTuneDatasetLUFSNormalizer  (optional)
@@ -15,10 +17,11 @@ Typical chain:
       ↓ FOLEYTUNE_AUDIO_DATASET
   FoleyTuneDatasetInspector       (optional)
       ↓ FOLEYTUNE_AUDIO_DATASET  +  STRING report
-  FoleyTuneDatasetQualityFilter   (optional)
-      ↓ FOLEYTUNE_AUDIO_DATASET  +  STRING report
-  FoleyTuneDatasetSaver           (optional)
-      ↓ STRING report
+  FoleyTuneDatasetSaver
+      ↓ STRING report  +  dataset.json  +  val/ subfolder
+
+Alternative entry points:
+  FoleyTuneDatasetLoader          → FOLEYTUNE_AUDIO_DATASET (from saved FLAC files)
   FoleyTuneDatasetItemExtractor   → AUDIO (bridges to standard nodes)
 """
 

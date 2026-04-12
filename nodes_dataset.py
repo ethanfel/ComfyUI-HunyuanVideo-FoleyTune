@@ -714,7 +714,10 @@ def _clap_preprocess(mono_np):
     inputs = _worker_clap_proc(
         audio=[mono_np], sampling_rate=48000, return_tensors="np",
     )
-    return inputs["input_features"][0]  # [T, F] numpy
+    feats = inputs["input_features"][0]  # (1, T, F) or (T, F)
+    if feats.ndim == 3:
+        feats = feats[0]  # squeeze channel dim → (T, F)
+    return feats
 
 
 def _extract_and_score(args):

@@ -701,6 +701,22 @@ class FoleyTuneDatasetQualityFilter:
 # ─── Node 5c: Video Quality Filter ────────────────────────────────────────────
 
 
+# Per-worker CLAP processor (initialized once per process via pool initializer)
+_worker_clap_proc = None
+
+def _init_clap_worker():
+    global _worker_clap_proc
+    from transformers import ClapProcessor
+    _worker_clap_proc = ClapProcessor.from_pretrained("laion/larger_clap_general")
+
+def _clap_preprocess(mono_np):
+    """Compute CLAP mel spectrogram features for one clip. Runs in worker process."""
+    inputs = _worker_clap_proc(
+        audio=[mono_np], sampling_rate=48000, return_tensors="np",
+    )
+    return inputs["input_features"][0]  # [T, F] numpy
+
+
 def _extract_and_score(args):
     """Extract audio from video, score, and prepare CLAP mono.
 
@@ -968,46 +984,51 @@ class FoleyTuneVideoQualityFilter:
         # Sort by relative path to keep report deterministic
         results.sort(key=lambda r: str(r["rel"]))
 
-        # --- Phase 2: batched CLAP scoring ---
-        # Build index of valid clips and batch CLAP in one forward pass
+        # --- Phase 2: parallel CLAP preprocessing + batched GPU inference ---
         valid_results = [r for r in results if "error" not in r]
 
         clap_scores = {}   # idx -> cl
         neg_clap_scores = {}  # idx -> neg_cl
         if need_clap and valid_results:
-            print(f"[VideoQualityFilter] Phase 2: batched CLAP on {len(valid_results)} clips...",
-                  flush=True)
-            # Batch all mono arrays through CLAP processor + model at once
-            mono_arrays = [np.frombuffer(r["mono_48k_np"].tobytes(),
-                                         dtype=r["mono_48k_np"].dtype).reshape(r["mono_48k_np"].shape).squeeze(0)
-                           if "mono_48k_np" in r else None
-                           for r in valid_results]
-            # Filter out None (shouldn't happen if need_clap, but be safe)
-            batch_indices = [i for i, m in enumerate(mono_arrays) if m is not None]
-            batch_monos = [mono_arrays[i] for i in batch_indices]
+            # Collect mono arrays from workers
+            batch_indices = [i for i, r in enumerate(valid_results) if "mono_48k_np" in r]
+            batch_monos = [valid_results[i]["mono_48k_np"].squeeze(0) for i in batch_indices]
 
-            if batch_monos:
-                audio_inputs = clap_processor(
-                    audio=batch_monos,
-                    sampling_rate=48000,
-                    return_tensors="pt",
-                    padding=True,
-                )
-                with torch.no_grad():
-                    audio_embeds = clap_model.get_audio_features(**audio_inputs)
-                    if not isinstance(audio_embeds, torch.Tensor):
-                        audio_embeds = audio_embeds.pooler_output
-                    audio_embeds = audio_embeds / audio_embeds.norm(dim=-1, keepdim=True)
+            # Step 1: parallel mel spectrogram computation across workers
+            print(f"[VideoQualityFilter] Phase 2a: CLAP preprocessing {len(batch_monos)} clips "
+                  f"with {num_workers} workers...", flush=True)
+            t_pre = time.time()
+            with ProcessPoolExecutor(max_workers=num_workers,
+                                     initializer=_init_clap_worker) as pool:
+                mel_features = list(pool.map(_clap_preprocess, batch_monos))
+            print(f"[VideoQualityFilter] Phase 2a done in {time.time()-t_pre:.1f}s", flush=True)
 
-                for j, bi in enumerate(batch_indices):
-                    embed = audio_embeds[j:j+1]
-                    if use_clap:
-                        clap_scores[bi] = float((embed @ text_embed.T).squeeze())
-                    if use_neg_clap:
-                        neg_clap_scores[bi] = float((embed @ neg_text_embed.T).squeeze())
+            # Step 2: single batched GPU forward pass
+            print(f"[VideoQualityFilter] Phase 2b: CLAP model inference (batched)...", flush=True)
+            t_gpu = time.time()
+            # Stack all mel features into one batch tensor
+            # Pad to max length in batch
+            max_len = max(f.shape[0] for f in mel_features)
+            padded = np.zeros((len(mel_features), max_len, mel_features[0].shape[1]),
+                              dtype=mel_features[0].dtype)
+            for j, f in enumerate(mel_features):
+                padded[j, :f.shape[0]] = f
+            input_features = torch.from_numpy(padded)
 
-            t_clap = time.time()
-            print(f"[VideoQualityFilter] Phase 2 CLAP done in {t_clap-t1:.1f}s", flush=True)
+            with torch.no_grad():
+                audio_embeds = clap_model.get_audio_features(input_features=input_features)
+                if not isinstance(audio_embeds, torch.Tensor):
+                    audio_embeds = audio_embeds.pooler_output
+                audio_embeds = audio_embeds / audio_embeds.norm(dim=-1, keepdim=True)
+
+            for j, bi in enumerate(batch_indices):
+                embed = audio_embeds[j:j+1]
+                if use_clap:
+                    clap_scores[bi] = float((embed @ text_embed.T).squeeze())
+                if use_neg_clap:
+                    neg_clap_scores[bi] = float((embed @ neg_text_embed.T).squeeze())
+
+            print(f"[VideoQualityFilter] Phase 2b done in {time.time()-t_gpu:.1f}s", flush=True)
 
         # --- Phase 3: decisions ---
         print(f"[VideoQualityFilter] Phase 3: filtering...", flush=True)

@@ -799,16 +799,22 @@ class FoleyTuneVideoQualityFilter:
                     "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.1,
                     "tooltip": "Weight of CLAP similarity score in composite.",
                 }),
+                "seed": ("INT", {
+                    "default": 42,
+                    "tooltip": "Seed for random val clip selection from rejected clips.",
+                }),
             },
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("report",)
+    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET, "STRING")
+    RETURN_NAMES = ("dataset", "report")
     FUNCTION = "filter_videos"
     CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Quality-filter video clips by audio analysis only (no video frame loading). "
-        "Scores bandwidth and spectral quality, optionally copies passing clips."
+        "Scores bandwidth and spectral quality, optionally copies passing clips. "
+        "Outputs a FOLEYTUNE_AUDIO_DATASET of accepted clips (plus one rejected "
+        "clip marked as val) alongside the text report."
     )
 
     def filter_videos(self, video_folder: str, min_quality_score: float,
@@ -822,7 +828,8 @@ class FoleyTuneVideoQualityFilter:
                       min_clap_score: float = 0.1,
                       weight_bandwidth: float = 0.4,
                       weight_spectral: float = 0.4,
-                      weight_clap: float = 0.2):
+                      weight_clap: float = 0.2,
+                      seed: int = 42):
         import shutil
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -904,10 +911,10 @@ class FoleyTuneVideoQualityFilter:
                     mono_48k = torchaudio.functional.resample(mono, sr, 48000)
                 else:
                     mono_48k = mono
-            del wav
             return {
                 "path": f, "rel": rel, "duration": duration,
                 "bw": bw, "sq": sq, "mono_48k": mono_48k,
+                "wav": wav, "sr": sr,
             }
 
         print(f"[VideoQualityFilter] Processing {len(files)} clips with {num_workers} workers...",
@@ -922,6 +929,8 @@ class FoleyTuneVideoQualityFilter:
         results.sort(key=lambda r: str(r["rel"]))
 
         # --- Phase 2: CLAP scoring (sequential, model not thread-safe) + decisions ---
+        accepted_items = []
+        rejected_items = []
         n_passed = 0
         n_rejected = 0
         n_skipped = 0
@@ -989,6 +998,12 @@ class FoleyTuneVideoQualityFilter:
                     dst = out_dir / rel
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(r["path"], dst)
+                accepted_items.append({
+                    "waveform": r["wav"],
+                    "sample_rate": r["sr"],
+                    "name": r["rel"].stem,
+                    "video_path": str(r["path"]),
+                })
             else:
                 n_rejected += 1
                 status = f"REJECT: {', '.join(reasons)}"
@@ -1000,6 +1015,22 @@ class FoleyTuneVideoQualityFilter:
                     dst = out_dir / rel
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(r["path"], dst)
+                rejected_items.append({
+                    "waveform": r["wav"],
+                    "sample_rate": r["sr"],
+                    "name": r["rel"].stem,
+                    "video_path": str(r["path"]),
+                })
+
+        # --- Build dataset with optional val clip from rejected ---
+        import random as _rng
+        _rng.seed(seed)
+
+        dataset = list(accepted_items)
+        if rejected_items:
+            val_pick = _rng.choice(rejected_items)
+            val_pick["val"] = True
+            dataset.append(val_pick)
 
         avg_score = sum(scores_all) / len(scores_all) if scores_all else 0.0
         lines.append("---")
@@ -1013,7 +1044,7 @@ class FoleyTuneVideoQualityFilter:
 
         report = "\n".join(lines)
         print(f"[FoleyTuneVideoQualityFilter]\n{report}", flush=True)
-        return (report,)
+        return (dataset, report)
 
 
 # ─── Node 6: Dataset HF Smoother (batch) ─────────────────────────────────────

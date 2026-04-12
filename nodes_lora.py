@@ -29,6 +29,7 @@ from .lora.train import (
 from .lora.spectral_metrics import spectral_metrics, reference_metrics, clap_similarity
 from PIL import Image, ImageDraw
 
+FOLEYTUNE_AUDIO_DATASET = "FOLEYTUNE_AUDIO_DATASET"
 
 _SPEC_N_FFT = 2048
 _SPEC_HOP = 512
@@ -476,10 +477,10 @@ def _extract_audio_wav(video_path: Path, wav_path: Path):
 # --- Node: Batch Feature Extractor ------------------------------------------
 
 class FoleyTuneBatchFeatureExtractor:
-    """Extract SigLIP2/Synchformer/CLAP features from a folder of video clips.
+    """Extract SigLIP2/Synchformer/CLAP features from a FOLEYTUNE_AUDIO_DATASET.
 
-    Auto-detects duration and frame rate via FFprobe. Saves one .npz per clip
-    into a flat output folder, using the original filename.
+    Reads video frames from each item's video_path. Adds a 'features' dict
+    to each item with clip_features, sync_features, text_embedding, duration, fps.
     Per-clip prompts via sidecar .txt files override the global prompt.
     """
 
@@ -488,91 +489,53 @@ class FoleyTuneBatchFeatureExtractor:
         return {
             "required": {
                 "hunyuan_deps": ("FOLEYTUNE_DEPS",),
-                "video_folder": ("STRING", {
-                    "default": "",
-                    "tooltip": "Folder containing video clips. Scans 1 level of subfolders.",
-                }),
-                "output_folder": ("STRING", {
-                    "default": "",
-                    "tooltip": "Output folder for .npz feature files (flat structure).",
-                }),
+                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
                 "prompt": ("STRING", {
                     "default": "", "multiline": True,
                     "tooltip": "Global text prompt. Overridden by per-clip .txt sidecar files.",
                 }),
-                "negative_prompt": ("STRING", {
-                    "default": "", "multiline": True,
-                }),
             },
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("report",)
+    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET, "STRING")
+    RETURN_NAMES = ("dataset", "report")
     FUNCTION = "extract_batch"
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
-    def extract_batch(self, hunyuan_deps, video_folder, output_folder,
-                      prompt, negative_prompt):
+    def extract_batch(self, hunyuan_deps, dataset, prompt):
         from hunyuanvideo_foley.utils.feature_utils import (
             encode_video_with_siglip2, encode_video_with_sync,
         )
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
-        folder = Path(video_folder.strip())
-        if not folder.exists():
-            raise FileNotFoundError(f"Folder not found: {folder}")
-
-        out_dir = Path(output_folder.strip())
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        files = _scan_video_folder(folder)
-        if not files:
-            raise RuntimeError(f"No video files found in {folder}")
-
         # --- Phase 1: Probe metadata and resolve prompts ---
         clips = []
-        lines = ["=== Batch Feature Extraction ===",
-                 f"Source: {folder}", f"Output: {out_dir}", ""]
-        seen_names = set()
+        lines = ["=== Batch Feature Extraction ===", ""]
 
-        for f in files:
+        for item in dataset:
+            video_path = Path(item["video_path"])
             try:
-                rel = f.relative_to(folder)
-            except ValueError:
-                rel = Path(f.name)
-
-            try:
-                fps, dur = _ffprobe_metadata(f)
+                fps, dur = _ffprobe_metadata(video_path)
             except Exception as e:
-                lines.append(f"  SKIP  {rel}: FFprobe error — {e}")
+                lines.append(f"  SKIP  {item['name']}: FFprobe error — {e}")
                 continue
 
-            # Per-clip prompt from sidecar .txt, else global
-            txt_path = f.with_suffix(".txt")
+            txt_path = video_path.with_suffix(".txt")
             clip_prompt = txt_path.read_text().strip() if txt_path.exists() else prompt
 
-            out_name = rel.stem + ".npz"
-            wav_name = rel.stem + ".wav"
-
-            # Deduplicate output names (e.g. clip.mp4 + clip.avi in same dir)
-            if out_name in seen_names:
-                base = out_name[:-4]
-                idx = 2
-                while f"{base}_{idx}.npz" in seen_names:
-                    idx += 1
-                out_name = f"{base}_{idx}.npz"
-            seen_names.add(out_name)
-
             clips.append({
-                "path": f, "rel": str(rel), "fps": fps, "duration": dur,
-                "prompt": clip_prompt, "out_name": out_name, "wav_name": wav_name,
-                "txt_source": str(txt_path.name) if txt_path.exists() else "global",
+                "item": item,
+                "path": video_path,
+                "fps": fps,
+                "duration": dur,
+                "prompt": clip_prompt,
+                "name": item["name"],
             })
 
         if not clips:
-            raise RuntimeError(f"No valid video clips in {folder}")
+            raise RuntimeError("No valid video clips in dataset")
 
         n = len(clips)
         logger.info(f"[BatchFeatureExtractor] {n} clips to process")
@@ -652,7 +615,7 @@ class FoleyTuneBatchFeatureExtractor:
                 ).cpu()
                 del processed
                 logger.info(
-                    f"  [{i+1}/{n}] {clips[i]['rel']}: "
+                    f"  [{i+1}/{n}] {clips[i]['name']}: "
                     f"clip_feat {clip_feats[i].shape}"
                 )
         hunyuan_deps.siglip2_model.to(offload_device)
@@ -678,54 +641,41 @@ class FoleyTuneBatchFeatureExtractor:
                 ).cpu()
                 del processed
                 logger.info(
-                    f"  [{i+1}/{n}] {clips[i]['rel']}: "
+                    f"  [{i+1}/{n}] {clips[i]['name']}: "
                     f"sync_feat {sync_feats[i].shape}"
                 )
         hunyuan_deps.syncformer_model.to(offload_device)
         torch.cuda.empty_cache()
 
-        # Pass 3: Save .npz + extract audio (parallel I/O)
-        logger.info("[BatchFeatureExtractor] Saving .npz + extracting audio...")
-        def _save_clip(i):
+        # Pass 3: Attach features to dataset items
+        logger.info("[BatchFeatureExtractor] Attaching features to dataset items...")
+        output_dataset = []
+        for i in range(n):
             clip = clips[i]
             text_feat = prompt_cache[clip["prompt"]]
-            out_path = out_dir / clip["out_name"]
-            np.savez(
-                str(out_path),
-                clip_features=clip_feats[i].float().numpy(),
-                sync_features=sync_feats[i].float().numpy(),
-                text_embedding=text_feat.float().numpy(),
-                prompt=clip["prompt"],
-                duration=clip["duration"],
-                fps=clip["fps"],
+            item = dict(clip["item"])  # shallow copy to avoid mutating input
+            item["features"] = {
+                "clip_features": clip_feats[i],
+                "sync_features": sync_feats[i],
+                "text_embedding": text_feat,
+                "duration": clip["duration"],
+                "fps": clip["fps"],
+            }
+            item["prompt"] = clip["prompt"]
+            output_dataset.append(item)
+            lines.append(
+                f"  OK    {clip['name']} ({clip['duration']:.1f}s @ "
+                f"{clip['fps']:.1f}fps)  clip_feat={clip_feats[i].shape}  "
+                f"sync_feat={sync_feats[i].shape}"
             )
-            wav_path = out_dir / clip["wav_name"]
-            try:
-                _extract_audio_wav(clip["path"], wav_path)
-                audio_status = "audio OK"
-            except Exception as e:
-                audio_status = f"audio FAIL: {e}"
-            return i, audio_status
-
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(_save_clip, i) for i in range(n)]
-            for future in futures:
-                i, audio_status = future.result()
-                clip = clips[i]
-                lines.append(
-                    f"  OK    {clip['rel']} ({clip['duration']:.1f}s @ "
-                    f"{clip['fps']:.1f}fps) → {clip['out_name']} + "
-                    f"{clip['wav_name']}  prompt: {clip['txt_source']}  "
-                    f"{audio_status}"
-                )
         del clip_feats, sync_feats
 
         lines.append("")
-        lines.append(f"Saved {n} .npz + .wav pairs to {out_dir}")
+        lines.append(f"Processed {n} clips")
 
         report = "\n".join(lines)
         logger.info(f"[BatchFeatureExtractor]\n{report}")
-        return (report,)
+        return (output_dataset, report)
 
 
 # --- Node 6: VAE Roundtrip --------------------------------------------------

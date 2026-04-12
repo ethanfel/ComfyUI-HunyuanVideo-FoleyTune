@@ -753,6 +753,10 @@ class FoleyVideoQualityFilter:
                     "default": True,
                     "tooltip": "If True, only passing clips are copied to output.",
                 }),
+                "num_workers": ("INT", {
+                    "default": 4, "min": 1, "max": 16, "step": 1,
+                    "tooltip": "Parallel workers for FFmpeg extraction + spectral scoring.",
+                }),
             },
             "optional": {
                 "output_folder": ("STRING", {
@@ -808,7 +812,8 @@ class FoleyVideoQualityFilter:
     )
 
     def filter_videos(self, video_folder: str, min_quality_score: float,
-                      skip_rejected: bool, output_folder: str = "",
+                      skip_rejected: bool, num_workers: int = 4,
+                      output_folder: str = "",
                       clap_prompt: str = "",
                       clap_negative_prompt: str = "",
                       max_negative_clap_score: float = 0.3,
@@ -819,6 +824,7 @@ class FoleyVideoQualityFilter:
                       weight_spectral: float = 0.4,
                       weight_clap: float = 0.2):
         import shutil
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         folder = Path(video_folder.strip())
         if not folder.exists():
@@ -876,42 +882,67 @@ class FoleyVideoQualityFilter:
         w_sq = weight_spectral / w_total
         w_cl = (weight_clap / w_total) if use_clap else 0.0
 
+        # --- Phase 1: parallel FFmpeg extraction + spectral scoring ---
+        def _process_clip(f):
+            """Extract audio and compute spectral scores. Returns dict."""
+            try:
+                rel = f.relative_to(folder)
+            except ValueError:
+                rel = Path(f.name)
+            try:
+                wav, sr = _extract_audio_from_video(f)
+            except Exception as e:
+                return {"path": f, "rel": rel, "error": str(e)}
+            duration = wav.shape[-1] / sr
+            bw = _bandwidth_score(wav, sr)
+            sq = _spectral_quality_score(wav, sr)
+            # Prepare mono for CLAP if needed (resample on worker thread)
+            mono_48k = None
+            if use_clap or use_neg_clap:
+                mono = wav[0].mean(0, keepdim=True)
+                if sr != 48000:
+                    mono_48k = torchaudio.functional.resample(mono, sr, 48000)
+                else:
+                    mono_48k = mono
+            del wav
+            return {
+                "path": f, "rel": rel, "duration": duration,
+                "bw": bw, "sq": sq, "mono_48k": mono_48k,
+            }
+
+        print(f"[VideoQualityFilter] Processing {len(files)} clips with {num_workers} workers...",
+              flush=True)
+        results = []
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = {pool.submit(_process_clip, f): f for f in files}
+            for future in as_completed(futures):
+                results.append(future.result())
+
+        # Sort by relative path to keep report deterministic
+        results.sort(key=lambda r: str(r["rel"]))
+
+        # --- Phase 2: CLAP scoring (sequential, model not thread-safe) + decisions ---
         n_passed = 0
         n_rejected = 0
         n_skipped = 0
         scores_all = []
         lines = ["=== Video Quality Filter Report ==="]
 
-        for f in files:
-            # Relative path for display and subfolder preservation
-            try:
-                rel = f.relative_to(folder)
-            except ValueError:
-                rel = Path(f.name)
+        for r in results:
+            rel = r["rel"]
 
-            # Extract audio
-            try:
-                wav, sr = _extract_audio_from_video(f)
-            except Exception as e:
-                lines.append(f"  SKIP  {rel}: FFmpeg error — {e}")
+            if "error" in r:
+                lines.append(f"  SKIP  {rel}: FFmpeg error — {r['error']}")
                 n_skipped += 1
                 continue
 
-            duration = wav.shape[-1] / sr
-
-            # Score
-            bw = _bandwidth_score(wav, sr)
-            sq = _spectral_quality_score(wav, sr)
+            bw, sq, duration = r["bw"], r["sq"], r["duration"]
 
             cl = None
             neg_cl = None
-            audio_embed = None
-            if use_clap or use_neg_clap:
-                mono = wav[0].mean(0, keepdim=True)
-                if sr != 48000:
-                    mono = torchaudio.functional.resample(mono, sr, 48000)
+            if r["mono_48k"] is not None:
                 audio_inputs = clap_processor(
-                    audio=[mono.squeeze(0).numpy()],
+                    audio=[r["mono_48k"].squeeze(0).numpy()],
                     sampling_rate=48000,
                     return_tensors="pt",
                 )
@@ -924,6 +955,7 @@ class FoleyVideoQualityFilter:
                     cl = float((audio_embed @ text_embed.T).squeeze())
                 if use_neg_clap:
                     neg_cl = float((audio_embed @ neg_text_embed.T).squeeze())
+            del r["mono_48k"]
 
             composite = w_bw * bw + w_sq * sq
             if cl is not None:
@@ -945,9 +977,9 @@ class FoleyVideoQualityFilter:
 
             cl_str = f"{cl:.2f}" if cl is not None else "--"
             neg_cl_str = f"{neg_cl:.2f}" if neg_cl is not None else "--"
-            passed = not reasons
+            clip_passed = not reasons
 
-            if passed:
+            if clip_passed:
                 n_passed += 1
                 lines.append(
                     f"  PASS    {rel} ({duration:.1f}s): "
@@ -956,7 +988,7 @@ class FoleyVideoQualityFilter:
                 if do_copy:
                     dst = out_dir / rel
                     dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(f, dst)
+                    shutil.copy2(r["path"], dst)
             else:
                 n_rejected += 1
                 status = f"REJECT: {', '.join(reasons)}"
@@ -967,10 +999,7 @@ class FoleyVideoQualityFilter:
                 if do_copy and not skip_rejected:
                     dst = out_dir / rel
                     dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(f, dst)
-
-            # Free audio memory immediately
-            del wav
+                    shutil.copy2(r["path"], dst)
 
         avg_score = sum(scores_all) / len(scores_all) if scores_all else 0.0
         lines.append("---")

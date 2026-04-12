@@ -1259,9 +1259,9 @@ class FoleyTuneDatasetSaver:
                 }),
             },
             "optional": {
-                "npz_source_dir": ("STRING", {
+                "prompt": ("STRING", {
                     "default": "",
-                    "tooltip": "If set, copies {name}.npz from this folder alongside each saved FLAC.",
+                    "tooltip": "Global prompt written to dataset.json. Per-clip prompts are stored in .npz files.",
                 }),
             },
         }
@@ -1273,49 +1273,80 @@ class FoleyTuneDatasetSaver:
     CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Save every clip in a FOLEYTUNE_AUDIO_DATASET to output_dir as 24-bit FLAC. "
-        "Optionally copies matching .npz feature files."
+        "Writes .npz feature files from item data and generates dataset.json with train/val split."
     )
 
-    def save(self, dataset, output_dir: str, npz_source_dir: str = ""):
-        import shutil
+    def save(self, dataset, output_dir: str, prompt: str = ""):
+        import json
         import soundfile as sf
 
         out_path = Path(output_dir.strip())
         out_path.mkdir(parents=True, exist_ok=True)
 
-        npz_src = Path(npz_source_dir.strip()) if npz_source_dir.strip() else None
-
+        train_names = []
+        val_name = None
         saved = 0
-        npz_copied = 0
-        npz_missing = []
+        features_saved = 0
 
         for item in dataset:
             name = item["name"]
             wav = item["waveform"][0]  # [C, L]
             sr = item["sample_rate"]
+            is_val = item.get("val", False)
 
+            # Determine output directory
+            if is_val:
+                item_dir = out_path / "val"
+                item_dir.mkdir(exist_ok=True)
+            else:
+                item_dir = out_path
+
+            # Write FLAC
             wav_np = wav.permute(1, 0).float().numpy()  # [L, C]
             if wav_np.shape[1] == 1:
                 wav_np = wav_np[:, 0]  # [L] mono
-
-            flac_path = out_path / f"{name}.flac"
+            flac_path = item_dir / f"{name}.flac"
             sf.write(str(flac_path), wav_np, sr, subtype="PCM_24")
             saved += 1
 
-            if npz_src is not None:
-                lookup = item.get("origin_name", name)
-                npz_path = npz_src / f"{lookup}.npz"
-                if npz_path.exists():
-                    shutil.copy2(str(npz_path), str(out_path / f"{name}.npz"))
-                    npz_copied += 1
-                else:
-                    npz_missing.append(name)
+            # Write .npz from features if present
+            if "features" in item:
+                feats = item["features"]
+                npz_path = item_dir / f"{name}.npz"
+                save_kwargs = {}
+                for key in ("clip_features", "sync_features", "text_embedding"):
+                    feat_val = feats.get(key)
+                    if feat_val is not None:
+                        save_kwargs[key] = feat_val.float().numpy() if hasattr(feat_val, 'numpy') else feat_val
+                if "duration" in feats:
+                    save_kwargs["duration"] = feats["duration"]
+                if "fps" in feats:
+                    save_kwargs["fps"] = feats["fps"]
+                if item.get("prompt"):
+                    save_kwargs["prompt"] = item["prompt"]
+                np.savez(str(npz_path), **save_kwargs)
+                features_saved += 1
+
+            # Track names for dataset.json
+            if is_val:
+                val_name = f"val/{name}"
+            else:
+                train_names.append(name)
+
+        # Write dataset.json
+        ds_json = {"train": train_names}
+        if prompt.strip():
+            ds_json["prompt"] = prompt.strip()
+        if val_name:
+            ds_json["val"] = val_name
+        json_path = out_path / "dataset.json"
+        with open(json_path, "w") as f:
+            json.dump(ds_json, f, indent=2)
 
         lines = [f"[FoleyTuneDatasetSaver] Saved {saved} clips -> {out_path}"]
-        if npz_src is not None:
-            lines.append(f"  NPZ copied: {npz_copied}  missing: {len(npz_missing)}")
-            for n in npz_missing:
-                lines.append(f"    MISSING NPZ: {n}")
+        lines.append(f"  FLAC: {saved}  NPZ: {features_saved}")
+        lines.append(f"  Train: {len(train_names)}  Val: {1 if val_name else 0}")
+        lines.append(f"  dataset.json -> {json_path}")
 
         report = "\n".join(lines)
         print(report, flush=True)

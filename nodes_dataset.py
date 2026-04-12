@@ -1032,7 +1032,7 @@ class FoleyTuneVideoQualityFilter:
                               dtype=mel_features[0].dtype)
             for j, f in enumerate(mel_features):
                 padded[j, :f.shape[0], :] = f
-            input_features = torch.from_numpy(padded)
+            input_features = torch.from_numpy(padded).unsqueeze(1)  # (B,T,F) → (B,1,T,F)
 
             with torch.no_grad():
                 audio_embeds = clap_model.get_audio_features(input_features=input_features)

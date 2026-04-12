@@ -475,3 +475,67 @@ audio patterns from all three conditioning streams (visual, sync, text). At infe
 CFG amplifies the text guidance, so the prompt steers generation. A sound present in
 training audio will still be generated even if not mentioned in the prompt — the visual
 and sync features carry it.
+
+### Checkpoint Selection — Scalar Analysis Guide
+
+Use this procedure to analyze `metrics_history.json` and select the best checkpoint.
+
+**File:** `<experiment_dir>/metrics_history.json` — array of objects, one per eval step.
+
+**Available metrics (per step):**
+
+| Metric | Key | What it measures | Better |
+|--------|-----|-----------------|--------|
+| **Loss** | `loss` | Training MSE, flow matching objective | Lower (but not below noise floor) |
+| **HF Energy Ratio** | `hf_energy_ratio` | Energy above 4kHz vs total | Closer to reference |
+| **Spectral Centroid** | `spectral_centroid_hz` | Frequency "center of mass" | Closer to reference |
+| **Spectral Rolloff** | `spectral_rolloff_hz` | Frequency below which 85% of energy lives | Closer to reference |
+| **Spectral Flatness** | `spectral_flatness` | How noise-like vs tonal (Wiener entropy) | Closer to reference |
+| **Temporal Variance** | `temporal_variance` | Dynamic range — RMS variation over time | Closer to reference |
+| **Log Spectral Distance** | `log_spectral_distance_db` | dB-scale spectral envelope error vs ref | Lower |
+| **Spectral Convergence** | `spectral_convergence` | Normalized Frobenius distance vs ref | Lower |
+| **Mel Cepstral Distortion** | `mel_cepstral_distortion` | Perceptual distance in mel-cepstral space | Lower |
+| **Per-Band Correlation** | `per_band_correlation` | Avg correlation across 80 mel bands vs ref | Higher (max 1.0) |
+
+**Analysis prompt (copy-paste for Claude):**
+
+```
+Read <experiment_dir>/metrics_history.json and determine the best checkpoint.
+
+Steps:
+1. Print a table of all steps with: loss, LSD, SC, MCD, per_band_correlation, temporal_variance
+2. Identify the noise floor — loss typically plateaus around 1.3-1.5 for this model.
+   Loss dropping significantly below the noise floor indicates overfitting.
+3. Find the best checkpoint using this priority:
+   a. PRIMARY: lowest spectral_convergence (SC) — overall spectral fidelity
+   b. SECONDARY: lowest mel_cepstral_distortion (MCD) — perceptual quality
+   c. TIE-BREAKER: highest per_band_correlation (PBC) — temporal tracking accuracy
+4. Check for overfitting signs at that checkpoint:
+   - Loss dropped well below noise floor (< 1.3)
+   - SC/MCD improving but val spectrograms show horizontal banding or metallic artifacts
+   - per_band_correlation near 1.0 on training eval (memorization)
+   If overfitting is detected, select the last checkpoint BEFORE the overfitting inflection.
+5. Report:
+   - Best checkpoint step number
+   - Key metrics at that step
+   - Whether training should continue, stop, or resume from this checkpoint
+   - If val metrics exist, compare train vs val generalization gap
+
+Also plot the trend: is the model still improving, plateaued, or degrading?
+Curriculum transition happens at 60% of total steps — expect a quality jump around that point
+as the model transitions from easy timesteps to uniform sampling.
+```
+
+**Overfitting indicators (from sweep experiments):**
+- Loss below ~1.3: model is fitting noise, not learning generalizable patterns
+- SC improving on train but val spectrograms degrade: memorization
+- Horizontal spectral banding in val samples: averaged spectral patterns from small dataset
+- per_band_correlation > 0.9 on train: too close to reference, won't generalize
+- temporal_variance collapsing: model producing flat/static audio
+
+**Healthy training indicators:**
+- Loss stable around 1.4-1.5 (noise floor for this model + dataset)
+- SC, MCD, LSD all trending down together
+- per_band_correlation trending up but staying below 0.8
+- Val and train metrics moving in the same direction (small gap OK)
+- temporal_variance close to reference value (dynamic, not flat)

@@ -702,12 +702,13 @@ class FoleyTuneDatasetQualityFilter:
 
 
 def _extract_and_score(args):
-    """Extract audio from video and compute spectral scores.
+    """Extract audio from video, score, and prepare CLAP mono.
 
     Top-level function so it's picklable for ProcessPoolExecutor.
     Returns numpy arrays (not torch tensors) to avoid shared memory issues.
+    Resamples mono to 48kHz for CLAP in the worker (parallel).
     """
-    f, folder_str = args
+    f, folder_str, need_clap = args
     folder = Path(folder_str)
     try:
         rel = f.relative_to(folder)
@@ -720,11 +721,19 @@ def _extract_and_score(args):
     duration = wav.shape[-1] / sr
     bw = _bandwidth_score(wav, sr)
     sq = _spectral_quality_score(wav, sr)
-    # Convert to numpy for pickle serialization (torch tensors need shm)
-    return {
+    result = {
         "path": str(f), "rel": str(rel), "duration": duration,
         "bw": bw, "sq": sq, "wav_np": wav.numpy(), "sr": sr,
     }
+    # Resample mono to 48kHz for CLAP (parallel in worker, not main process)
+    if need_clap:
+        mono = wav[0].mean(0, keepdim=True)
+        if sr != 48000:
+            mono_48k = torchaudio.functional.resample(mono, sr, 48000)
+        else:
+            mono_48k = mono
+        result["mono_48k_np"] = mono_48k.numpy()
+    return result
 
 
 def _extract_audio_from_video(path: Path):
@@ -931,13 +940,14 @@ class FoleyTuneVideoQualityFilter:
         import time
         from concurrent.futures import ProcessPoolExecutor, as_completed
 
+        need_clap = use_clap or use_neg_clap
         t0 = time.time()
-        print(f"[VideoQualityFilter] Phase 1: extracting + scoring {len(files)} clips "
-              f"with {num_workers} workers...", flush=True)
+        print(f"[VideoQualityFilter] Phase 1: extracting + scoring + resample "
+              f"{len(files)} clips with {num_workers} workers...", flush=True)
         folder_str = str(folder)
         results = []
         with ProcessPoolExecutor(max_workers=num_workers) as pool:
-            futures = [pool.submit(_extract_and_score, (f, folder_str)) for f in files]
+            futures = [pool.submit(_extract_and_score, (f, folder_str, need_clap)) for f in files]
             for i, future in enumerate(as_completed(futures)):
                 r = future.result()
                 if "error" not in r:
@@ -945,19 +955,12 @@ class FoleyTuneVideoQualityFilter:
                     del r["wav_np"]
                     r["path"] = Path(r["path"])
                     r["rel"] = Path(r["rel"])
-                    if use_clap or use_neg_clap:
-                        mono = r["wav"][0].mean(0, keepdim=True)
-                        if r["sr"] != 48000:
-                            r["mono_48k"] = torchaudio.functional.resample(mono, r["sr"], 48000)
-                        else:
-                            r["mono_48k"] = mono
                 else:
                     r["path"] = Path(r["path"])
                     r["rel"] = Path(r["rel"])
                 results.append(r)
                 if (i + 1) % 10 == 0 or (i + 1) == len(futures):
-                    print(f"  [{i+1}/{len(futures)}] extracted + scored ({time.time()-t0:.1f}s)",
-                          flush=True)
+                    print(f"  [{i+1}/{len(futures)}] done ({time.time()-t0:.1f}s)", flush=True)
 
         t1 = time.time()
         print(f"[VideoQualityFilter] Phase 1 done in {t1-t0:.1f}s", flush=True)
@@ -965,9 +968,49 @@ class FoleyTuneVideoQualityFilter:
         # Sort by relative path to keep report deterministic
         results.sort(key=lambda r: str(r["rel"]))
 
-        # --- Phase 2: CLAP scoring + decisions (sequential, model not thread-safe) ---
-        print(f"[VideoQualityFilter] Phase 2: CLAP scoring + filtering {len(results)} clips...",
-              flush=True)
+        # --- Phase 2: batched CLAP scoring ---
+        # Build index of valid clips and batch CLAP in one forward pass
+        valid_results = [r for r in results if "error" not in r]
+
+        clap_scores = {}   # idx -> cl
+        neg_clap_scores = {}  # idx -> neg_cl
+        if need_clap and valid_results:
+            print(f"[VideoQualityFilter] Phase 2: batched CLAP on {len(valid_results)} clips...",
+                  flush=True)
+            # Batch all mono arrays through CLAP processor + model at once
+            mono_arrays = [np.frombuffer(r["mono_48k_np"].tobytes(),
+                                         dtype=r["mono_48k_np"].dtype).reshape(r["mono_48k_np"].shape).squeeze(0)
+                           if "mono_48k_np" in r else None
+                           for r in valid_results]
+            # Filter out None (shouldn't happen if need_clap, but be safe)
+            batch_indices = [i for i, m in enumerate(mono_arrays) if m is not None]
+            batch_monos = [mono_arrays[i] for i in batch_indices]
+
+            if batch_monos:
+                audio_inputs = clap_processor(
+                    audio=batch_monos,
+                    sampling_rate=48000,
+                    return_tensors="pt",
+                    padding=True,
+                )
+                with torch.no_grad():
+                    audio_embeds = clap_model.get_audio_features(**audio_inputs)
+                    if not isinstance(audio_embeds, torch.Tensor):
+                        audio_embeds = audio_embeds.pooler_output
+                    audio_embeds = audio_embeds / audio_embeds.norm(dim=-1, keepdim=True)
+
+                for j, bi in enumerate(batch_indices):
+                    embed = audio_embeds[j:j+1]
+                    if use_clap:
+                        clap_scores[bi] = float((embed @ text_embed.T).squeeze())
+                    if use_neg_clap:
+                        neg_clap_scores[bi] = float((embed @ neg_text_embed.T).squeeze())
+
+            t_clap = time.time()
+            print(f"[VideoQualityFilter] Phase 2 CLAP done in {t_clap-t1:.1f}s", flush=True)
+
+        # --- Phase 3: decisions ---
+        print(f"[VideoQualityFilter] Phase 3: filtering...", flush=True)
         accepted_items = []
         rejected_items = []
         n_passed = 0
@@ -976,6 +1019,7 @@ class FoleyTuneVideoQualityFilter:
         scores_all = []
         lines = ["=== Video Quality Filter Report ==="]
 
+        valid_idx = 0
         for r in results:
             rel = r["rel"]
 
@@ -985,25 +1029,12 @@ class FoleyTuneVideoQualityFilter:
                 continue
 
             bw, sq, duration = r["bw"], r["sq"], r["duration"]
+            cl = clap_scores.get(valid_idx)
+            neg_cl = neg_clap_scores.get(valid_idx)
+            valid_idx += 1
 
-            cl = None
-            neg_cl = None
-            if r["mono_48k"] is not None:
-                audio_inputs = clap_processor(
-                    audio=[r["mono_48k"].squeeze(0).numpy()],
-                    sampling_rate=48000,
-                    return_tensors="pt",
-                )
-                with torch.no_grad():
-                    audio_embed = clap_model.get_audio_features(**audio_inputs)
-                    if not isinstance(audio_embed, torch.Tensor):
-                        audio_embed = audio_embed.pooler_output
-                    audio_embed = audio_embed / audio_embed.norm(dim=-1, keepdim=True)
-                if use_clap:
-                    cl = float((audio_embed @ text_embed.T).squeeze())
-                if use_neg_clap:
-                    neg_cl = float((audio_embed @ neg_text_embed.T).squeeze())
-            del r["mono_48k"]
+            # Free CLAP mono
+            r.pop("mono_48k_np", None)
 
             composite = w_bw * bw + w_sq * sq
             if cl is not None:
@@ -1062,7 +1093,7 @@ class FoleyTuneVideoQualityFilter:
                 })
 
         t2 = time.time()
-        print(f"[VideoQualityFilter] Phase 2 done in {t2-t1:.1f}s", flush=True)
+        print(f"[VideoQualityFilter] Phase 3 done in {t2-t1:.1f}s", flush=True)
 
         # --- Build dataset with optional val clip from rejected ---
         import random

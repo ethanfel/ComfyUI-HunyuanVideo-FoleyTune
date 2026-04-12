@@ -418,11 +418,13 @@ class FoleyTuneDatasetInspector:
                 flagged.append(name)
                 lines.append(f"  FLAGGED  {name} ({duration:.2f}s): {', '.join(issues)}")
                 existing_reasons = item.get("reject_reasons", [])
+                item = dict(item)
                 item["rejected"] = True
                 item["reject_reasons"] = existing_reasons + issues
                 if item.get("val") or not skip_rejected:
                     clean.append(item)
             else:
+                item = dict(item)
                 item.setdefault("rejected", False)
                 item.setdefault("reject_reasons", [])
                 clean.append(item)
@@ -473,7 +475,7 @@ def _spectral_quality_score(wav: torch.Tensor, sr: int) -> float:
     - Temporal variance: higher = dynamic audio
     - HF energy ratio: presence of high-frequency content
     """
-    mono = wav[0].mean(0).numpy()
+    mono = wav[0].mean(0).float().cpu().numpy()
     n_fft = 2048
     hop = 512
     n_frames = 1 + (len(mono) - n_fft) // hop
@@ -1876,7 +1878,20 @@ class FoleyTuneDatasetBrowser:
         features_dir = None
         dataset_dir = None
 
-        if isinstance(data, dict):
+        if isinstance(data, dict) and "train" in data:
+            # FoleyTune train/val format: {"train": [...], "val": "val/name", "prompt": "..."}
+            default_prompt = data.get("prompt", "")
+            dataset_dir = p.parent
+            audio_dir = p.parent
+            features_dir = p.parent
+            for name in data["train"]:
+                base = str(p.parent / name)
+                entries.append({"name": name, "base": base, "prompt": default_prompt})
+            if data.get("val"):
+                val_name = data["val"]
+                base = str(p.parent / val_name)
+                entries.append({"name": Path(val_name).name, "base": base, "prompt": default_prompt})
+        elif isinstance(data, dict):
             # Compact format
             default_prompt = data.get("prompt", data.get("label", ""))
             clips_dir = Path(data["clips_dir"]) if "clips_dir" in data else None

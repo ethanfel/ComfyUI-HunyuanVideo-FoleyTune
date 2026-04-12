@@ -23,8 +23,16 @@ from .spectral_metrics import spectral_metrics
 
 # -- Dataset ------------------------------------------------------------------
 
-def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16):
+def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16, clip_names=None):
     """Load .npz feature caches + audio files, encode audio via DAC.
+
+    Args:
+        data_dir: Directory containing .npz and audio files.
+        dac_model: DAC model for audio encoding.
+        device: Torch device.
+        dtype: Compute dtype.
+        clip_names: Optional list of clip stem names to load. When provided,
+            only those clips are loaded instead of globbing all .npz files.
 
     Returns list of dicts with keys:
         latents: [1, 128, T] DAC-encoded audio latent (target x1)
@@ -35,7 +43,11 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16):
         name: str (stem of .npz file)
     """
     data_dir = Path(data_dir)
-    npz_files = sorted(data_dir.glob("*.npz"))
+    if clip_names is not None:
+        npz_files = [data_dir / f"{name}.npz" for name in clip_names]
+        npz_files = [f for f in npz_files if f.exists()]
+    else:
+        npz_files = sorted(data_dir.glob("*.npz"))
     if not npz_files:
         raise FileNotFoundError(f"No .npz files found in {data_dir}")
 

@@ -775,6 +775,10 @@ class FoleyTuneLoRATrainer:
                 "gradient_checkpointing": ("BOOLEAN", {"default": False}),
                 "blocks_to_swap": ("INT", {"default": 0, "min": 0, "max": 54, "tooltip": "Number of transformer blocks to offload to CPU (0=disabled). Saves VRAM at the cost of speed."}),
                 "resume_from": ("STRING", {"default": ""}),
+                "dataset_json": ("STRING", {
+                    "default": "",
+                    "tooltip": "Path to dataset.json. When set, uses its train/val split instead of scanning data_dir for all .npz files.",
+                }),
             },
         }
 
@@ -796,7 +800,7 @@ class FoleyTuneLoRATrainer:
               lora_plus_ratio=1.0, schedule_type="constant",
               latent_mixup_alpha=0.0, latent_noise_sigma=0.0,
               gradient_checkpointing=False, blocks_to_swap=0,
-              resume_from=""):
+              resume_from="", dataset_json=""):
 
         import random
         device = mm.get_torch_device()
@@ -813,6 +817,7 @@ class FoleyTuneLoRATrainer:
             lora_dropout, lora_plus_ratio, schedule_type,
             latent_mixup_alpha, latent_noise_sigma,
             gradient_checkpointing, blocks_to_swap, resume_from,
+            dataset_json,
         )
 
     def _train_inner(self, hunyuan_model, hunyuan_deps, data_dir, output_dir, target, rank,
@@ -821,7 +826,8 @@ class FoleyTuneLoRATrainer:
                      logit_normal_sigma, curriculum_switch, init_mode, use_rslora,
                      lora_dropout, lora_plus_ratio, schedule_type,
                      latent_mixup_alpha, latent_noise_sigma,
-                     gradient_checkpointing, blocks_to_swap, resume_from):
+                     gradient_checkpointing, blocks_to_swap, resume_from,
+                     dataset_json=""):
         import random
 
         torch.manual_seed(seed)
@@ -835,9 +841,28 @@ class FoleyTuneLoRATrainer:
 
         # -- Prepare dataset --
         logger.info("Preparing dataset...")
-        dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype)
+
+        clip_names = None
+        val_entry = None
+        ds_cfg = None
+        if dataset_json and os.path.exists(dataset_json):
+            import json as _json
+            with open(dataset_json) as f:
+                ds_cfg = _json.load(f)
+            # Resolve paths relative to JSON file location
+            data_dir = str(Path(dataset_json).parent)
+            clip_names = ds_cfg.get("train")
+
+        dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype,
+                                  clip_names=clip_names)
         n_clips = len(dataset)
         logger.info(f"Dataset ready: {n_clips} clips")
+
+        if ds_cfg is not None and ds_cfg.get("val"):
+            val_npz = Path(data_dir) / f"{ds_cfg['val']}.npz"
+            if val_npz.exists():
+                val_entry = prepare_single_entry(str(val_npz), hunyuan_deps.dac_model, device, dtype)
+                logger.info(f"Val clip loaded: {ds_cfg['val']}")
 
         # -- Setup model with LoRA --
         model = copy.deepcopy(hunyuan_model)
@@ -1067,6 +1092,19 @@ class FoleyTuneLoRATrainer:
                            f"MCD={step_metrics.get('mel_cepstral_distortion', 0):.2f}  "
                            f"HF={step_metrics.get('hf_energy_ratio', 0):.3f}  "
                            f"SC={step_metrics.get('spectral_convergence', 0):.3f}")
+
+                # Generate val sample if a val clip was loaded
+                if val_entry is not None:
+                    val_wav, val_sr = generate_eval_sample(
+                        model, hunyuan_deps.dac_model, val_entry, device, dtype,
+                    )
+                    val_wav_mono = val_wav.squeeze()
+                    val_wav_t = torch.from_numpy(val_wav)
+                    if val_wav_t.ndim == 1:
+                        val_wav_t = val_wav_t.unsqueeze(0)
+                    _save_wav(samples_path / f"val_step_{step+1:05d}.wav", val_wav_t, val_sr)
+                    _save_spectrogram(val_wav_mono, val_sr, samples_path / f"val_step_{step+1:05d}")
+
                 model.train()
 
         # Save metrics history

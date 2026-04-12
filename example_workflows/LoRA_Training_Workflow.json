@@ -254,7 +254,7 @@
         {"name": "loss_curve", "type": "IMAGE", "links": null}
       ],
       "properties": {"Node name for S&R": "FoleyTuneLoRATrainer"},
-      "widgets_values": ["/path/to/output", "/path/to/lora_output/", "all_attn_mlp", 64, 64.0, 0.0001, 3000, 8, 1, 100, 500, "logit_normal", "bf16", 42, 1.0, 0.6, "standard", false, 0.0, 1.0, "constant", 0.0, 0.0, false, 0, "", ""]
+      "widgets_values": ["/path/to/output", "/path/to/lora_output/", "all_attn_mlp", 128, 128.0, 0.0001, 15000, 8, 1, 100, 500, "curriculum", "bf16", 42, 1.0, 0.6, "standard", false, 0.0, 1.0, "constant", 0.0, 0.0, false, 0, "", ""]
     },
     {
       "id": 12,

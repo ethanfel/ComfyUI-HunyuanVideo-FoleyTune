@@ -750,15 +750,15 @@ class FoleyTuneLoRATrainer:
                 "data_dir": ("STRING", {"default": ""}),
                 "output_dir": ("STRING", {"default": ""}),
                 "target": (list(FOLEY_TARGET_PRESETS.keys()), {"default": "all_attn_mlp"}),
-                "rank": ("INT", {"default": 64, "min": 4, "max": 128, "step": 4}),
-                "alpha": ("FLOAT", {"default": 64.0, "min": 1.0, "max": 128.0}),
+                "rank": ("INT", {"default": 128, "min": 4, "max": 128, "step": 4}),
+                "alpha": ("FLOAT", {"default": 128.0, "min": 1.0, "max": 128.0}),
                 "lr": ("FLOAT", {"default": 1e-4, "min": 1e-6, "max": 1e-2, "step": 1e-5}),
-                "steps": ("INT", {"default": 3000, "min": 100, "max": 50000}),
+                "steps": ("INT", {"default": 15000, "min": 100, "max": 50000}),
                 "batch_size": ("INT", {"default": 8, "min": 1, "max": 64}),
                 "grad_accum": ("INT", {"default": 1, "min": 1, "max": 32}),
                 "warmup_steps": ("INT", {"default": 100, "min": 0, "max": 2000}),
                 "save_every": ("INT", {"default": 500, "min": 50, "max": 10000}),
-                "timestep_mode": (["uniform", "logit_normal", "curriculum"], {"default": "logit_normal"}),
+                "timestep_mode": (["uniform", "logit_normal", "curriculum"], {"default": "curriculum"}),
                 "precision": (["bf16", "fp16", "fp32"], {"default": "bf16"}),
                 "seed": ("INT", {"default": 42}),
             },
@@ -1249,10 +1249,10 @@ class FoleyTuneLoRAScheduler:
 
     # Default training params (mirrors trainer node defaults)
     _PARAM_DEFAULTS = {
-        "target": "all_attn_mlp", "rank": 64, "alpha": 64.0,
-        "lr": 1e-4, "steps": 3000, "batch_size": 8, "grad_accum": 1,
+        "target": "all_attn_mlp", "rank": 128, "alpha": 128.0,
+        "lr": 1e-4, "steps": 15000, "batch_size": 8, "grad_accum": 1,
         "warmup_steps": 100, "save_every": 500,
-        "timestep_mode": "logit_normal", "precision": "bf16", "seed": 42,
+        "timestep_mode": "curriculum", "precision": "bf16", "seed": 42,
         "logit_normal_sigma": 1.0, "curriculum_switch": 0.6,
         "init_mode": "standard", "use_rslora": False, "lora_dropout": 0.0,
         "lora_plus_ratio": 1.0, "schedule_type": "constant",
@@ -1276,7 +1276,8 @@ class FoleyTuneLoRAScheduler:
             sweep = json.load(f)
 
         sweep_name = sweep.get("name", "sweep")
-        data_dir = sweep["data_dir"]
+        data_dir = sweep.get("data_dir", "")
+        dataset_json = sweep.get("dataset_json", "")
         output_root = Path(sweep.get("output_root", f"lora_output/{sweep_name}"))
         base_config = sweep.get("base", {})
         experiments = sweep.get("experiments", [])
@@ -1293,18 +1294,50 @@ class FoleyTuneLoRAScheduler:
             results = existing.get("experiments", [])
             completed_ids = {r["id"] for r in results if r.get("status") == "completed"}
 
-        # Prepare dataset once
+        # Prepare dataset once — support dataset_json for train/val split
         device = mm.get_torch_device()
         dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
         base_precision = base_config.get("precision", "bf16")
         dtype = dtype_map[base_precision]
 
-        logger.info(f"Preparing shared dataset from {data_dir}...")
-        dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype)
+        clip_names = None
+        ds_cfg = None
+        if dataset_json and os.path.exists(dataset_json):
+            with open(dataset_json) as f:
+                ds_cfg = json.load(f)
+            if not isinstance(ds_cfg.get("train"), list):
+                raise ValueError("dataset_json must contain a 'train' key with a list of clip names")
+            data_dir = str(Path(dataset_json).parent)
+            clip_names = ds_cfg["train"]
+            logger.info(f"Using dataset_json: {dataset_json} ({len(clip_names)} train clips)")
+        elif not data_dir:
+            raise ValueError("Sweep JSON must specify either 'data_dir' or 'dataset_json'")
 
-        # Load optional validation sample (external NPZ not in training set)
+        logger.info(f"Preparing shared dataset from {data_dir}...")
+        dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype,
+                                  clip_names=clip_names)
+
+        # Load optional validation sample — from dataset_json val or explicit eval_npz
         val_entry = None
         val_ref_wav = None
+        if ds_cfg is not None and ds_cfg.get("val"):
+            val_npz = Path(data_dir) / f"{ds_cfg['val']}.npz"
+            if val_npz.exists():
+                val_entry = prepare_single_entry(str(val_npz), hunyuan_deps.dac_model, device, dtype)
+                logger.info(f"Val clip loaded from dataset_json: {ds_cfg['val']}")
+                # Load reference audio for val spectrogram comparison
+                for ext in (".flac", ".wav", ".ogg"):
+                    candidate = val_npz.with_suffix(ext)
+                    if candidate.exists():
+                        import soundfile as _sf
+                        _raw, _sr = _sf.read(str(candidate))
+                        if _raw.ndim > 1:
+                            _raw = _raw.mean(axis=1)
+                        if _sr != 48000:
+                            import soxr as _soxr
+                            _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
+                        val_ref_wav = _raw
+                        break
         eval_npz = sweep.get("eval_npz") or base_config.get("eval_npz")
         if eval_npz and os.path.exists(eval_npz):
             logger.info(f"Loading validation sample from {eval_npz}...")
@@ -1726,7 +1759,8 @@ class FoleyTuneLoRAEvaluator:
         with open(eval_json) as f:
             spec = json.load(f)
 
-        data_dir = spec["data_dir"]
+        data_dir = spec.get("data_dir", "")
+        dataset_json = spec.get("dataset_json", "")
         output_dir = Path(spec.get("output_dir", "lora_eval"))
         num_steps = spec.get("steps", 25)
         seed = spec.get("seed", 42)
@@ -1737,8 +1771,19 @@ class FoleyTuneLoRAEvaluator:
         device = mm.get_torch_device()
         dtype = torch.bfloat16
 
-        # Prepare dataset
-        dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype)
+        # Prepare dataset — support dataset_json for train/val split
+        clip_names = None
+        if dataset_json and os.path.exists(dataset_json):
+            with open(dataset_json) as f:
+                ds_cfg = json.load(f)
+            if not isinstance(ds_cfg.get("train"), list):
+                raise ValueError("dataset_json must contain a 'train' key with a list of clip names")
+            data_dir = str(Path(dataset_json).parent)
+            clip_names = ds_cfg["train"]
+        elif not data_dir:
+            raise ValueError("Eval JSON must specify either 'data_dir' or 'dataset_json'")
+        dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype,
+                                  clip_names=clip_names)
 
         # Compute reference metrics from original audio
         ref_dir = output_dir / "reference"

@@ -928,23 +928,23 @@ class FoleyTuneVideoQualityFilter:
         # --- Phase 1: parallel extraction + scoring via ProcessPoolExecutor ---
         # Separate processes bypass the GIL so both FFmpeg I/O and
         # numpy/torch spectral scoring run truly in parallel.
+        import time
         from concurrent.futures import ProcessPoolExecutor, as_completed
 
-        print(f"[VideoQualityFilter] Processing {len(files)} clips with {num_workers} workers...",
-              flush=True)
+        t0 = time.time()
+        print(f"[VideoQualityFilter] Phase 1: extracting + scoring {len(files)} clips "
+              f"with {num_workers} workers...", flush=True)
         folder_str = str(folder)
         results = []
         with ProcessPoolExecutor(max_workers=num_workers) as pool:
             futures = [pool.submit(_extract_and_score, (f, folder_str)) for f in files]
-            for future in as_completed(futures):
+            for i, future in enumerate(as_completed(futures)):
                 r = future.result()
                 if "error" not in r:
-                    # Convert numpy back to torch (workers return numpy to avoid shm)
                     r["wav"] = torch.from_numpy(r["wav_np"])
                     del r["wav_np"]
                     r["path"] = Path(r["path"])
                     r["rel"] = Path(r["rel"])
-                    # CLAP mono resampling (torchaudio, main process only)
                     if use_clap or use_neg_clap:
                         mono = r["wav"][0].mean(0, keepdim=True)
                         if r["sr"] != 48000:
@@ -955,11 +955,19 @@ class FoleyTuneVideoQualityFilter:
                     r["path"] = Path(r["path"])
                     r["rel"] = Path(r["rel"])
                 results.append(r)
+                if (i + 1) % 10 == 0 or (i + 1) == len(futures):
+                    print(f"  [{i+1}/{len(futures)}] extracted + scored ({time.time()-t0:.1f}s)",
+                          flush=True)
+
+        t1 = time.time()
+        print(f"[VideoQualityFilter] Phase 1 done in {t1-t0:.1f}s", flush=True)
 
         # Sort by relative path to keep report deterministic
         results.sort(key=lambda r: str(r["rel"]))
 
-        # --- Phase 2: CLAP scoring (sequential, model not thread-safe) + decisions ---
+        # --- Phase 2: CLAP scoring + decisions (sequential, model not thread-safe) ---
+        print(f"[VideoQualityFilter] Phase 2: CLAP scoring + filtering {len(results)} clips...",
+              flush=True)
         accepted_items = []
         rejected_items = []
         n_passed = 0
@@ -1053,6 +1061,9 @@ class FoleyTuneVideoQualityFilter:
                     "video_path": str(r["path"]),
                 })
 
+        t2 = time.time()
+        print(f"[VideoQualityFilter] Phase 2 done in {t2-t1:.1f}s", flush=True)
+
         # --- Build dataset with optional val clip from rejected ---
         import random
         rng = random.Random(seed)
@@ -1074,6 +1085,11 @@ class FoleyTuneVideoQualityFilter:
         if do_copy:
             copied = n_passed if skip_rejected else (n_passed + n_rejected)
             lines.append(f"Copied {copied} files to {out_dir}")
+
+        t3 = time.time()
+        print(f"[VideoQualityFilter] Total: {t3-t0:.1f}s "
+              f"(extract+score: {t1-t0:.1f}s, filter: {t2-t1:.1f}s, finalize: {t3-t2:.1f}s)",
+              flush=True)
 
         report = "\n".join(lines)
         print(f"[FoleyTuneVideoQualityFilter]\n{report}", flush=True)

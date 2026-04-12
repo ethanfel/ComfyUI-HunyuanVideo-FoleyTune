@@ -846,12 +846,16 @@ class FoleyTuneLoRATrainer:
         val_entry = None
         ds_cfg = None
         if dataset_json and os.path.exists(dataset_json):
-            import json as _json
-            with open(dataset_json) as f:
-                ds_cfg = _json.load(f)
+            try:
+                with open(dataset_json) as f:
+                    ds_cfg = json.load(f)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in dataset file {dataset_json}: {e}") from e
+            if not isinstance(ds_cfg.get("train"), list):
+                raise ValueError(f"dataset_json must contain a 'train' key with a list of clip names")
             # Resolve paths relative to JSON file location
             data_dir = str(Path(dataset_json).parent)
-            clip_names = ds_cfg.get("train")
+            clip_names = ds_cfg["train"]
 
         dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype,
                                   clip_names=clip_names)

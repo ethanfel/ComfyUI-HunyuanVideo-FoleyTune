@@ -1343,14 +1343,32 @@ class FoleyLoRAScheduler:
             exp_id = exp.get("id", f"exp_{len(results)}")
 
             if exp_id in completed_ids:
-                logger.info(f"Skipping completed experiment: {exp_id}")
-                # Load loss history if available
-                exp_dir = output_root / exp_id
-                loss_file = exp_dir / "loss_history.json"
-                if loss_file.exists():
-                    with open(loss_file) as f:
-                        all_loss_histories[exp_id] = json.load(f)
-                continue
+                # Check if new config requests more steps than completed run
+                config_check = self._merge_config(base_config, exp)
+                prev_result = next(r for r in results if r["id"] == exp_id)
+                prev_steps = prev_result.get("config", {}).get("steps", 0)
+
+                if config_check["steps"] > prev_steps:
+                    # Auto-resume: find last checkpoint and extend training
+                    exp_dir = output_root / exp_id
+                    last_ckpt = exp_dir / f"adapter_step{prev_steps:05d}.pt"
+                    if not last_ckpt.exists():
+                        last_ckpt = exp_dir / "adapter_final.pt"
+                    if last_ckpt.exists() and not config_check.get("resume_from"):
+                        exp["resume_from"] = str(last_ckpt)
+                    logger.info(f"Extending experiment {exp_id}: {prev_steps} -> {config_check['steps']} steps "
+                                f"(resume from {exp.get('resume_from', config_check.get('resume_from', '?'))})")
+                    # Remove from completed so it runs again
+                    results = [r for r in results if r["id"] != exp_id]
+                    completed_ids.discard(exp_id)
+                else:
+                    logger.info(f"Skipping completed experiment: {exp_id}")
+                    exp_dir = output_root / exp_id
+                    loss_file = exp_dir / "loss_history.json"
+                    if loss_file.exists():
+                        with open(loss_file) as f:
+                            all_loss_histories[exp_id] = json.load(f)
+                    continue
 
             config = self._merge_config(base_config, exp)
             exp_dir = output_root / exp_id

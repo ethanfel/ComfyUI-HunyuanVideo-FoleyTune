@@ -427,6 +427,38 @@ def _ffprobe_metadata(path: Path):
     raise RuntimeError(f"No video stream found in {path}")
 
 
+def _load_video_frames(path: Path):
+    """Load video frames as [T, C, H, W] uint8 tensor via FFmpeg."""
+    import subprocess
+    # Get resolution via FFprobe
+    cmd = [
+        "ffprobe", "-v", "quiet", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-print_format", "json", str(path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=30)
+    info = json.loads(result.stdout)
+    stream = info["streams"][0]
+    w, h = int(stream["width"]), int(stream["height"])
+
+    # Extract raw RGB24 frames
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", str(path),
+        "-f", "rawvideo", "-pix_fmt", "rgb24",
+        "pipe:1",
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg failed on {path}: {result.stderr.decode()}")
+
+    raw = np.frombuffer(result.stdout, dtype=np.uint8)
+    frame_bytes = h * w * 3
+    n_frames = len(raw) // frame_bytes
+    frames = raw[:n_frames * frame_bytes].reshape(n_frames, h, w, 3)
+    return torch.from_numpy(frames.copy()).permute(0, 3, 1, 2)  # [T, C, H, W]
+
+
 def _extract_audio_wav(video_path: Path, wav_path: Path):
     """Extract audio from video as WAV (native sample rate and channels)."""
     import subprocess
@@ -485,8 +517,6 @@ class FoleyBatchFeatureExtractor:
         from hunyuanvideo_foley.utils.feature_utils import (
             encode_video_with_siglip2, encode_video_with_sync,
         )
-        import torchvision.io
-
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
@@ -551,9 +581,7 @@ class FoleyBatchFeatureExtractor:
         logger.info("[BatchFeatureExtractor] SigLIP2 pass...")
         hunyuan_deps.siglip2_model.to(device)
         for i, clip in enumerate(clips):
-            rgb, _, _ = torchvision.io.read_video(
-                str(clip["path"]), output_format="TCHW"
-            )  # [T, C, H, W] uint8
+            rgb = _load_video_frames(clip["path"])  # [T, C, H, W] uint8
             total_frames = rgb.shape[0]
             n_siglip2 = max(1, int(clip["duration"] * 8))
             indices = torch.linspace(0, total_frames - 1, n_siglip2).long()
@@ -574,9 +602,7 @@ class FoleyBatchFeatureExtractor:
         logger.info("[BatchFeatureExtractor] Synchformer pass...")
         hunyuan_deps.syncformer_model.to(device)
         for i, clip in enumerate(clips):
-            rgb, _, _ = torchvision.io.read_video(
-                str(clip["path"]), output_format="TCHW"
-            )
+            rgb = _load_video_frames(clip["path"])  # [T, C, H, W] uint8
             total_frames = rgb.shape[0]
             n_sync = max(16, int(clip["duration"] * 25))
             indices = torch.linspace(0, total_frames - 1, n_sync).long()

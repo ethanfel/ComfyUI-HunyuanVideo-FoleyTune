@@ -24,15 +24,16 @@ Each item in FOLEYTUNE_AUDIO_DATASET grows as it passes through the pipeline:
 {
     ...,
     "features": {
-        "clip_feat": tensor [1, T, 768],        # SigLIP2 @ 8fps
-        "sync_feat": tensor [1, T, 768],        # Synchformer @ 25fps
-        "text_feat": tensor [1, T, 768],        # CLAP text
-        "uncond_text_feat": tensor [1, T, 768], # CLAP negative
+        "clip_features": tensor [1, T, 768],    # SigLIP2 @ 8fps
+        "sync_features": tensor [1, T, 768],    # Synchformer @ 25fps
+        "text_embedding": tensor [1, T, 768],   # CLAP text
         "duration": float,
         "fps": float,
     },
     "prompt": str,
 }
+# Note: uncond_text_feat is NOT stored — trainer generates zero embeddings on-the-fly.
+# Key names match .npz format so the saver can write them directly.
 
 # Audio optimization nodes (Resampler, LUFS, Compressor, HfSmoother):
 #   Only modify "waveform" and "sample_rate" — all other keys pass through unchanged.
@@ -70,6 +71,7 @@ Nodes that don't know about extra keys ignore them — they only touch `waveform
 - No disk writes — features travel in memory
 - Keeps threaded prefetch pattern for SigLIP2/Synchformer passes
 - Per-clip `.txt` sidecar prompt override still works (checks `{stem}.txt` next to `video_path`)
+- Remove dead `negative_prompt` param (currently accepted but never used)
 
 ### FoleyTuneDatasetInspector (nodes_dataset.py, lines 343-429)
 

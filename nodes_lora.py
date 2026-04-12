@@ -577,52 +577,8 @@ class FoleyBatchFeatureExtractor:
         n = len(clips)
         logger.info(f"[BatchFeatureExtractor] {n} clips to process")
 
-        # --- Phase 2: SigLIP2 pass (load model once for all clips) ---
-        logger.info("[BatchFeatureExtractor] SigLIP2 pass...")
-        hunyuan_deps.siglip2_model.to(device)
-        for i, clip in enumerate(clips):
-            rgb = _load_video_frames(clip["path"])  # [T, C, H, W] uint8
-            total_frames = rgb.shape[0]
-            n_siglip2 = max(1, int(clip["duration"] * 8))
-            indices = torch.linspace(0, total_frames - 1, n_siglip2).long()
-            selected = rgb[indices]
-            processed = torch.stack([
-                hunyuan_deps.siglip2_preprocess(f) for f in selected
-            ]).unsqueeze(0)  # [1, T, C, H, W]
-            clip["clip_feat"] = encode_video_with_siglip2(
-                processed.to(device), hunyuan_deps
-            ).cpu()
-            del rgb, selected, processed
-            logger.info(f"  [{i+1}/{n}] {clip['rel']}: "
-                        f"clip_feat {clip['clip_feat'].shape}")
-        hunyuan_deps.siglip2_model.to(offload_device)
-        torch.cuda.empty_cache()
-
-        # --- Phase 3: Synchformer pass ---
-        logger.info("[BatchFeatureExtractor] Synchformer pass...")
-        hunyuan_deps.syncformer_model.to(device)
-        for i, clip in enumerate(clips):
-            rgb = _load_video_frames(clip["path"])  # [T, C, H, W] uint8
-            total_frames = rgb.shape[0]
-            n_sync = max(16, int(clip["duration"] * 25))
-            indices = torch.linspace(0, total_frames - 1, n_sync).long()
-            selected = rgb[indices]
-            processed = torch.stack([
-                hunyuan_deps.syncformer_preprocess(f) for f in selected
-            ]).unsqueeze(0)  # [1, T, C, H, W]
-            clip["sync_feat"] = encode_video_with_sync(
-                processed.to(device), hunyuan_deps
-            ).cpu()
-            del rgb, selected, processed
-            logger.info(f"  [{i+1}/{n}] {clip['rel']}: "
-                        f"sync_feat {clip['sync_feat'].shape}")
-        hunyuan_deps.syncformer_model.to(offload_device)
-        torch.cuda.empty_cache()
-
-        # --- Phase 4: CLAP pass (text only, cache unique prompts) ---
-        logger.info("[BatchFeatureExtractor] CLAP pass...")
+        # Pre-encode CLAP prompts (lightweight, do once)
         hunyuan_deps.clap_model.to(device)
-
         prompt_cache = {}
         for clip in clips:
             p = clip["prompt"]
@@ -635,48 +591,74 @@ class FoleyBatchFeatureExtractor:
                     **inputs, output_hidden_states=True, return_dict=True
                 )
                 prompt_cache[p] = outputs.last_hidden_state.cpu()
-            clip["text_feat"] = prompt_cache[p]
-
-        # Negative prompt (once)
-        neg_inputs = hunyuan_deps.clap_tokenizer(
-            [negative_prompt], padding=True, truncation=True, max_length=100,
-            return_tensors="pt"
-        ).to(device)
-        neg_outputs = hunyuan_deps.clap_model(
-            **neg_inputs, output_hidden_states=True, return_dict=True
-        )
-        neg_feat = neg_outputs.last_hidden_state.cpu()
-
         hunyuan_deps.clap_model.to(offload_device)
         torch.cuda.empty_cache()
         logger.info(f"  {len(prompt_cache)} unique prompt(s) encoded")
 
-        # --- Phase 5: Save .npz + .wav files ---
-        for clip in clips:
+        # Process each clip fully, write to disk immediately
+        for i, clip in enumerate(clips):
+            logger.info(f"[{i+1}/{n}] {clip['rel']}...")
+
+            # Load frames once for this clip
+            rgb = _load_video_frames(clip["path"])  # [T, C, H, W] uint8
+            total_frames = rgb.shape[0]
+
+            # SigLIP2
+            hunyuan_deps.siglip2_model.to(device)
+            n_siglip2 = max(1, int(clip["duration"] * 8))
+            indices = torch.linspace(0, total_frames - 1, n_siglip2).long()
+            processed = torch.stack([
+                hunyuan_deps.siglip2_preprocess(f) for f in rgb[indices]
+            ]).unsqueeze(0)
+            clip_feat = encode_video_with_siglip2(
+                processed.to(device), hunyuan_deps
+            ).cpu()
+            del processed
+            hunyuan_deps.siglip2_model.to(offload_device)
+
+            # Synchformer
+            hunyuan_deps.syncformer_model.to(device)
+            n_sync = max(16, int(clip["duration"] * 25))
+            indices = torch.linspace(0, total_frames - 1, n_sync).long()
+            processed = torch.stack([
+                hunyuan_deps.syncformer_preprocess(f) for f in rgb[indices]
+            ]).unsqueeze(0)
+            sync_feat = encode_video_with_sync(
+                processed.to(device), hunyuan_deps
+            ).cpu()
+            del processed, rgb
+            hunyuan_deps.syncformer_model.to(offload_device)
+            torch.cuda.empty_cache()
+
+            # Save .npz
+            text_feat = prompt_cache[clip["prompt"]]
             out_path = out_dir / clip["out_name"]
             np.savez(
                 str(out_path),
-                clip_features=clip["clip_feat"].float().numpy(),
-                sync_features=clip["sync_feat"].float().numpy(),
-                text_embedding=clip["text_feat"].float().numpy(),
+                clip_features=clip_feat.float().numpy(),
+                sync_features=sync_feat.float().numpy(),
+                text_embedding=text_feat.float().numpy(),
                 prompt=clip["prompt"],
                 duration=clip["duration"],
                 fps=clip["fps"],
             )
-            # Extract audio as 48kHz mono WAV alongside the .npz
+            del clip_feat, sync_feat
+
+            # Extract audio WAV alongside the .npz
             wav_path = out_dir / clip["wav_name"]
             try:
                 _extract_audio_wav(clip["path"], wav_path)
                 audio_status = "audio OK"
             except Exception as e:
                 audio_status = f"audio FAIL: {e}"
+
             lines.append(
                 f"  OK    {clip['rel']} ({clip['duration']:.1f}s @ "
                 f"{clip['fps']:.1f}fps) → {clip['out_name']} + "
                 f"{clip['wav_name']}  prompt: {clip['txt_source']}  "
                 f"{audio_status}"
             )
-            del clip["clip_feat"], clip["sync_feat"], clip["text_feat"]
+            logger.info(f"  [{i+1}/{n}] saved {clip['out_name']} + {clip['wav_name']}")
 
         lines.append("")
         lines.append(f"Saved {n} .npz + .wav pairs to {out_dir}")

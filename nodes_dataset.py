@@ -1457,7 +1457,7 @@ class FoleyTuneDatasetSaver:
         sweep_json = {
             "name": sweep_name,
             "dataset_json": str(out_path / "dataset.json"),
-            "output_root": str(out_path / "experiments"),
+            "output_root": str(out_path),
             "base": {
                 "target": "all_attn_mlp",
                 "rank": 128,

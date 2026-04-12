@@ -428,12 +428,12 @@ def _ffprobe_metadata(path: Path):
 
 
 def _extract_audio_wav(video_path: Path, wav_path: Path):
-    """Extract audio from video as 48kHz mono WAV via FFmpeg."""
+    """Extract audio from video as WAV (native sample rate and channels)."""
     import subprocess
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(video_path),
-        "-vn", "-ac", "1", "-ar", "48000", "-f", "wav",
+        "-vn", "-f", "wav",
         str(wav_path),
     ]
     result = subprocess.run(cmd, capture_output=True, timeout=120)

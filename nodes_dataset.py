@@ -1377,14 +1377,14 @@ class FoleyTuneDatasetSaver:
         }
 
     RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("dataset_json", "report")
+    RETURN_NAMES = ("sweep_json", "report")
     OUTPUT_NODE = True
     FUNCTION = "save"
     CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Save every clip in a FOLEYTUNE_AUDIO_DATASET to output_dir as 24-bit FLAC. "
-        "Writes .npz feature files from item data and generates dataset.json with train/val split. "
-        "The global prompt is taken from the first training clip's prompt (set by BatchFeatureExtractor)."
+        "Writes .npz feature files and generates sweep.json (ready for the Scheduler node) "
+        "with default training config (r128, curriculum, 15k steps)."
     )
 
     def save(self, dataset, output_dir: str):
@@ -1451,24 +1451,54 @@ class FoleyTuneDatasetSaver:
                 prompt = item["prompt"]
                 break
 
-        # Write dataset.json
+        # Write sweep.json — directly consumable by the Scheduler node
+        data_dir_str = str(out_path)
+        sweep_name = out_path.name
+        sweep_json = {
+            "name": sweep_name,
+            "dataset_json": str(out_path / "dataset.json"),
+            "output_root": str(out_path / "experiments"),
+            "base": {
+                "target": "all_attn_mlp",
+                "rank": 128,
+                "alpha": 128,
+                "lr": 1e-4,
+                "steps": 15000,
+                "batch_size": 8,
+                "grad_accum": 1,
+                "warmup_steps": 100,
+                "save_every": 1000,
+                "timestep_mode": "curriculum",
+                "precision": "bf16",
+                "seed": 42,
+            },
+            "experiments": [
+                {"id": f"{sweep_name}_{len(train_names)}clip"},
+            ],
+        }
+        # Also write the dataset.json it references (train/val split)
         ds_json = {"train": train_names}
         if prompt:
             ds_json["prompt"] = prompt
         if val_name:
             ds_json["val"] = val_name
-        json_path = out_path / "dataset.json"
-        with open(json_path, "w") as f:
+            sweep_json["eval_npz"] = str(out_path / f"{val_name}.npz")
+        ds_json_path = out_path / "dataset.json"
+        with open(ds_json_path, "w") as f:
             json.dump(ds_json, f, indent=2)
+
+        sweep_path = out_path / "sweep.json"
+        with open(sweep_path, "w") as f:
+            json.dump(sweep_json, f, indent=2)
 
         lines = [f"[FoleyTuneDatasetSaver] Saved {saved} clips -> {out_path}"]
         lines.append(f"  FLAC: {saved}  NPZ: {features_saved}")
         lines.append(f"  Train: {len(train_names)}  Val: {1 if val_name else 0}")
-        lines.append(f"  dataset.json -> {json_path}")
+        lines.append(f"  sweep.json -> {sweep_path}")
 
         report = "\n".join(lines)
         print(report, flush=True)
-        return (str(json_path), report)
+        return (str(sweep_path), report)
 
 
 # ─── Node 9: Dataset Item Extractor ──────────────────────────────────────────

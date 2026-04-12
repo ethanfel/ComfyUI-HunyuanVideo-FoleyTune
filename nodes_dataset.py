@@ -1,25 +1,25 @@
 """Foley Audio Dataset Pipeline — chainable in-memory preprocessing nodes.
 
 Typical chain:
-  FoleyDatasetLoader
-      ↓ FOLEY_AUDIO_DATASET
-  FoleyDatasetResampler       (optional)
-      ↓ FOLEY_AUDIO_DATASET
-  FoleyDatasetLUFSNormalizer  (optional)
-      ↓ FOLEY_AUDIO_DATASET
-  FoleyDatasetCompressor      (optional)
-      ↓ FOLEY_AUDIO_DATASET
-  FoleyDatasetHfSmoother      (optional)
-      ↓ FOLEY_AUDIO_DATASET
-  FoleyDatasetAugmenter       (optional)
-      ↓ FOLEY_AUDIO_DATASET
-  FoleyDatasetInspector       (optional)
-      ↓ FOLEY_AUDIO_DATASET  +  STRING report
-  FoleyDatasetQualityFilter   (optional)
-      ↓ FOLEY_AUDIO_DATASET  +  STRING report
-  FoleyDatasetSaver           (optional)
+  FoleyTuneDatasetLoader
+      ↓ FOLEYTUNE_AUDIO_DATASET
+  FoleyTuneDatasetResampler       (optional)
+      ↓ FOLEYTUNE_AUDIO_DATASET
+  FoleyTuneDatasetLUFSNormalizer  (optional)
+      ↓ FOLEYTUNE_AUDIO_DATASET
+  FoleyTuneDatasetCompressor      (optional)
+      ↓ FOLEYTUNE_AUDIO_DATASET
+  FoleyTuneDatasetHfSmoother      (optional)
+      ↓ FOLEYTUNE_AUDIO_DATASET
+  FoleyTuneDatasetAugmenter       (optional)
+      ↓ FOLEYTUNE_AUDIO_DATASET
+  FoleyTuneDatasetInspector       (optional)
+      ↓ FOLEYTUNE_AUDIO_DATASET  +  STRING report
+  FoleyTuneDatasetQualityFilter   (optional)
+      ↓ FOLEYTUNE_AUDIO_DATASET  +  STRING report
+  FoleyTuneDatasetSaver           (optional)
       ↓ STRING report
-  FoleyDatasetItemExtractor   → AUDIO (bridges to standard nodes)
+  FoleyTuneDatasetItemExtractor   → AUDIO (bridges to standard nodes)
 """
 
 from pathlib import Path
@@ -28,9 +28,9 @@ import numpy as np
 import torch
 import torchaudio
 
-FOLEY_AUDIO_DATASET = "FOLEY_AUDIO_DATASET"
-FOLEY_DS_CATEGORY = "audio/HunyuanFoley/Dataset"
-FOLEY_AUDIO_CATEGORY = "audio/HunyuanFoley/Audio"
+FOLEYTUNE_AUDIO_DATASET = "FOLEYTUNE_AUDIO_DATASET"
+FOLEYTUNE_DS_CATEGORY = "FoleyTune"
+FOLEYTUNE_AUDIO_CATEGORY = "FoleyTune"
 
 _AUDIO_EXTS = {".wav", ".flac", ".mp3", ".ogg", ".aac", ".m4a", ".aiff", ".aif"}
 _VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv"}
@@ -51,8 +51,8 @@ def _load_audio(path: Path):
 
 # ─── Node 1: Dataset Loader ──────────────────────────────────────────────────
 
-class FoleyDatasetLoader:
-    """Load all audio files in a folder into an in-memory FOLEY_AUDIO_DATASET."""
+class FoleyTuneDatasetLoader:
+    """Load all audio files in a folder into an in-memory FOLEYTUNE_AUDIO_DATASET."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -65,20 +65,20 @@ class FoleyDatasetLoader:
             }
         }
 
-    RETURN_TYPES = (FOLEY_AUDIO_DATASET,)
+    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET,)
     RETURN_NAMES = ("dataset",)
     FUNCTION = "load"
-    CATEGORY = FOLEY_DS_CATEGORY
-    DESCRIPTION = "Load all audio files from a folder into memory as a FOLEY_AUDIO_DATASET."
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
+    DESCRIPTION = "Load all audio files from a folder into memory as a FOLEYTUNE_AUDIO_DATASET."
 
     def load(self, folder: str):
         folder = Path(folder.strip())
         if not folder.exists():
-            raise FileNotFoundError(f"[FoleyDatasetLoader] Folder not found: {folder}")
+            raise FileNotFoundError(f"[FoleyTuneDatasetLoader] Folder not found: {folder}")
 
         files = [f for f in folder.rglob("*") if f.suffix.lower() in _AUDIO_EXTS]
         if not files:
-            raise RuntimeError(f"[FoleyDatasetLoader] No audio files found in {folder}")
+            raise RuntimeError(f"[FoleyTuneDatasetLoader] No audio files found in {folder}")
 
         dataset = []
         for f in sorted(files):
@@ -86,25 +86,25 @@ class FoleyDatasetLoader:
                 wav, sr = _load_audio(f)
                 dataset.append({"waveform": wav, "sample_rate": sr, "name": f.stem})
             except Exception as e:
-                print(f"[FoleyDatasetLoader] Skipping {f.name}: {e}", flush=True)
+                print(f"[FoleyTuneDatasetLoader] Skipping {f.name}: {e}", flush=True)
 
         if not dataset:
-            raise RuntimeError(f"[FoleyDatasetLoader] All {len(files)} files failed to load from {folder}")
+            raise RuntimeError(f"[FoleyTuneDatasetLoader] All {len(files)} files failed to load from {folder}")
 
-        print(f"[FoleyDatasetLoader] Loaded {len(dataset)} clips from {folder}", flush=True)
+        print(f"[FoleyTuneDatasetLoader] Loaded {len(dataset)} clips from {folder}", flush=True)
         return (dataset,)
 
 
 # ─── Node 2: Dataset Resampler ───────────────────────────────────────────────
 
-class FoleyDatasetResampler:
+class FoleyTuneDatasetResampler:
     """Resample all clips in a dataset to a target sample rate using soxr VHQ."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "dataset": (FOLEY_AUDIO_DATASET,),
+                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
                 "target_sr": ("INT", {
                     "default": 48000, "min": 8000, "max": 192000,
                     "tooltip": "Target sample rate. 48000 for Foley (DAC codec).",
@@ -112,10 +112,10 @@ class FoleyDatasetResampler:
             }
         }
 
-    RETURN_TYPES = (FOLEY_AUDIO_DATASET,)
+    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET,)
     RETURN_NAMES = ("dataset",)
     FUNCTION = "resample"
-    CATEGORY = FOLEY_DS_CATEGORY
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = "Resample all clips to target_sr using soxr VHQ. Skips clips already at target rate."
 
     def resample(self, dataset, target_sr: int):
@@ -139,20 +139,20 @@ class FoleyDatasetResampler:
             out.append(new_item)
             changed += 1
 
-        print(f"[FoleyDatasetResampler] {changed}/{len(dataset)} clips resampled -> {target_sr} Hz", flush=True)
+        print(f"[FoleyTuneDatasetResampler] {changed}/{len(dataset)} clips resampled -> {target_sr} Hz", flush=True)
         return (out,)
 
 
 # ─── Node 3: Dataset LUFS Normalizer ─────────────────────────────────────────
 
-class FoleyDatasetLUFSNormalizer:
+class FoleyTuneDatasetLUFSNormalizer:
     """Normalize each clip to a target integrated LUFS level + true peak limit."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "dataset": (FOLEY_AUDIO_DATASET,),
+                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
                 "target_lufs": ("FLOAT", {
                     "default": -23.0, "min": -40.0, "max": -6.0, "step": 0.5,
                     "tooltip": "Target integrated loudness in LUFS. -23 is EBU R128 standard.",
@@ -164,10 +164,10 @@ class FoleyDatasetLUFSNormalizer:
             }
         }
 
-    RETURN_TYPES = (FOLEY_AUDIO_DATASET,)
+    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET,)
     RETURN_NAMES = ("dataset",)
     FUNCTION = "normalize"
-    CATEGORY = FOLEY_DS_CATEGORY
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Normalize each clip to target_lufs (BS.1770-4) then apply a true peak ceiling. "
         "Skips clips that are too short for LUFS measurement (< 0.4 s)."
@@ -215,7 +215,7 @@ class FoleyDatasetLUFSNormalizer:
             out.append(new_item)
 
         print(
-            f"[FoleyDatasetLUFSNormalizer] {len(dataset) - skipped}/{len(dataset)} clips normalized  "
+            f"[FoleyTuneDatasetLUFSNormalizer] {len(dataset) - skipped}/{len(dataset)} clips normalized  "
             f"target={target_lufs} LUFS  TP={true_peak_dbtp} dBTP  skipped={skipped}",
             flush=True,
         )
@@ -224,7 +224,7 @@ class FoleyDatasetLUFSNormalizer:
 
 # ─── Node 4: Dataset Compressor ──────────────────────────────────────────────
 
-class FoleyDatasetCompressor:
+class FoleyTuneDatasetCompressor:
     """Apply mild parallel compression to reduce within-clip dynamic range.
 
     Uses pedalboard.Compressor. Parallel (New York) style:
@@ -236,7 +236,7 @@ class FoleyDatasetCompressor:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "dataset": (FOLEY_AUDIO_DATASET,),
+                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
                 "threshold_db": ("FLOAT", {
                     "default": -18.0, "min": -40.0, "max": -6.0, "step": 1.0,
                     "tooltip": "Compression kicks in above this level. -18 dB is safe after LUFS normalization.",
@@ -260,10 +260,10 @@ class FoleyDatasetCompressor:
             }
         }
 
-    RETURN_TYPES = (FOLEY_AUDIO_DATASET,)
+    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET,)
     RETURN_NAMES = ("dataset",)
     FUNCTION = "compress"
-    CATEGORY = FOLEY_DS_CATEGORY
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Mild parallel compression to reduce within-clip dynamic range. "
         "Blends compressed signal with dry at the given mix ratio."
@@ -294,7 +294,7 @@ class FoleyDatasetCompressor:
             out.append(new_item)
 
         print(
-            f"[FoleyDatasetCompressor] {len(out)} clips compressed  "
+            f"[FoleyTuneDatasetCompressor] {len(out)} clips compressed  "
             f"thr={threshold_db}dB  ratio={ratio}:1  mix={mix:.0%}",
             flush=True,
         )
@@ -340,14 +340,14 @@ def _estimate_snr(wav: torch.Tensor) -> float:
     return 20.0 * np.log10(p95 / p05 + 1e-8)
 
 
-class FoleyDatasetInspector:
+class FoleyTuneDatasetInspector:
     """Analyze each clip for quality issues and optionally filter out flagged clips."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "dataset": (FOLEY_AUDIO_DATASET,),
+                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
                 "skip_rejected": ("BOOLEAN", {
                     "default": True,
                     "tooltip": "If True, flagged clips are removed from output. "
@@ -368,13 +368,13 @@ class FoleyDatasetInspector:
             }
         }
 
-    RETURN_TYPES = (FOLEY_AUDIO_DATASET, "STRING")
+    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET, "STRING")
     RETURN_NAMES = ("dataset", "report")
     FUNCTION = "inspect"
-    CATEGORY = FOLEY_DS_CATEGORY
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Analyze each clip for clipping, low SNR, codec artifacts, and silence. "
-        "Outputs a filtered FOLEY_AUDIO_DATASET and a text report."
+        "Outputs a filtered FOLEYTUNE_AUDIO_DATASET and a text report."
     )
 
     def inspect(self, dataset, skip_rejected: bool, min_snr_db: float,
@@ -425,7 +425,7 @@ class FoleyDatasetInspector:
             + (" (removed)" if skip_rejected else " (kept)")
         )
         report = "\n".join(lines)
-        print(f"[FoleyDatasetInspector]\n{report}", flush=True)
+        print(f"[FoleyTuneDatasetInspector]\n{report}", flush=True)
         return (clean, report)
 
 
@@ -505,7 +505,7 @@ def _spectral_quality_score(wav: torch.Tensor, sr: int) -> float:
     return (flatness_score + temporal_score + hf_score) / 3.0
 
 
-class FoleyDatasetQualityFilter:
+class FoleyTuneDatasetQualityFilter:
     """Research-backed quality scoring and filtering for Foley audio datasets.
 
     Computes three quality sub-scores per clip:
@@ -521,7 +521,7 @@ class FoleyDatasetQualityFilter:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "dataset": (FOLEY_AUDIO_DATASET,),
+                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
                 "min_quality_score": ("FLOAT", {
                     "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "Minimum composite quality score to pass.",
@@ -563,10 +563,10 @@ class FoleyDatasetQualityFilter:
             },
         }
 
-    RETURN_TYPES = (FOLEY_AUDIO_DATASET, "STRING")
+    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET, "STRING")
     RETURN_NAMES = ("dataset", "report")
     FUNCTION = "filter_quality"
-    CATEGORY = FOLEY_DS_CATEGORY
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Research-backed quality filtering: scores clips on effective bandwidth, "
         "spectral naturalness, and optional CLAP text-audio similarity. "
@@ -683,7 +683,7 @@ class FoleyDatasetQualityFilter:
             f"Rejected: {len(rejected)} | Avg score: {avg_score:.2f}"
         )
         report = "\n".join(lines)
-        print(f"[FoleyDatasetQualityFilter]\n{report}", flush=True)
+        print(f"[FoleyTuneDatasetQualityFilter]\n{report}", flush=True)
         return (passed, report)
 
 
@@ -729,7 +729,7 @@ def _scan_video_folder(folder: Path):
     return files
 
 
-class FoleyVideoQualityFilter:
+class FoleyTuneVideoQualityFilter:
     """Quality-filter video clips by analyzing their audio track only.
 
     Extracts audio via FFmpeg (no video frame decoding), scores each clip
@@ -805,7 +805,7 @@ class FoleyVideoQualityFilter:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("report",)
     FUNCTION = "filter_videos"
-    CATEGORY = FOLEY_DS_CATEGORY
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Quality-filter video clips by audio analysis only (no video frame loading). "
         "Scores bandwidth and spectral quality, optionally copies passing clips."
@@ -1012,13 +1012,13 @@ class FoleyVideoQualityFilter:
             lines.append(f"Copied {copied} files to {out_dir}")
 
         report = "\n".join(lines)
-        print(f"[FoleyVideoQualityFilter]\n{report}", flush=True)
+        print(f"[FoleyTuneVideoQualityFilter]\n{report}", flush=True)
         return (report,)
 
 
 # ─── Node 6: Dataset HF Smoother (batch) ─────────────────────────────────────
 
-class FoleyDatasetHfSmoother:
+class FoleyTuneDatasetHfSmoother:
     """Apply soft high-frequency attenuation to every clip in a dataset.
 
     Blends a low-pass filtered copy with the original. Default cutoff is 16 kHz
@@ -1030,7 +1030,7 @@ class FoleyDatasetHfSmoother:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "dataset": (FOLEY_AUDIO_DATASET,),
+                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
                 "cutoff_hz": ("FLOAT", {
                     "default": 16000.0, "min": 2000.0, "max": 22000.0, "step": 500.0,
                     "tooltip": "Low-pass cutoff. 16 kHz is gentle for DAC; lower = more aggressive.",
@@ -1042,10 +1042,10 @@ class FoleyDatasetHfSmoother:
             }
         }
 
-    RETURN_TYPES = (FOLEY_AUDIO_DATASET,)
+    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET,)
     RETURN_NAMES = ("dataset",)
     FUNCTION = "process"
-    CATEGORY = FOLEY_DS_CATEGORY
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Soft HF attenuation for every clip. Blends a low-pass filtered copy "
         "with the original. Less aggressive defaults than SelVA because DAC "
@@ -1076,14 +1076,14 @@ class FoleyDatasetHfSmoother:
             new_item["waveform"] = result
             out.append(new_item)
 
-        print(f"[FoleyDatasetHfSmoother] {len(out)} clips processed  "
+        print(f"[FoleyTuneDatasetHfSmoother] {len(out)} clips processed  "
               f"cutoff={cutoff_hz:.0f}Hz  blend={blend:.2f}", flush=True)
         return (out,)
 
 
 # ─── Node 7: Dataset Augmenter ───────────────────────────────────────────────
 
-class FoleyDatasetAugmenter:
+class FoleyTuneDatasetAugmenter:
     """Create augmented variants of each clip to expand a small dataset.
 
     Supports gain variation (always available) and optionally pitch shift
@@ -1094,7 +1094,7 @@ class FoleyDatasetAugmenter:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "dataset": (FOLEY_AUDIO_DATASET,),
+                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
                 "variants_per_clip": ("INT", {
                     "default": 2, "min": 1, "max": 20,
                     "tooltip": "Number of augmented copies per original clip.",
@@ -1122,10 +1122,10 @@ class FoleyDatasetAugmenter:
             },
         }
 
-    RETURN_TYPES = (FOLEY_AUDIO_DATASET,)
+    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET,)
     RETURN_NAMES = ("dataset",)
     FUNCTION = "augment"
-    CATEGORY = FOLEY_DS_CATEGORY
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Create augmented variants of each clip (gain, pitch, time stretch) "
         "to expand small training datasets."
@@ -1159,7 +1159,7 @@ class FoleyDatasetAugmenter:
                 am_compose = am.Compose(transforms)
                 use_am = True
             except ImportError:
-                print("[FoleyDatasetAugmenter] audiomentations not installed — "
+                print("[FoleyTuneDatasetAugmenter] audiomentations not installed — "
                       "pitch_shift and time_stretch disabled. "
                       "Install: pip install audiomentations", flush=True)
 
@@ -1196,7 +1196,7 @@ class FoleyDatasetAugmenter:
                 new_item["origin_name"] = name
                 out.append(new_item)
 
-        print(f"[FoleyDatasetAugmenter] {len(dataset)} originals -> {len(out)} total clips  "
+        print(f"[FoleyTuneDatasetAugmenter] {len(dataset)} originals -> {len(out)} total clips  "
               f"gain=+/-{gain_range_db:.1f}dB"
               + (f"  pitch=+/-{pitch_range_semitones:.1f}st" if pitch_range_semitones > 0 else "")
               + (f"  stretch=+/-{time_stretch_range:.0%}" if time_stretch_range > 0 else ""),
@@ -1206,14 +1206,14 @@ class FoleyDatasetAugmenter:
 
 # ─── Node 8: Dataset Saver ───────────────────────────────────────────────────
 
-class FoleyDatasetSaver:
-    """Save all clips in a FOLEY_AUDIO_DATASET to disk as FLAC files."""
+class FoleyTuneDatasetSaver:
+    """Save all clips in a FOLEYTUNE_AUDIO_DATASET to disk as FLAC files."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "dataset": (FOLEY_AUDIO_DATASET,),
+                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
                 "output_dir": ("STRING", {
                     "default": "",
                     "tooltip": "Absolute path to output folder. Created if it does not exist.",
@@ -1231,9 +1231,9 @@ class FoleyDatasetSaver:
     RETURN_NAMES = ("report",)
     OUTPUT_NODE = True
     FUNCTION = "save"
-    CATEGORY = FOLEY_DS_CATEGORY
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
-        "Save every clip in a FOLEY_AUDIO_DATASET to output_dir as 24-bit FLAC. "
+        "Save every clip in a FOLEYTUNE_AUDIO_DATASET to output_dir as 24-bit FLAC. "
         "Optionally copies matching .npz feature files."
     )
 
@@ -1272,7 +1272,7 @@ class FoleyDatasetSaver:
                 else:
                     npz_missing.append(name)
 
-        lines = [f"[FoleyDatasetSaver] Saved {saved} clips -> {out_path}"]
+        lines = [f"[FoleyTuneDatasetSaver] Saved {saved} clips -> {out_path}"]
         if npz_src is not None:
             lines.append(f"  NPZ copied: {npz_copied}  missing: {len(npz_missing)}")
             for n in npz_missing:
@@ -1285,14 +1285,14 @@ class FoleyDatasetSaver:
 
 # ─── Node 9: Dataset Item Extractor ──────────────────────────────────────────
 
-class FoleyDatasetItemExtractor:
-    """Extract a single AUDIO item from a FOLEY_AUDIO_DATASET by index."""
+class FoleyTuneDatasetItemExtractor:
+    """Extract a single AUDIO item from a FOLEYTUNE_AUDIO_DATASET by index."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "dataset": (FOLEY_AUDIO_DATASET,),
+                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
                 "index": ("INT", {
                     "default": 0, "min": 0, "max": 9999,
                     "tooltip": "0-based index. Wraps around if index >= dataset length.",
@@ -1303,21 +1303,21 @@ class FoleyDatasetItemExtractor:
     RETURN_TYPES = ("AUDIO", "STRING", "INT")
     RETURN_NAMES = ("audio", "name", "total")
     FUNCTION = "extract"
-    CATEGORY = FOLEY_DS_CATEGORY
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
-        "Extract one clip from a FOLEY_AUDIO_DATASET by index. "
+        "Extract one clip from a FOLEYTUNE_AUDIO_DATASET by index. "
         "Returns standard AUDIO (compatible with all audio nodes), "
         "the clip name, and the total dataset length."
     )
 
     def extract(self, dataset, index: int):
         if not dataset:
-            raise RuntimeError("[FoleyDatasetItemExtractor] Dataset is empty.")
+            raise RuntimeError("[FoleyTuneDatasetItemExtractor] Dataset is empty.")
         idx = index % len(dataset)
         item = dataset[idx]
         audio = {"waveform": item["waveform"], "sample_rate": item["sample_rate"]}
         print(
-            f"[FoleyDatasetItemExtractor] [{idx}/{len(dataset)-1}] {item['name']}  "
+            f"[FoleyTuneDatasetItemExtractor] [{idx}/{len(dataset)-1}] {item['name']}  "
             f"sr={item['sample_rate']}  shape={tuple(item['waveform'].shape)}",
             flush=True,
         )
@@ -1350,7 +1350,7 @@ def _mel_filterbank(sr: int, n_fft: int, n_mels: int,
 
 # ─── Node 10: Dataset Spectral Matcher (reference-based) ─────────────────────
 
-class FoleyDatasetSpectralMatcher:
+class FoleyTuneDatasetSpectralMatcher:
     """Adaptive per-band EQ toward a reference audio distribution.
 
     Unlike SelVA's hardcoded VAE stats, this computes target mel-band means from
@@ -1368,7 +1368,7 @@ class FoleyDatasetSpectralMatcher:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "dataset": (FOLEY_AUDIO_DATASET,),
+                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
                 "reference_dir": ("STRING", {
                     "default": "",
                     "tooltip": "Path to folder of reference audio files. Use DAC roundtrip outputs "
@@ -1391,10 +1391,10 @@ class FoleyDatasetSpectralMatcher:
             },
         }
 
-    RETURN_TYPES = (FOLEY_AUDIO_DATASET,)
+    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET,)
     RETURN_NAMES = ("dataset",)
     FUNCTION = "process"
-    CATEGORY = FOLEY_DS_CATEGORY
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Adaptive per-band EQ toward a reference audio distribution. "
         "Computes target mel-band means from a reference directory, then applies "
@@ -1408,7 +1408,7 @@ class FoleyDatasetSpectralMatcher:
         ref_files = [f for f in ref_dir.rglob("*") if f.suffix.lower() in _AUDIO_EXTS]
         if not ref_files:
             raise FileNotFoundError(
-                f"[FoleyDatasetSpectralMatcher] No audio files found in reference dir: {ref_dir}"
+                f"[FoleyTuneDatasetSpectralMatcher] No audio files found in reference dir: {ref_dir}"
             )
 
         import torchaudio.functional as AF
@@ -1431,13 +1431,13 @@ class FoleyDatasetSpectralMatcher:
                 mel_log = torch.log(mel_mag)
                 all_means.append(mel_log.mean(dim=-1))  # [n_mels]
             except Exception as e:
-                print(f"[FoleyDatasetSpectralMatcher] Skipping ref {f.name}: {e}", flush=True)
+                print(f"[FoleyTuneDatasetSpectralMatcher] Skipping ref {f.name}: {e}", flush=True)
 
         if not all_means:
-            raise RuntimeError("[FoleyDatasetSpectralMatcher] Could not process any reference files")
+            raise RuntimeError("[FoleyTuneDatasetSpectralMatcher] Could not process any reference files")
 
         target_mean = torch.stack(all_means).mean(dim=0)  # [n_mels]
-        print(f"[FoleyDatasetSpectralMatcher] Computed reference profile from "
+        print(f"[FoleyTuneDatasetSpectralMatcher] Computed reference profile from "
               f"{len(all_means)} files", flush=True)
         return target_mean
 
@@ -1504,7 +1504,7 @@ class FoleyDatasetSpectralMatcher:
 
             result = wav_out.unsqueeze(0).unsqueeze(0)  # [1, 1, L]
             if wav.shape[1] > 1:
-                print(f"[FoleyDatasetSpectralMatcher] Warning: stereo clip '{item['name']}' "
+                print(f"[FoleyTuneDatasetSpectralMatcher] Warning: stereo clip '{item['name']}' "
                       f"collapsed to dual-mono (spectral matching operates on mono downmix)", flush=True)
                 result = result.expand(-1, wav.shape[1], -1).clone()
 
@@ -1512,7 +1512,7 @@ class FoleyDatasetSpectralMatcher:
             new_item["waveform"] = result
             out.append(new_item)
 
-        print(f"[FoleyDatasetSpectralMatcher] {len(out)} clips processed  "
+        print(f"[FoleyTuneDatasetSpectralMatcher] {len(out)} clips processed  "
               f"strength={strength}  n_mels={n_mels}  ref={ref_dir.name}", flush=True)
         return (out,)
 
@@ -1521,7 +1521,7 @@ class FoleyDatasetSpectralMatcher:
 
 # ─── Node 11: HF Smoother (single audio) ─────────────────────────────────────
 
-class FoleyHfSmoother:
+class FoleyTuneHfSmoother:
     """Soft high-frequency attenuation for a single audio clip.
 
     Blends a low-pass filtered copy with the original. Default cutoff is 16 kHz
@@ -1547,7 +1547,7 @@ class FoleyHfSmoother:
     RETURN_TYPES = ("AUDIO",)
     RETURN_NAMES = ("audio",)
     FUNCTION = "process"
-    CATEGORY = FOLEY_AUDIO_CATEGORY
+    CATEGORY = FOLEYTUNE_AUDIO_CATEGORY
     DESCRIPTION = (
         "Blends a low-pass filtered version of the audio with the original to gently "
         "attenuate high-frequency content. Use before feature extraction for training."
@@ -1570,7 +1570,7 @@ class FoleyHfSmoother:
         if peak > 1.0:
             out = out / peak
 
-        print(f"[FoleyHfSmoother] cutoff={cutoff_hz:.0f} Hz  blend={blend:.2f}  "
+        print(f"[FoleyTuneHfSmoother] cutoff={cutoff_hz:.0f} Hz  blend={blend:.2f}  "
               f"rms={rms_in:.4f}->{out.pow(2).mean().sqrt():.4f}", flush=True)
 
         return ({"waveform": out, "sample_rate": sr},)
@@ -1578,7 +1578,7 @@ class FoleyHfSmoother:
 
 # ─── Node 12: Harmonic Exciter ───────────────────────────────────────────────
 
-class FoleyHarmonicExciter:
+class FoleyTuneHarmonicExciter:
     """Multi-band harmonic exciter for post-generation enhancement.
 
     Isolates high-frequency content above a cutoff, applies tanh saturation
@@ -1614,7 +1614,7 @@ class FoleyHarmonicExciter:
     RETURN_TYPES = ("AUDIO",)
     RETURN_NAMES = ("audio",)
     FUNCTION = "excite"
-    CATEGORY = FOLEY_AUDIO_CATEGORY
+    CATEGORY = FOLEYTUNE_AUDIO_CATEGORY
     DESCRIPTION = (
         "Multi-band harmonic exciter. Applies tanh saturation to the HF band "
         "to restore harmonics. Less aggressive defaults than SelVA — DAC's neural "
@@ -1637,13 +1637,13 @@ class FoleyHarmonicExciter:
         mixed = np.tanh(mixed)
 
         wav_out = torch.from_numpy(mixed).unsqueeze(0)  # [1, C, T]
-        print(f"[FoleyHarmonicExciter] cutoff={cutoff_hz}Hz  drive={drive}  mix={mix:.0%}", flush=True)
+        print(f"[FoleyTuneHarmonicExciter] cutoff={cutoff_hz}Hz  drive={drive}  mix={mix:.0%}", flush=True)
         return ({"waveform": wav_out, "sample_rate": sr},)
 
 
 # ─── Node 13: Output Normalizer ──────────────────────────────────────────────
 
-class FoleyOutputNormalizer:
+class FoleyTuneOutputNormalizer:
     """Normalize generated audio to a target LUFS level with true peak limiting.
 
     Apply as the final node before saving. Uses pyloudnorm (BS.1770-4).
@@ -1669,7 +1669,7 @@ class FoleyOutputNormalizer:
     RETURN_TYPES = ("AUDIO",)
     RETURN_NAMES = ("audio",)
     FUNCTION = "normalize"
-    CATEGORY = FOLEY_AUDIO_CATEGORY
+    CATEGORY = FOLEYTUNE_AUDIO_CATEGORY
     DESCRIPTION = (
         "Normalize output audio to a target LUFS level (BS.1770-4) with true peak limiting. "
         "Apply as the last node before saving."
@@ -1691,7 +1691,7 @@ class FoleyOutputNormalizer:
         loudness = meter.integrated_loudness(wav_np)
 
         if not np.isfinite(loudness):
-            print("[FoleyOutputNormalizer] Could not measure loudness — passing through.", flush=True)
+            print("[FoleyTuneOutputNormalizer] Could not measure loudness — passing through.", flush=True)
             return (audio,)
 
         gain_db = target_lufs - loudness
@@ -1704,7 +1704,7 @@ class FoleyOutputNormalizer:
             wav_out = wav_out * (tp_linear / peak)
 
         print(
-            f"[FoleyOutputNormalizer] {loudness:.1f} LUFS -> {target_lufs} LUFS  "
+            f"[FoleyTuneOutputNormalizer] {loudness:.1f} LUFS -> {target_lufs} LUFS  "
             f"gain={gain_db:+.1f}dB  TP={true_peak_dbtp}dBTP",
             flush=True,
         )
@@ -1713,7 +1713,7 @@ class FoleyOutputNormalizer:
 
 # ─── Node 14: Dataset Browser ───────────────────────────────────────────────
 
-class FoleyDatasetBrowser:
+class FoleyTuneDatasetBrowser:
     """Browse a dataset.json file entry by entry using an integer index.
 
     Accepts three JSON formats:
@@ -1774,7 +1774,7 @@ class FoleyDatasetBrowser:
         "count - 1 — wire to a primitive INT's max to constrain the index widget",
     )
     FUNCTION = "browse"
-    CATEGORY = FOLEY_DS_CATEGORY
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Reads a dataset.json and exposes one entry at a time. "
         "Accepts SelVA format (path/label), Foley format (video_path/prompt), "
@@ -1789,7 +1789,7 @@ class FoleyDatasetBrowser:
 
         p = Path(dataset_json.strip())
         if not p.exists():
-            raise FileNotFoundError(f"[FoleyDatasetBrowser] File not found: {p}")
+            raise FileNotFoundError(f"[FoleyTuneDatasetBrowser] File not found: {p}")
 
         with p.open("r", encoding="utf-8") as f:
             data = _json.load(f)
@@ -1838,12 +1838,12 @@ class FoleyDatasetBrowser:
                     entries.append({"name": Path(base).stem, "base": base, "prompt": prompt})
 
         if not entries:
-            raise ValueError(f"[FoleyDatasetBrowser] No entries found in {p}")
+            raise ValueError(f"[FoleyTuneDatasetBrowser] No entries found in {p}")
 
         count = len(entries)
         if index >= count:
             raise IndexError(
-                f"[FoleyDatasetBrowser] index {index} out of range "
+                f"[FoleyTuneDatasetBrowser] index {index} out of range "
                 f"(dataset has {count} entries, last index is {count - 1})"
             )
 
@@ -1889,7 +1889,7 @@ class FoleyDatasetBrowser:
         ds_dir_str = str(dataset_dir) if dataset_dir else ""
 
         print(
-            f"[FoleyDatasetBrowser] [{index}/{count - 1}]\n"
+            f"[FoleyTuneDatasetBrowser] [{index}/{count - 1}]\n"
             f"  prompt      = {prompt}\n"
             f"  video_path  = {video_path}\n"
             f"  raw_dir     = {raw_dir_str}\n"
@@ -1908,39 +1908,39 @@ class FoleyDatasetBrowser:
 # ─── Node Mappings ───────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
-    "FoleyDatasetLoader": FoleyDatasetLoader,
-    "FoleyDatasetResampler": FoleyDatasetResampler,
-    "FoleyDatasetLUFSNormalizer": FoleyDatasetLUFSNormalizer,
-    "FoleyDatasetCompressor": FoleyDatasetCompressor,
-    "FoleyDatasetInspector": FoleyDatasetInspector,
-    "FoleyDatasetQualityFilter": FoleyDatasetQualityFilter,
-    "FoleyVideoQualityFilter": FoleyVideoQualityFilter,
-    "FoleyDatasetHfSmoother": FoleyDatasetHfSmoother,
-    "FoleyDatasetAugmenter": FoleyDatasetAugmenter,
-    "FoleyDatasetSaver": FoleyDatasetSaver,
-    "FoleyDatasetItemExtractor": FoleyDatasetItemExtractor,
-    "FoleyDatasetSpectralMatcher": FoleyDatasetSpectralMatcher,
-    "FoleyHfSmoother": FoleyHfSmoother,
-    "FoleyHarmonicExciter": FoleyHarmonicExciter,
-    "FoleyOutputNormalizer": FoleyOutputNormalizer,
-    "FoleyDatasetBrowser": FoleyDatasetBrowser,
+    "FoleyTuneDatasetLoader": FoleyTuneDatasetLoader,
+    "FoleyTuneDatasetResampler": FoleyTuneDatasetResampler,
+    "FoleyTuneDatasetLUFSNormalizer": FoleyTuneDatasetLUFSNormalizer,
+    "FoleyTuneDatasetCompressor": FoleyTuneDatasetCompressor,
+    "FoleyTuneDatasetInspector": FoleyTuneDatasetInspector,
+    "FoleyTuneDatasetQualityFilter": FoleyTuneDatasetQualityFilter,
+    "FoleyTuneVideoQualityFilter": FoleyTuneVideoQualityFilter,
+    "FoleyTuneDatasetHfSmoother": FoleyTuneDatasetHfSmoother,
+    "FoleyTuneDatasetAugmenter": FoleyTuneDatasetAugmenter,
+    "FoleyTuneDatasetSaver": FoleyTuneDatasetSaver,
+    "FoleyTuneDatasetItemExtractor": FoleyTuneDatasetItemExtractor,
+    "FoleyTuneDatasetSpectralMatcher": FoleyTuneDatasetSpectralMatcher,
+    "FoleyTuneHfSmoother": FoleyTuneHfSmoother,
+    "FoleyTuneHarmonicExciter": FoleyTuneHarmonicExciter,
+    "FoleyTuneOutputNormalizer": FoleyTuneOutputNormalizer,
+    "FoleyTuneDatasetBrowser": FoleyTuneDatasetBrowser,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "FoleyDatasetLoader": "Foley Dataset Loader",
-    "FoleyDatasetResampler": "Foley Dataset Resampler",
-    "FoleyDatasetLUFSNormalizer": "Foley Dataset LUFS Normalizer",
-    "FoleyDatasetCompressor": "Foley Dataset Compressor",
-    "FoleyDatasetInspector": "Foley Dataset Inspector",
-    "FoleyDatasetQualityFilter": "Foley Dataset Quality Filter",
-    "FoleyVideoQualityFilter": "Foley Video Quality Filter",
-    "FoleyDatasetHfSmoother": "Foley Dataset HF Smoother",
-    "FoleyDatasetAugmenter": "Foley Dataset Augmenter",
-    "FoleyDatasetSaver": "Foley Dataset Saver",
-    "FoleyDatasetItemExtractor": "Foley Dataset Item Extractor",
-    "FoleyDatasetSpectralMatcher": "Foley Dataset Spectral Matcher",
-    "FoleyHfSmoother": "Foley HF Smoother",
-    "FoleyHarmonicExciter": "Foley Harmonic Exciter",
-    "FoleyOutputNormalizer": "Foley Output Normalizer",
-    "FoleyDatasetBrowser": "Foley Dataset Browser",
+    "FoleyTuneDatasetLoader": "Foley Dataset Loader",
+    "FoleyTuneDatasetResampler": "Foley Dataset Resampler",
+    "FoleyTuneDatasetLUFSNormalizer": "Foley Dataset LUFS Normalizer",
+    "FoleyTuneDatasetCompressor": "Foley Dataset Compressor",
+    "FoleyTuneDatasetInspector": "Foley Dataset Inspector",
+    "FoleyTuneDatasetQualityFilter": "Foley Dataset Quality Filter",
+    "FoleyTuneVideoQualityFilter": "Foley Video Quality Filter",
+    "FoleyTuneDatasetHfSmoother": "Foley Dataset HF Smoother",
+    "FoleyTuneDatasetAugmenter": "Foley Dataset Augmenter",
+    "FoleyTuneDatasetSaver": "Foley Dataset Saver",
+    "FoleyTuneDatasetItemExtractor": "Foley Dataset Item Extractor",
+    "FoleyTuneDatasetSpectralMatcher": "Foley Dataset Spectral Matcher",
+    "FoleyTuneHfSmoother": "Foley HF Smoother",
+    "FoleyTuneHarmonicExciter": "Foley Harmonic Exciter",
+    "FoleyTuneOutputNormalizer": "Foley Output Normalizer",
+    "FoleyTuneDatasetBrowser": "Foley Dataset Browser",
 }

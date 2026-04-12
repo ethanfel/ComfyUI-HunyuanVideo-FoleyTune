@@ -414,9 +414,14 @@ class FoleyTuneDatasetInspector:
             if issues:
                 flagged.append(name)
                 lines.append(f"  FLAGGED  {name} ({duration:.2f}s): {', '.join(issues)}")
-                if not skip_rejected:
+                existing_reasons = item.get("reject_reasons", [])
+                item["rejected"] = True
+                item["reject_reasons"] = existing_reasons + issues
+                if item.get("val") or not skip_rejected:
                     clean.append(item)
             else:
+                item.setdefault("rejected", False)
+                item.setdefault("reject_reasons", [])
                 clean.append(item)
                 lines.append(f"  OK       {name} ({duration:.2f}s)")
 

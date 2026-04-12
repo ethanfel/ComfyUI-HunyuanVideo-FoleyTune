@@ -523,7 +523,7 @@ class FoleyDatasetQualityFilter:
             "required": {
                 "dataset": (FOLEY_AUDIO_DATASET,),
                 "min_quality_score": ("FLOAT", {
-                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "Minimum composite quality score to pass.",
                 }),
                 "skip_rejected": ("BOOLEAN", {
@@ -746,7 +746,7 @@ class FoleyVideoQualityFilter:
                     "tooltip": "Folder containing video files. Scans 1 level of subfolders.",
                 }),
                 "min_quality_score": ("FLOAT", {
-                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "Minimum composite quality score to pass.",
                 }),
                 "skip_rejected": ("BOOLEAN", {

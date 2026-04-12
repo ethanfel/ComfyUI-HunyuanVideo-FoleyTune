@@ -78,8 +78,9 @@ class LoRALinear(nn.Module):
         self.rank = rank
         self.alpha = alpha
 
-        in_features = base.in_features
-        out_features = base.out_features
+        # Support both nn.Linear and FP8WeightWrapper (which lacks in/out_features)
+        in_features = getattr(base, 'in_features', base.weight.shape[1])
+        out_features = getattr(base, 'out_features', base.weight.shape[0])
 
         # Scaling factor
         if use_rslora:
@@ -91,8 +92,12 @@ class LoRALinear(nn.Module):
         self.lora_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
         # Low-rank matrices — inherit device/dtype from base to avoid mismatch
-        self.lora_A = nn.Parameter(torch.empty(rank, in_features, device=base.weight.device, dtype=base.weight.dtype))
-        self.lora_B = nn.Parameter(torch.empty(out_features, rank, device=base.weight.device, dtype=base.weight.dtype))
+        # FP8 storage dtypes can't be used for LoRA params — use bf16 instead
+        param_dtype = base.weight.dtype
+        if param_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            param_dtype = torch.bfloat16
+        self.lora_A = nn.Parameter(torch.empty(rank, in_features, device=base.weight.device, dtype=param_dtype))
+        self.lora_B = nn.Parameter(torch.empty(out_features, rank, device=base.weight.device, dtype=param_dtype))
 
         # Freeze base weights
         for p in self.base.parameters():
@@ -155,7 +160,12 @@ def apply_lora(
 
     n_wrapped = 0
     for name, module in list(model.named_modules()):
-        if not isinstance(module, nn.Linear):
+        # Accept nn.Linear or FP8WeightWrapper (duck-type to avoid circular import)
+        is_linear = isinstance(module, nn.Linear) or (
+            hasattr(module, 'kind') and getattr(module, 'kind', None) == 'linear'
+            and hasattr(module, 'weight')
+        )
+        if not is_linear:
             continue
         if not any(name.endswith(suffix) for suffix in target_suffixes):
             continue

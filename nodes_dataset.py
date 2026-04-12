@@ -1114,7 +1114,7 @@ class FoleyTuneVideoQualityFilter:
                 accepted_items.append({
                     "waveform": r["wav"],
                     "sample_rate": r["sr"],
-                    "name": str(r["rel"].with_suffix("")).replace(os.sep, "_"),
+                    "name": r["rel"].stem,
                     "video_path": str(r["path"]),
                 })
             else:
@@ -1131,7 +1131,7 @@ class FoleyTuneVideoQualityFilter:
                 rejected_items.append({
                     "waveform": r["wav"],
                     "sample_rate": r["sr"],
-                    "name": str(r["rel"].with_suffix("")).replace(os.sep, "_"),
+                    "name": r["rel"].stem,
                     "video_path": str(r["path"]),
                 })
 

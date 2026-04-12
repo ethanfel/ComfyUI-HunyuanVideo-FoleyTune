@@ -22,6 +22,7 @@ Typical chain:
   FoleyTuneDatasetItemExtractor   → AUDIO (bridges to standard nodes)
 """
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -1001,7 +1002,7 @@ class FoleyTuneVideoQualityFilter:
                 accepted_items.append({
                     "waveform": r["wav"],
                     "sample_rate": r["sr"],
-                    "name": r["rel"].stem,
+                    "name": str(r["rel"].with_suffix("")).replace(os.sep, "_"),
                     "video_path": str(r["path"]),
                 })
             else:
@@ -1018,19 +1019,21 @@ class FoleyTuneVideoQualityFilter:
                 rejected_items.append({
                     "waveform": r["wav"],
                     "sample_rate": r["sr"],
-                    "name": r["rel"].stem,
+                    "name": str(r["rel"].with_suffix("")).replace(os.sep, "_"),
                     "video_path": str(r["path"]),
                 })
 
         # --- Build dataset with optional val clip from rejected ---
-        import random as _rng
-        _rng.seed(seed)
+        import random
+        rng = random.Random(seed)
 
         dataset = list(accepted_items)
         if rejected_items:
-            val_pick = _rng.choice(rejected_items)
+            val_pick = rng.choice(rejected_items)
             val_pick["val"] = True
             dataset.append(val_pick)
+            rejected_items.clear()  # free waveforms of non-selected rejects
+        results.clear()  # free Phase 1 result dicts
 
         avg_score = sum(scores_all) / len(scores_all) if scores_all else 0.0
         lines.append("---")

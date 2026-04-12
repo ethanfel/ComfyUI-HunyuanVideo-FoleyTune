@@ -1,6 +1,6 @@
 {
   "last_node_id": 18,
-  "last_link_id": 18,
+  "last_link_id": 19,
   "nodes": [
     {
       "id": 1,
@@ -201,14 +201,14 @@
       "mode": 0,
       "inputs": [
         {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "link": 8},
-        {"name": "output_dir", "type": "STRING", "widget": {"name": "output_dir"}, "link": null},
-        {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": null}
+        {"name": "output_dir", "type": "STRING", "widget": {"name": "output_dir"}, "link": null}
       ],
       "outputs": [
+        {"name": "dataset_json", "type": "STRING", "links": [19]},
         {"name": "report", "type": "STRING", "links": null}
       ],
       "properties": {"Node name for S&R": "FoleyTuneDatasetSaver"},
-      "widgets_values": ["/path/to/output", ""]
+      "widgets_values": ["/path/to/output"]
     },
     {
       "id": 11,
@@ -247,14 +247,14 @@
         {"name": "gradient_checkpointing", "type": "BOOLEAN", "widget": {"name": "gradient_checkpointing"}, "link": null},
         {"name": "blocks_to_swap", "type": "INT", "widget": {"name": "blocks_to_swap"}, "link": null},
         {"name": "resume_from", "type": "STRING", "widget": {"name": "resume_from"}, "link": null},
-        {"name": "dataset_json", "type": "STRING", "widget": {"name": "dataset_json"}, "link": null}
+        {"name": "dataset_json", "type": "STRING", "widget": {"name": "dataset_json"}, "link": 19}
       ],
       "outputs": [
         {"name": "FOLEYTUNE_MODEL", "type": "FOLEYTUNE_MODEL", "links": null},
         {"name": "loss_curve", "type": "IMAGE", "links": null}
       ],
       "properties": {"Node name for S&R": "FoleyTuneLoRATrainer"},
-      "widgets_values": ["/path/to/output", "/path/to/lora_output/", "all_attn_mlp", 64, 64.0, 0.0001, 3000, 8, 1, 100, 500, "logit_normal", "bf16", 42, 1.0, 0.6, "standard", false, 0.0, 1.0, "constant", 0.0, 0.0, false, 0, "", "/path/to/output/dataset.json"]
+      "widgets_values": ["/path/to/output", "/path/to/lora_output/", "all_attn_mlp", 64, 64.0, 0.0001, 3000, 8, 1, 100, 500, "logit_normal", "bf16", 42, 1.0, 0.6, "standard", false, 0.0, 1.0, "constant", 0.0, 0.0, false, 0, "", ""]
     },
     {
       "id": 12,
@@ -419,7 +419,8 @@
     [15, 14, 0, 15, 0, "AUDIO"],
     [16, 2, 0, 17, 0, "FOLEYTUNE_DEPS"],
     [17, 16, 0, 17, 1, "AUDIO"],
-    [18, 17, 0, 18, 0, "AUDIO"]
+    [18, 17, 0, 18, 0, "AUDIO"],
+    [19, 10, 0, 11, 28, "STRING"]
   ],
   "groups": [
     {

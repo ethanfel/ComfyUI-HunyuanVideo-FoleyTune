@@ -1264,25 +1264,20 @@ class FoleyTuneDatasetSaver:
                     "tooltip": "Absolute path to output folder. Created if it does not exist.",
                 }),
             },
-            "optional": {
-                "prompt": ("STRING", {
-                    "default": "",
-                    "tooltip": "Global prompt written to dataset.json. Per-clip prompts are stored in .npz files.",
-                }),
-            },
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("report",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("dataset_json", "report")
     OUTPUT_NODE = True
     FUNCTION = "save"
     CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Save every clip in a FOLEYTUNE_AUDIO_DATASET to output_dir as 24-bit FLAC. "
-        "Writes .npz feature files from item data and generates dataset.json with train/val split."
+        "Writes .npz feature files from item data and generates dataset.json with train/val split. "
+        "The global prompt is taken from the first training clip's prompt (set by BatchFeatureExtractor)."
     )
 
-    def save(self, dataset, output_dir: str, prompt: str = ""):
+    def save(self, dataset, output_dir: str):
         import json
         import soundfile as sf
 
@@ -1339,10 +1334,17 @@ class FoleyTuneDatasetSaver:
             else:
                 train_names.append(name)
 
+        # Derive global prompt from first training clip
+        prompt = ""
+        for item in dataset:
+            if not item.get("val") and item.get("prompt"):
+                prompt = item["prompt"]
+                break
+
         # Write dataset.json
         ds_json = {"train": train_names}
-        if prompt.strip():
-            ds_json["prompt"] = prompt.strip()
+        if prompt:
+            ds_json["prompt"] = prompt
         if val_name:
             ds_json["val"] = val_name
         json_path = out_path / "dataset.json"
@@ -1356,7 +1358,7 @@ class FoleyTuneDatasetSaver:
 
         report = "\n".join(lines)
         print(report, flush=True)
-        return (report,)
+        return (str(json_path), report)
 
 
 # ─── Node 9: Dataset Item Extractor ──────────────────────────────────────────

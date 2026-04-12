@@ -914,37 +914,10 @@ class FoleyTuneVideoQualityFilter:
         if out_dir:
             out_dir.mkdir(parents=True, exist_ok=True)
 
-        # CLAP setup
+        # CLAP flags (model loaded AFTER Phase 1 to avoid CUDA-in-fork crashes)
         use_clap = bool(clap_prompt.strip())
         use_neg_clap = bool(clap_negative_prompt.strip())
-        clap_model = None
-        clap_processor = None
-        text_embed = None
-        neg_text_embed = None
-        if use_clap or use_neg_clap:
-            from transformers import ClapModel, ClapProcessor
-            print("[VideoQualityFilter] Loading CLAP model...", flush=True)
-            clap_model = ClapModel.from_pretrained("laion/larger_clap_general")
-            clap_processor = ClapProcessor.from_pretrained("laion/larger_clap_general")
-            clap_model.eval()
-            if use_clap:
-                text_inputs = clap_processor(
-                    text=[clap_prompt], return_tensors="pt", padding=True
-                )
-                with torch.no_grad():
-                    text_embed = clap_model.get_text_features(**text_inputs)
-                    if not isinstance(text_embed, torch.Tensor):
-                        text_embed = text_embed.pooler_output
-                    text_embed = text_embed / text_embed.norm(dim=-1, keepdim=True)
-            if use_neg_clap:
-                neg_inputs = clap_processor(
-                    text=[clap_negative_prompt], return_tensors="pt", padding=True
-                )
-                with torch.no_grad():
-                    neg_text_embed = clap_model.get_text_features(**neg_inputs)
-                    if not isinstance(neg_text_embed, torch.Tensor):
-                        neg_text_embed = neg_text_embed.pooler_output
-                    neg_text_embed = neg_text_embed / neg_text_embed.norm(dim=-1, keepdim=True)
+        need_clap = use_clap or use_neg_clap
 
         # Normalize weights
         if use_clap:
@@ -960,10 +933,10 @@ class FoleyTuneVideoQualityFilter:
         # --- Phase 1: parallel extraction + scoring via ProcessPoolExecutor ---
         # Separate processes bypass the GIL so both FFmpeg I/O and
         # numpy/torch spectral scoring run truly in parallel.
+        # IMPORTANT: CLAP model must NOT be loaded before this — forking after
+        # CUDA init causes child process crashes.
         import time
         from concurrent.futures import ProcessPoolExecutor, as_completed
-
-        need_clap = use_clap or use_neg_clap
         t0 = time.time()
         print(f"[VideoQualityFilter] Phase 1: extracting + scoring + resample "
               f"{len(files)} clips with {num_workers} workers...", flush=True)
@@ -990,6 +963,35 @@ class FoleyTuneVideoQualityFilter:
 
         # Sort by relative path to keep report deterministic
         results.sort(key=lambda r: str(r["rel"]))
+
+        # --- CLAP model loading (deferred until after Phase 1 forks are done) ---
+        clap_model = None
+        text_embed = None
+        neg_text_embed = None
+        if need_clap:
+            from transformers import ClapModel, ClapProcessor
+            print("[VideoQualityFilter] Loading CLAP model...", flush=True)
+            clap_model = ClapModel.from_pretrained("laion/larger_clap_general")
+            clap_processor = ClapProcessor.from_pretrained("laion/larger_clap_general")
+            clap_model.eval()
+            if use_clap:
+                text_inputs = clap_processor(
+                    text=[clap_prompt], return_tensors="pt", padding=True
+                )
+                with torch.no_grad():
+                    text_embed = clap_model.get_text_features(**text_inputs)
+                    if not isinstance(text_embed, torch.Tensor):
+                        text_embed = text_embed.pooler_output
+                    text_embed = text_embed / text_embed.norm(dim=-1, keepdim=True)
+            if use_neg_clap:
+                neg_inputs = clap_processor(
+                    text=[clap_negative_prompt], return_tensors="pt", padding=True
+                )
+                with torch.no_grad():
+                    neg_text_embed = clap_model.get_text_features(**neg_inputs)
+                    if not isinstance(neg_text_embed, torch.Tensor):
+                        neg_text_embed = neg_text_embed.pooler_output
+                    neg_text_embed = neg_text_embed / neg_text_embed.norm(dim=-1, keepdim=True)
 
         # --- Phase 2: parallel CLAP preprocessing + batched GPU inference ---
         valid_results = [r for r in results if "error" not in r]

@@ -167,7 +167,7 @@
       "inputs": [
         {"name": "dataset", "type": "FOLEYTUNE_AUDIO_DATASET", "link": 6},
         {"name": "output_dir", "type": "STRING", "widget": {"name": "output_dir"}, "link": null},
-        {"name": "npz_source_dir", "type": "STRING", "widget": {"name": "npz_source_dir"}, "link": null}
+        {"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": null}
       ],
       "outputs": [
         {"name": "report", "type": "STRING", "links": null}

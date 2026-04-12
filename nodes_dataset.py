@@ -1238,6 +1238,7 @@ class FoleyTuneDatasetAugmenter:
                 new_item["waveform"] = wav_aug
                 new_item["name"] = f"{name}_aug{v:02d}"
                 new_item["origin_name"] = name
+                new_item.pop("val", None)
                 out.append(new_item)
 
         print(f"[FoleyTuneDatasetAugmenter] {len(dataset)} originals -> {len(out)} total clips  "
@@ -1890,7 +1891,7 @@ class FoleyTuneDatasetBrowser:
             if data.get("val"):
                 val_name = data["val"]
                 base = str(p.parent / val_name)
-                entries.append({"name": Path(val_name).name, "base": base, "prompt": default_prompt})
+                entries.append({"name": val_name, "base": base, "prompt": default_prompt})
         elif isinstance(data, dict):
             # Compact format
             default_prompt = data.get("prompt", data.get("label", ""))

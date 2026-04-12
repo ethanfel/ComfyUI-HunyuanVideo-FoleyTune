@@ -1007,12 +1007,12 @@ class FoleyTuneVideoQualityFilter:
             print(f"[VideoQualityFilter] Phase 2b: CLAP model inference (batched)...", flush=True)
             t_gpu = time.time()
             # Stack all mel features into one batch tensor
-            # Pad to max length in batch
-            max_len = max(f.shape[0] for f in mel_features)
-            padded = np.zeros((len(mel_features), max_len, mel_features[0].shape[1]),
+            # Features are [F, T] (mel bins, time) — pad on time axis
+            max_t = max(f.shape[-1] for f in mel_features)
+            padded = np.zeros((len(mel_features), mel_features[0].shape[0], max_t),
                               dtype=mel_features[0].dtype)
             for j, f in enumerate(mel_features):
-                padded[j, :f.shape[0]] = f
+                padded[j, :, :f.shape[-1]] = f
             input_features = torch.from_numpy(padded)
 
             with torch.no_grad():

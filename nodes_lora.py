@@ -595,70 +595,130 @@ class FoleyBatchFeatureExtractor:
         torch.cuda.empty_cache()
         logger.info(f"  {len(prompt_cache)} unique prompt(s) encoded")
 
-        # Process each clip fully, write to disk immediately
-        for i, clip in enumerate(clips):
-            logger.info(f"[{i+1}/{n}] {clip['rel']}...")
+        # --- Two-pass extraction with I/O prefetch ---
+        from concurrent.futures import ThreadPoolExecutor
 
-            # Load frames once for this clip
-            rgb = _load_video_frames(clip["path"])  # [T, C, H, W] uint8
-            total_frames = rgb.shape[0]
+        clip_feats = [None] * n
+        sync_feats = [None] * n
 
-            # SigLIP2
-            hunyuan_deps.siglip2_model.to(device)
-            n_siglip2 = max(1, int(clip["duration"] * 8))
-            indices = torch.linspace(0, total_frames - 1, n_siglip2).long()
+        def _prefetch_siglip2(idx):
+            """Load frames + preprocess for SigLIP2 on background thread."""
+            c = clips[idx]
+            rgb = _load_video_frames(c["path"])
+            total = rgb.shape[0]
+            n_frames = max(1, int(c["duration"] * 8))
+            indices = torch.linspace(0, total - 1, n_frames).long()
             processed = torch.stack([
                 hunyuan_deps.siglip2_preprocess(f) for f in rgb[indices]
             ]).unsqueeze(0)
-            clip_feat = encode_video_with_siglip2(
-                processed.to(device), hunyuan_deps
-            ).cpu()
-            del processed
-            hunyuan_deps.siglip2_model.to(offload_device)
+            del rgb
+            return idx, processed
 
-            # Synchformer
-            hunyuan_deps.syncformer_model.to(device)
-            n_sync = max(16, int(clip["duration"] * 25))
-            indices = torch.linspace(0, total_frames - 1, n_sync).long()
+        def _prefetch_sync(idx):
+            """Load frames + preprocess for Synchformer on background thread."""
+            c = clips[idx]
+            rgb = _load_video_frames(c["path"])
+            total = rgb.shape[0]
+            n_frames = max(16, int(c["duration"] * 25))
+            indices = torch.linspace(0, total - 1, n_frames).long()
             processed = torch.stack([
                 hunyuan_deps.syncformer_preprocess(f) for f in rgb[indices]
             ]).unsqueeze(0)
-            sync_feat = encode_video_with_sync(
-                processed.to(device), hunyuan_deps
-            ).cpu()
-            del processed, rgb
-            hunyuan_deps.syncformer_model.to(offload_device)
-            torch.cuda.empty_cache()
+            del rgb
+            return idx, processed
 
-            # Save .npz
+        # Pass 1: SigLIP2 — load model once, prefetch frames in background
+        logger.info("[BatchFeatureExtractor] SigLIP2 pass...")
+        hunyuan_deps.siglip2_model.to(device)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            # Submit first batch of prefetches
+            pending = {}
+            prefetch_idx = 0
+            max_prefetch = 3  # keep up to 3 clips prefetched ahead
+            while prefetch_idx < min(max_prefetch, n):
+                pending[prefetch_idx] = pool.submit(_prefetch_siglip2, prefetch_idx)
+                prefetch_idx += 1
+
+            for i in range(n):
+                # Wait for current clip's prefetch
+                idx, processed = pending.pop(i).result()
+                # Submit next prefetch while GPU works
+                if prefetch_idx < n:
+                    pending[prefetch_idx] = pool.submit(_prefetch_siglip2, prefetch_idx)
+                    prefetch_idx += 1
+                # GPU inference
+                clip_feats[i] = encode_video_with_siglip2(
+                    processed.to(device), hunyuan_deps
+                ).cpu()
+                del processed
+                logger.info(
+                    f"  [{i+1}/{n}] {clips[i]['rel']}: "
+                    f"clip_feat {clip_feats[i].shape}"
+                )
+        hunyuan_deps.siglip2_model.to(offload_device)
+        torch.cuda.empty_cache()
+
+        # Pass 2: Synchformer — same pattern
+        logger.info("[BatchFeatureExtractor] Synchformer pass...")
+        hunyuan_deps.syncformer_model.to(device)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = {}
+            prefetch_idx = 0
+            while prefetch_idx < min(max_prefetch, n):
+                pending[prefetch_idx] = pool.submit(_prefetch_sync, prefetch_idx)
+                prefetch_idx += 1
+
+            for i in range(n):
+                idx, processed = pending.pop(i).result()
+                if prefetch_idx < n:
+                    pending[prefetch_idx] = pool.submit(_prefetch_sync, prefetch_idx)
+                    prefetch_idx += 1
+                sync_feats[i] = encode_video_with_sync(
+                    processed.to(device), hunyuan_deps
+                ).cpu()
+                del processed
+                logger.info(
+                    f"  [{i+1}/{n}] {clips[i]['rel']}: "
+                    f"sync_feat {sync_feats[i].shape}"
+                )
+        hunyuan_deps.syncformer_model.to(offload_device)
+        torch.cuda.empty_cache()
+
+        # Pass 3: Save .npz + extract audio (parallel I/O)
+        logger.info("[BatchFeatureExtractor] Saving .npz + extracting audio...")
+        def _save_clip(i):
+            clip = clips[i]
             text_feat = prompt_cache[clip["prompt"]]
             out_path = out_dir / clip["out_name"]
             np.savez(
                 str(out_path),
-                clip_features=clip_feat.float().numpy(),
-                sync_features=sync_feat.float().numpy(),
+                clip_features=clip_feats[i].float().numpy(),
+                sync_features=sync_feats[i].float().numpy(),
                 text_embedding=text_feat.float().numpy(),
                 prompt=clip["prompt"],
                 duration=clip["duration"],
                 fps=clip["fps"],
             )
-            del clip_feat, sync_feat
-
-            # Extract audio WAV alongside the .npz
             wav_path = out_dir / clip["wav_name"]
             try:
                 _extract_audio_wav(clip["path"], wav_path)
                 audio_status = "audio OK"
             except Exception as e:
                 audio_status = f"audio FAIL: {e}"
+            return i, audio_status
 
-            lines.append(
-                f"  OK    {clip['rel']} ({clip['duration']:.1f}s @ "
-                f"{clip['fps']:.1f}fps) → {clip['out_name']} + "
-                f"{clip['wav_name']}  prompt: {clip['txt_source']}  "
-                f"{audio_status}"
-            )
-            logger.info(f"  [{i+1}/{n}] saved {clip['out_name']} + {clip['wav_name']}")
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(_save_clip, i) for i in range(n)]
+            for future in futures:
+                i, audio_status = future.result()
+                clip = clips[i]
+                lines.append(
+                    f"  OK    {clip['rel']} ({clip['duration']:.1f}s @ "
+                    f"{clip['fps']:.1f}fps) → {clip['out_name']} + "
+                    f"{clip['wav_name']}  prompt: {clip['txt_source']}  "
+                    f"{audio_status}"
+                )
+        del clip_feats, sync_feats
 
         lines.append("")
         lines.append(f"Saved {n} .npz + .wav pairs to {out_dir}")

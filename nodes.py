@@ -99,7 +99,7 @@ from .utils import (
 )
 
 # -----------------------------------------------------------------------------------
-# NODE 1: Hunyuan Model Loader (refactored: pure load)
+# NODE 1: FoleyTune Model Loader (refactored: pure load)
 # -----------------------------------------------------------------------------------
 class FoleyTuneModelLoader:
     @classmethod
@@ -198,7 +198,7 @@ class FoleyTuneModelLoader:
         return (foley_model,)
 
 # -----------------------------------------------------------------------------------
-# NODE 2: Hunyuan Dependencies Loader
+# NODE 2: FoleyTune Dependencies Loader
 # -----------------------------------------------------------------------------------
 class FoleyTuneDependenciesLoader:
     @classmethod
@@ -261,7 +261,7 @@ class FoleyTuneDependenciesLoader:
 class FoleyTuneChunkedSampler:
     """Generate audio for long videos by chunking with overlap and crossfade.
 
-    Connects to FoleyFeatureExtractor's FOLEY_FEATURES output. Splits denoising
+    Connects to FoleyTuneFeatureExtractor's FOLEYTUNE_FEATURES output. Splits denoising
     into overlapping chunks and stitches with SaFa binary swap (best quality),
     latent-space crossfade, or waveform crossfade.
 
@@ -397,7 +397,7 @@ class FoleyTuneChunkedSampler:
         return (audio_first, audio_batch)
 
 # -----------------------------------------------------------------------------------
-# NODE: Hunyuan Foley Torch Compile (optional accelerator)
+# NODE: FoleyTune Torch Compile (optional accelerator)
 # -----------------------------------------------------------------------------------
 
 class FoleyTuneTorchCompile:

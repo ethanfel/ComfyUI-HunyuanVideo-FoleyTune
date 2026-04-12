@@ -338,7 +338,7 @@ def slice_features_for_chunk(features: dict, t_start: float, t_end: float):
     """Slice pre-computed features to a specific time window.
 
     Args:
-        features: FOLEY_FEATURES dict with clip_feat, sync_feat, text_feat, etc.
+        features: FOLEYTUNE_FEATURES dict with clip_feat, sync_feat, text_feat, etc.
         t_start: chunk start time in seconds
         t_end: chunk end time in seconds
 
@@ -454,7 +454,7 @@ def chunked_denoise_process(
     """Chunked denoising with overlap stitching for long-form generation.
 
     Args:
-        features: FOLEY_FEATURES dict (full video features)
+        features: FOLEYTUNE_FEATURES dict (full video features)
         chunks: list of (t_start, t_end) tuples from compute_chunk_boundaries
         overlap_seconds: overlap duration in seconds
         crossfade_mode: "safa", "latent", or "waveform"

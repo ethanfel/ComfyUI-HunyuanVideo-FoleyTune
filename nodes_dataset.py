@@ -709,8 +709,12 @@ def _init_clap_worker():
     from transformers import ClapProcessor
     _worker_clap_proc = ClapProcessor.from_pretrained("laion/larger_clap_general")
 
-def _clap_preprocess(mono_np):
-    """Compute CLAP mel spectrogram features for one clip. Runs in worker process."""
+def _clap_preprocess(npy_path):
+    """Compute CLAP mel spectrogram features for one clip. Runs in worker process.
+
+    Takes path to a .npy file (not raw array) to avoid pipe serialization bottleneck.
+    """
+    mono_np = np.load(npy_path)
     inputs = _worker_clap_proc(
         audio=[mono_np], sampling_rate=48000, return_tensors="np",
     )
@@ -998,12 +1002,21 @@ class FoleyTuneVideoQualityFilter:
             batch_monos = [valid_results[i]["mono_48k_np"].squeeze(0) for i in batch_indices]
 
             # Step 1: parallel mel spectrogram computation across workers
+            # Save mono arrays to temp .npy files to avoid pipe serialization bottleneck
+            # (710 clips × ~2MB each = ~1.4GB through pipes causes hangs)
+            import tempfile
             print(f"[VideoQualityFilter] Phase 2a: CLAP preprocessing {len(batch_monos)} clips "
                   f"with {num_workers} workers...", flush=True)
             t_pre = time.time()
-            with ProcessPoolExecutor(max_workers=num_workers,
-                                     initializer=_init_clap_worker) as pool:
-                mel_features = list(pool.map(_clap_preprocess, batch_monos))
+            with tempfile.TemporaryDirectory() as tmpdir:
+                npy_paths = []
+                for i, mono in enumerate(batch_monos):
+                    p = os.path.join(tmpdir, f"{i}.npy")
+                    np.save(p, mono)
+                    npy_paths.append(p)
+                with ProcessPoolExecutor(max_workers=num_workers,
+                                         initializer=_init_clap_worker) as pool:
+                    mel_features = list(pool.map(_clap_preprocess, npy_paths, chunksize=8))
             print(f"[VideoQualityFilter] Phase 2a done in {time.time()-t_pre:.1f}s", flush=True)
 
             # Step 2: single batched GPU forward pass

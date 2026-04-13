@@ -279,11 +279,11 @@ class FoleyTuneChunkedSampler:
                 "hunyuan_model": ("FOLEYTUNE_MODEL",),
                 "hunyuan_deps": ("FOLEYTUNE_DEPS",),
                 "features": ("FOLEYTUNE_FEATURES",),
-                "cfg_scale": ("FLOAT", {"default": 4.5, "min": 1.0, "max": 10.0, "step": 0.1}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "steps": ("INT", {"default": 50, "min": 10, "max": 100, "step": 1}),
+                "cfg_scale": ("FLOAT", {"default": 4.5, "min": 1.0, "max": 10.0, "step": 0.1}),
                 "sampler": (cls.SAMPLER_NAMES, {"default": "euler"}),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 6, "step": 1}),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "chunk_duration": ("FLOAT", {"default": 8.0, "min": 1.0, "max": 15.0, "step": 0.1,
                                     "tooltip": "Duration of each chunk in seconds. 8s matches training length."}),
                 "overlap_seconds": ("FLOAT", {"default": 1.6, "min": 0.0, "max": 5.0, "step": 0.1,
@@ -293,11 +293,12 @@ class FoleyTuneChunkedSampler:
                 "force_offload": ("BOOLEAN", {"default": True}),
             },
             "optional": {
+                "init_audio": ("AUDIO", {"tooltip": "Reference audio for audio2audio. Connect to use img2img-style generation."}),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                             "tooltip": "1.0=full generation from noise, 0.0=keep original. "
+                                        "The model is strongly video-conditioned, so the effective range is roughly 0.6-1.0."}),
                 "torch_compile_cfg": ("FOLEYTUNE_COMPILE_CFG",),
                 "block_swap_args": ("FOLEYTUNE_BLOCKSWAP",),
-                "init_audio": ("AUDIO", {"tooltip": "Reference audio for audio2audio. Connect to use img2img-style generation."}),
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                              "tooltip": "Denoising strength. 1.0=full generation, 0.0=keep original. Lower values preserve more of init_audio."}),
             }
         }
 
@@ -311,19 +312,19 @@ class FoleyTuneChunkedSampler:
         hunyuan_model,
         hunyuan_deps,
         features,
-        cfg_scale,
+        seed,
         steps,
+        cfg_scale,
         sampler,
         batch_size,
-        seed,
         chunk_duration,
         overlap_seconds,
         crossfade_mode,
         force_offload,
+        init_audio=None,
+        denoise=1.0,
         torch_compile_cfg=None,
         block_swap_args=None,
-        init_audio=None,
-        strength=1.0,
     ):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -377,9 +378,9 @@ class FoleyTuneChunkedSampler:
 
         # Encode init audio to DAC latents if provided
         init_latents = None
-        if init_audio is not None and strength >= 1.0:
-            logger.info("Audio2Audio: strength=1.0 means init_audio is ignored (full generation from noise)")
-        if init_audio is not None and strength < 1.0:
+        if init_audio is not None and denoise >= 1.0:
+            logger.info("Audio2Audio: denoise=1.0 means init_audio is ignored (full generation from noise)")
+        if init_audio is not None and denoise < 1.0:
             init_waveform = init_audio["waveform"]
             init_sr = init_audio["sample_rate"]
             # Ensure mono [B, 1, samples]
@@ -401,7 +402,7 @@ class FoleyTuneChunkedSampler:
                     init_latents = F.pad(init_latents, (0, expected_frames - init_latents.shape[-1]))
                 else:
                     init_latents = init_latents[:, :, :expected_frames]
-            logger.info(f"Audio2Audio: encoded init_audio to latents {init_latents.shape}, strength={strength}")
+            logger.info(f"Audio2Audio: encoded init_audio to latents {init_latents.shape}, denoise={denoise}")
 
         # Run chunked denoising
         decoded_waveform, sample_rate = chunked_denoise_process(
@@ -417,7 +418,7 @@ class FoleyTuneChunkedSampler:
             sampler=sampler,
             generator=rng,
             init_latents=init_latents,
-            strength=strength,
+            strength=denoise,
         )
 
         waveform_batch = decoded_waveform.float().cpu()
@@ -923,7 +924,7 @@ class FoleyTuneStyleTransfer:
                 "content_audio": ("AUDIO", {"tooltip": "Audio whose structure/timing to keep."}),
                 "style_audio": ("AUDIO", {"tooltip": "Audio whose tonal quality/timbre to transfer."}),
                 "hunyuan_deps": ("FOLEYTUNE_DEPS",),
-                "strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
+                "strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
                               "tooltip": "Style transfer strength. 0.0=no change, 1.0=full style transfer."}),
             },
         }

@@ -308,7 +308,6 @@ After the DAC device setup (`hunyuan_deps["dac_model"].to(device=device, dtype=t
         # Encode init audio to DAC latents if provided
         init_latents = None
         if init_audio is not None and strength < 1.0:
-            from utils import encode_audio_to_latents
             init_waveform = init_audio["waveform"]
             # Ensure mono [B, 1, samples]
             if init_waveform.dim() == 2:
@@ -498,6 +497,11 @@ class FoleyTuneInpainter:
                      f"frames [{frame_start}, {frame_end}] / {T_latent}, "
                      f"fade={fade_frames} frames")
 
+        # Guard: model trained on ~8s chunks, inpainting works on full duration
+        if duration > 16.0:
+            logger.warning(f"Inpainting on {duration:.1f}s audio — quality may degrade beyond ~8s. "
+                           "Consider trimming or using chunked generation instead.")
+
         # Generate noise for inpainting (consistent across steps)
         from diffusers.utils.torch_utils import randn_tensor
         inpaint_noise = randn_tensor(
@@ -671,21 +675,25 @@ class FoleyTuneStyleTransfer:
     )
 
     def transfer_style(self, content_audio, style_audio, hunyuan_deps, strength):
+        import torchaudio
         device = mm.get_torch_device()
         dac = hunyuan_deps["dac_model"]
         dac.to(device=device, dtype=torch.float32)
 
-        # Encode both
-        content_wav = content_audio["waveform"]
-        style_wav = style_audio["waveform"]
-        if content_wav.dim() == 2:
-            content_wav = content_wav.unsqueeze(0)
-        if style_wav.dim() == 2:
-            style_wav = style_wav.unsqueeze(0)
-        if content_wav.shape[1] > 1:
-            content_wav = content_wav[:, :1, :]
-        if style_wav.shape[1] > 1:
-            style_wav = style_wav[:, :1, :]
+        # Prepare and resample to 48kHz (DAC's native rate)
+        def _prep_wav(audio_dict):
+            wav = audio_dict["waveform"]
+            sr = audio_dict["sample_rate"]
+            if wav.dim() == 2:
+                wav = wav.unsqueeze(0)
+            if wav.shape[1] > 1:
+                wav = wav[:, :1, :]
+            if sr != 48000:
+                wav = torchaudio.functional.resample(wav, sr, 48000)
+            return wav
+
+        content_wav = _prep_wav(content_audio)
+        style_wav = _prep_wav(style_audio)
 
         z_content = encode_audio_to_latents(content_wav, dac, device)
         z_style = encode_audio_to_latents(style_wav, dac, device)
@@ -708,12 +716,11 @@ class FoleyTuneStyleTransfer:
             dac_weight = next(dac.parameters())
             audio = dac.decode(z_out.to(device=dac_weight.device, dtype=dac_weight.dtype))
 
-        sample_rate = content_audio["sample_rate"]
-        # Trim to content length
+        # DAC always outputs at 48kHz — trim to content length
         content_samples = content_wav.shape[-1]
         audio = audio[:, :, :content_samples]
 
-        audio_out = {"waveform": audio.float().cpu(), "sample_rate": sample_rate}
+        audio_out = {"waveform": audio.float().cpu(), "sample_rate": 48000}
         return (audio_out,)
 ```
 

@@ -237,4 +237,7 @@ FoleyTune builds on the work of many projects and contributors:
 
 ## License
 
-This project uses the [Tencent Hunyuan Community License](LICENSE). Commercial use above 100M monthly active users requires a separate license from Tencent.
+This project is dual-licensed:
+
+- **Node code, training pipeline, and dataset tools** — [GPL 3.0](LICENSE)
+- **Model code** (`hunyuanvideo_foley/` directory) — [Tencent Hunyuan Community License](LICENSE-TENCENT). Territory restrictions apply (excludes EU, UK, South Korea). Commercial use above 100M MAU requires a separate license from Tencent.

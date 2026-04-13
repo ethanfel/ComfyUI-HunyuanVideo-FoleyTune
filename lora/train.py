@@ -233,6 +233,24 @@ def sample_timesteps(batch_size, mode, device, dtype,
     return t
 
 
+def min_snr_weight(sigma, gamma=5.0):
+    """Compute Min-SNR loss weighting from sigma values.
+
+    For flow matching with linear schedule: SNR = (1-sigma)^2 / sigma^2.
+    Weight = clamp(SNR, max=gamma). Emphasizes low-noise timesteps
+    where the model learns fine detail.
+
+    Args:
+        sigma: [B] tensor of sigma values in [0, 1]
+        gamma: clamp ceiling (default 5.0)
+
+    Returns:
+        [B] weight tensor, broadcastable to loss shape
+    """
+    snr = ((1 - sigma) ** 2) / (sigma ** 2 + 1e-8)
+    return snr.clamp(max=gamma)
+
+
 # -- Loss computation --------------------------------------------------------
 
 def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dtype):

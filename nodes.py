@@ -6,6 +6,7 @@ import weakref
 import gc
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from inspect import cleandoc
 from loguru import logger
 from torchvision.transforms import v2
@@ -376,6 +377,8 @@ class FoleyTuneChunkedSampler:
 
         # Encode init audio to DAC latents if provided
         init_latents = None
+        if init_audio is not None and strength >= 1.0:
+            logger.info("Audio2Audio: strength=1.0 means init_audio is ignored (full generation from noise)")
         if init_audio is not None and strength < 1.0:
             init_waveform = init_audio["waveform"]
             # Ensure mono [B, 1, samples]
@@ -384,6 +387,16 @@ class FoleyTuneChunkedSampler:
             if init_waveform.shape[1] > 1:
                 init_waveform = init_waveform[:, :1, :]  # take first channel
             init_latents = encode_audio_to_latents(init_waveform, hunyuan_deps["dac_model"], device)
+            # Ensure init_latents match expected duration
+            audio_frame_rate = hunyuan_cfg.model_config.model_kwargs.audio_frame_rate
+            expected_frames = int(duration * audio_frame_rate)
+            if init_latents.shape[-1] != expected_frames:
+                logger.warning(f"Audio2Audio: init_audio latent length {init_latents.shape[-1]} != "
+                               f"expected {expected_frames} frames. Padding/trimming to match.")
+                if init_latents.shape[-1] < expected_frames:
+                    init_latents = F.pad(init_latents, (0, expected_frames - init_latents.shape[-1]))
+                else:
+                    init_latents = init_latents[:, :, :expected_frames]
             logger.info(f"Audio2Audio: encoded init_audio to latents {init_latents.shape}, strength={strength}")
 
         # Run chunked denoising
@@ -729,6 +742,9 @@ class FoleyTuneInpainter:
         audio_frame_rate = hunyuan_cfg.model_config.model_kwargs.audio_frame_rate
         duration = features["duration"]
 
+        if start_seconds >= end_seconds:
+            raise ValueError(f"start_seconds ({start_seconds}) must be less than end_seconds ({end_seconds})")
+
         # Encode init audio
         init_waveform = init_audio["waveform"]
         if init_waveform.dim() == 2:
@@ -868,7 +884,7 @@ class FoleyTuneFeatureBlender:
             a = a[:, :min_len, :]
             b = b[:, :min_len, :]
             result[key] = (1 - blend) * a + blend * b
-        result["duration"] = (1 - blend) * features_a["duration"] + blend * features_b["duration"]
+        result["duration"] = min(features_a["duration"], features_b["duration"])
         return (result,)
 
 # -----------------------------------------------------------------------------------
@@ -946,6 +962,11 @@ class FoleyTuneStyleTransfer:
         # DAC always outputs at 48kHz — trim to content length
         content_samples = content_wav.shape[-1]
         audio = audio[:, :, :content_samples]
+
+        # Offload DAC to free VRAM
+        offload_device = mm.unet_offload_device()
+        dac.to(offload_device)
+        mm.soft_empty_cache()
 
         audio_out = {"waveform": audio.float().cpu(), "sample_rate": 48000}
         return (audio_out,)

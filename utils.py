@@ -183,6 +183,7 @@ def denoise_process_with_generator(
         latents = sigma_start * noise + (1 - sigma_start) * init_latents.to(device=device, dtype=target_dtype)
         latents = latents.repeat(batch_size, 1, 1) if latents.shape[0] == 1 else latents
     else:
+        start_step = 0
         timesteps = scheduler.timesteps
         latents = prepare_latents_with_generator(
             scheduler, batch_size=batch_size,
@@ -283,9 +284,11 @@ def denoise_process_with_generator(
 
             # Inpainting: replace known regions with properly noised original
             if inpaint_mask is not None and inpaint_original is not None:
+                # Compute next sigma directly from schedule (avoids relying on
+                # scheduler._step_index which is unreliable with multi-order solvers)
+                abs_step = start_step + i
                 if i + 1 < len(timesteps):
-                    next_step_idx = scheduler._step_index  # already incremented by step()
-                    sigma_next = scheduler.sigmas[next_step_idx]
+                    sigma_next = scheduler.sigmas[abs_step + 1]
                 else:
                     sigma_next = 0.0  # final step: use clean original
                 original_noised = sigma_next * inpaint_noise + (1 - sigma_next) * inpaint_original

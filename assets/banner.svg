@@ -88,7 +88,7 @@
 
   <!-- Subtitle -->
   <text x="450" y="152" text-anchor="middle" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-size="16" fill="#8b949e" letter-spacing="3">
-    COMFYUI VIDEO-TO-AUDIO WITH LORA TRAINING
+    HUNYUANVIDEO-FOLEY LORA TRAINING FOR COMFYUI
   </text>
 
   <!-- Accent line under subtitle -->

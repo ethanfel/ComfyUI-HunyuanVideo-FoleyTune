@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="assets/banner.png" alt="FoleyTune — ComfyUI Video-to-Audio with LoRA Training" width="100%"/>
+  <img src="assets/banner.png" alt="FoleyTune — HunyuanVideo-Foley LoRA Training for ComfyUI" width="100%"/>
 </p>
 
 <p align="center">
-  <strong>Teach HunyuanVideo-Foley new sounds with LoRA fine-tuning, right inside ComfyUI.</strong>
+  <strong>FoleyTune — HunyuanVideo-Foley LoRA Training for ComfyUI</strong>
 </p>
 
 <p align="center">

@@ -141,7 +141,9 @@ dmypy.json
 pyrightconfig.json
 .cursorignore
 
-assets/
+assets/*
+!assets/*.svg
+!assets/*.png
 examples/
 
 # For global settings

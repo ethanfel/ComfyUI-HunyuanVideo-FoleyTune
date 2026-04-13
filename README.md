@@ -1,168 +1,237 @@
-# 🎵 ComfyUI – HunyuanVideo‑Foley Video to Audio
+<p align="center">
+  <img src="assets/banner.png" alt="FoleyTune — ComfyUI Video-to-Audio with LoRA Training" width="100%"/>
+</p>
 
-A tidy set of nodes for **Tencent HunyuanVideo‑Foley** that runs on modest GPUs and scales up nicely.
+<p align="center">
+  <strong>Teach HunyuanVideo-Foley new sounds with LoRA fine-tuning, right inside ComfyUI.</strong>
+</p>
 
-## ⚡ Optimized Models Available
+<p align="center">
+  <a href="#quick-start-inference">Inference</a> &bull;
+  <a href="#quick-start-training">Training</a> &bull;
+  <a href="LORA_TRAINING.md">Full Training Guide</a> &bull;
+  <a href="#node-reference">All 29 Nodes</a> &bull;
+  <a href="#vram-guide">VRAM Guide</a>
+</p>
 
-**Pre-converted safetensors models with fp16 and fp8 variants are available for faster loading and reduced VRAM usage.** The fp8 models enable operation under 8GB VRAM, and with block swap, you can run under 4GB VRAM. [See model files section](#-where-to-put-the-model-files) for download links and file details.
+---
 
-![Workflow Diagram](./example_workflows/HunyuanVideoFoleyExample.png)
+## What is FoleyTune?
 
-## 🚀 Node overview (start here)
+FoleyTune is a ComfyUI node pack for **Tencent HunyuanVideo-Foley** — a video-to-audio (and text-to-audio) diffusion model. It adds three things the original model doesn't have:
 
-* **Hunyuan‑Foley Model Loader** – loads the main model. Two simple knobs:
+1. **LoRA training** — fine-tune the model on your own video+audio pairs to teach it sounds it doesn't know or gets wrong.
+2. **A dataset pipeline** — 15 nodes that clean, normalize, filter, and prepare audio before training.
+3. **Flexible VRAM management** — run on anything from a 4 GB laptop GPU to a 96 GB workstation, with FP8 quantization, block swapping, and torch.compile.
 
-  * **Precision**: runtime math quality (bf16/fp16/fp32).
-  * **FP8 Quantization** (weight‑only): lowers VRAM usage < 12GB. *Turn this on if you're GPU‑poor.*
-* **Hunyuan‑Foley Dependencies Loader** – loads DAC‑VAE, SigLIP2, Synchformer, and CLAP.
-* **Hunyuan‑Foley Sampler** – makes the audio. Images are **optional** (works great as **Text→Audio**). Supports **negative prompt** and **batching**.
-* **Hunyuan‑Foley Torch Compile** (optional) – uses `torch.compile` for speed. First run compiles; repeats are **\~30% faster**.
-* **Hunyuan‑Foley BlockSwap Settings** (optional) – enables under 4GB VRAM operation by offloading transformer blocks to CPU.
+---
 
-## ⚡ Quick start
+## Installation
 
-1. Drop **Model Loader → Dependencies Loader → (optional) Torch Compile → Sampler**.
-2. For **Text→Audio**, leave the image input empty. For **Video→Audio**, connect an image sequence and set `frame_rate`.
-3. Tweak **Prompt** and **Negative Prompt**. Leave sampler on **Euler**, `CFG≈4.5`, `Steps≈50`.
-4. Press **Queue** and preview the audio.
+Clone into your ComfyUI custom nodes folder:
 
-## 📁 Where to put the model files
-
-
-**Optimized safetensors files available at:**
-[https://huggingface.co/phazei/HunyuanVideo-Foley](https://huggingface.co/phazei/HunyuanVideo-Foley) (converted safetensors with fp16 and fp8 variants)
-
-I couldn't tell any difference between the quality with fp8 and fp16, so I'd suggest the 8.  For those on a 3090 and lower, torch compile will only work with the e5m2 file.
-
-_Be sure to **set quantization on the loader node to auto or fp8** if using an fp8 model or it will be upcast to fp16 in memory_
-
-**Converted safetensors files:**
-```
-hunyuanvideo_foley.safetensors             # ~10.3 GB  main model (fp16)
-hunyuanvideo_foley_fp8_e4m3fn.safetensors  # ~5.34 GB  main model (fp8)
-hunyuanvideo_foley_fp8_e5m2.safetensors    # ~5.34 GB  main model (fp8)
-synchformer_state_dict_fp16.safetensors    # ~475 MB   sync encoder (fp16)
-vae_128d_48k_fp16.safetensors              # ~743 MB   DAC‑VAE (fp16)
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/ethanfel/ComfyUI-HunyuanVideo-FoleyTune.git
+cd ComfyUI-HunyuanVideo-FoleyTune
+pip install -r requirements.txt
 ```
 
-Place them in **`ComfyUI/models/foley/`**:
+Models are downloaded automatically on first use. To download manually, see [Model Files](#model-files).
 
-**Original files:**
-Download from Hugging Face:
-[https://huggingface.co/tencent/HunyuanVideo-Foley/tree/main](https://huggingface.co/tencent/HunyuanVideo-Foley/tree/main) (original PyTorch files)
+---
 
+## Quick Start: Inference
+
+<p align="center">
+  <img src="assets/pipeline-inference.png" alt="Inference pipeline" width="85%"/>
+</p>
+
+1. Drop **Model Loader** -> **Dependencies Loader** -> **Chunked Sampler**.
+2. For **text-to-audio**, leave the image input empty and write a prompt. For **video-to-audio**, connect an image sequence and set `frame_rate`.
+3. Default settings: **Euler** scheduler, **CFG 4.5**, **50 steps**.
+4. Press **Queue**.
+
+The Chunked Sampler handles any audio length by generating in overlapping segments with crossfade. Short clips (under `chunk_duration`) run in a single pass.
+
+### Optional nodes
+
+| Node | What it does |
+|---|---|
+| **Torch Compile** | ~30% faster after the first compile |
+| **BlockSwap Settings** | Offload transformer blocks to CPU for ultra-low VRAM |
+| **LoRA Loader** | Load a trained adapter for custom sounds |
+| **Select Audio From Batch** | Pick one clip from a batch |
+
+---
+
+## Quick Start: Training
+
+<p align="center">
+  <img src="assets/pipeline-training.png" alt="Training pipeline" width="95%"/>
+</p>
+
+### 1. Prepare your data
+
+Collect 15-60 video+audio pairs of the sound you want to train. Diversity matters more than quantity — vary the recording environment, distance, and intensity.
+
+Optionally clean the audio with the dataset pipeline nodes:
 
 ```
-hunyuanvideo_foley.pth         # ~10.3 GB  main model
-synchformer_state_dict.pth     # ~0.95 GB  sync encoder
-vae_128d_48k.pth               # ~1.49 GB  DAC‑VAE
+Dataset Loader -> Resampler (48kHz) -> LUFS Normalizer -> HF Smoother -> Inspector -> Saver
 ```
 
-> Tested with **PyTorch 2.7 and 2.8**.
+### 2. Extract features
 
-## ⚙️ The Model Loader dropdowns
+Run **FoleyTune Feature Extractor** once per clip to cache SigLIP2, Synchformer, and CLAP features as `.npz` files.
 
-* **Precision** = how carefully the math runs. `bf16`/`fp16` are fast and standard; `fp32` is heaviest. Pick `bf16` (default) or `fp16` on 30‑series GPUs if you prefer.
-* **FP8 Quantization** = store big Linear weights in **FP8** to save memory. Compute still runs in `Precision`, so sound quality holds.  (Must be selected for fp8 safetensors)
+### 3. Train
 
-  * **`auto`** tries to match the checkpoint or uses a safe default.
-  * Expect **less VRAM**, not more speed.
+Connect **Model Loader** -> **Dependencies Loader** -> **LoRA Trainer**. Point `data_dir` at your features folder.
 
-## 💾 Memory & speed at a glance
+Recommended starting defaults:
 
-* Typical 5s / 50 steps on a 24 GB card:
+| Parameter | Value |
+|---|---|
+| rank | 128 |
+| timestep_mode | curriculum |
+| lr | 1e-4 |
+| batch_size | 8 |
+| steps | 15000 |
 
-  * Baseline: \~10–12 GB
-  * With ping‑pong offloading (built‑in): \~9–10 GB
-  * **With FP8 quant**: subtract another **\~4+ GB** (**under 8GB VRAM**)
-  * **With Block Swap**: **under 4GB VRAM** It's slower the higher the swap, up to 60s for 5s, but it'll fit!
-  * **Torch Compile**: after the first compile, runs are **\~30% faster**
-* **Under‑12 GB recipe:** set **FP8 Quant** on, keep **batch\_size=1**, steps ≤ **50**. That's it.
+### 4. Use the adapter
 
-## 🔄 Batching
+Connect **LoRA Loader** between the Model Loader and Sampler. Point it at your best checkpoint.
 
-* `batch_size` generates multiple variations at once. VRAM scales roughly with batch size.
-* Use **Select Audio From Batch** to pick the clip you like.
+For the full training guide with hyperparameter recommendations, checkpoint selection, and sweep experiments, see **[LORA_TRAINING.md](LORA_TRAINING.md)**.
 
-## 💡 Tips & fixes
+---
 
-* If you OOM, drop `batch_size`, reduce `steps`, or enable **force\_offload** in the sampler.
+## Node Reference
 
-## 🎛️ LoRA Training
+### Inference (6 nodes)
 
-Six new nodes for fine-tuning HunyuanVideo-Foley with LoRA adapters.
+| Node | Description |
+|---|---|
+| **FoleyTune Model Loader** | Load the transformer with precision and FP8 quantization options |
+| **FoleyTune Dependencies Loader** | Load DAC-VAE, SigLIP2, Synchformer, and CLAP |
+| **FoleyTune Chunked Sampler** | Generate audio from video/text with chunked overlap for any duration |
+| **FoleyTune Torch Compile** | Optional `torch.compile` acceleration (~30% faster) |
+| **FoleyTune BlockSwap Settings** | Offload transformer blocks to CPU for low-VRAM operation |
+| **FoleyTune Select Audio From Batch** | Extract one audio clip from a batch by index |
 
-### New Nodes
+### Training (7 nodes)
 
-* **Foley Feature Extractor** – Caches SigLIP2/Synchformer/CLAP features + audio to `.npz` files for training.
-* **Foley LoRA Trainer** – Trains a LoRA adapter via flow matching. Supports logit-normal/curriculum timestep sampling, LoRA+, PiSSA init, rsLoRA, gradient accumulation, and periodic eval samples.
-* **Foley LoRA Loader** – Loads a trained adapter into the model for inference, with adjustable strength.
-* **Foley LoRA Scheduler** – Runs multiple training experiments from a JSON sweep config. Produces comparison charts and supports resume.
-* **Foley LoRA Evaluator** – Generates audio from multiple adapters and computes spectral metrics (HF energy, centroid, flatness, temporal variance) for comparison.
-* **Foley VAE Roundtrip** – Diagnostic node that encodes/decodes audio through DAC to reveal the codec quality ceiling.
+| Node | Description |
+|---|---|
+| **FoleyTune Feature Extractor** | Cache visual and text features from video+audio to `.npz` |
+| **FoleyTune Batch Feature Extractor** | Process an entire dataset in one pass with I/O prefetching |
+| **FoleyTune LoRA Trainer** | Train a LoRA adapter with flow matching loss and spectral eval |
+| **FoleyTune LoRA Loader** | Load a trained adapter into the model with adjustable strength |
+| **FoleyTune LoRA Scheduler** | Run multiple training experiments from a JSON sweep config |
+| **FoleyTune LoRA Evaluator** | Compare adapters with spectral metrics and generated audio |
+| **FoleyTune VAE Roundtrip** | Diagnostic: encode/decode audio through DAC to check codec quality |
 
-### Quick Start
+### Dataset Preparation (12 nodes)
 
-1. **Prepare data:** Use **Foley Feature Extractor** to cache features for each training clip (video frames + audio + text prompt). Output goes to a directory of `.npz` + `.wav` files.
-2. **Train:** Connect **Model Loader → Dependencies Loader → Foley LoRA Trainer**. Point `data_dir` at your cached features and set `output_dir`. Start with defaults (`rank=64`, `lr=1e-4`, `steps=3000`).
-3. **Inference:** Use **Foley LoRA Loader** to load `adapter_final.pt` into the model, then connect to the standard **Sampler**.
+| Node | Description |
+|---|---|
+| **FoleyTune Dataset Loader** | Load audio files from a folder into an in-memory dataset |
+| **FoleyTune Dataset Resampler** | Resample all clips to a target sample rate (soxr VHQ) |
+| **FoleyTune Dataset LUFS Normalizer** | Normalize loudness to EBU R128 with true peak limiting |
+| **FoleyTune Dataset Compressor** | Parallel compression to reduce dynamic range |
+| **FoleyTune Dataset Inspector** | Flag quality issues: silence, clipping, loudness deviation |
+| **FoleyTune Dataset Quality Filter** | Score-based filtering for silence, anomalies, frequency balance |
+| **FoleyTune Video Quality Filter** | Filter video clips by analyzing their audio track quality |
+| **FoleyTune Dataset HF Smoother** | Soft high-frequency attenuation across the dataset |
+| **FoleyTune Dataset Augmenter** | Generate variants with pitch/time-stretch/gain changes |
+| **FoleyTune Dataset Spectral Matcher** | Adaptive EQ toward a reference audio distribution |
+| **FoleyTune Dataset Saver** | Save all clips to disk as FLAC with metadata |
+| **FoleyTune Dataset Browser** | Browse dataset entries by index for inspection |
 
-### Dataset Preparation
+### Post-Processing (4 nodes)
 
-Each training clip needs a matching `.npz` and audio file with the same stem:
-```
-my_dataset/
-  clip_001.npz    # features from Feature Extractor
-  clip_001.wav    # paired audio
-  clip_002.npz
-  clip_002.wav
-```
+| Node | Description |
+|---|---|
+| **FoleyTune Dataset Item Extractor** | Extract a single audio from a dataset by index |
+| **FoleyTune HF Smoother** | Single-clip high-frequency attenuation (post-generation) |
+| **FoleyTune Harmonic Exciter** | Multi-band harmonic enhancement |
+| **FoleyTune Output Normalizer** | Normalize generated audio to target LUFS |
 
-All clips should have the same duration (set at extraction time) to avoid batching issues.
+---
 
-### Sweep JSON Format
+## Model Files
 
-```json
-{
-  "name": "my_sweep",
-  "data_dir": "/path/to/dataset",
-  "output_root": "/path/to/output",
-  "base": {"steps": 2000, "rank": 64},
-  "experiments": [
-    {"id": "lr_1e4", "lr": 1e-4},
-    {"id": "lr_5e5", "lr": 5e-5},
-    {"id": "rank32", "rank": 32, "alpha": 32.0}
-  ]
-}
-```
+Place model files in `ComfyUI/models/foley/`. They are downloaded automatically on first use, or you can download manually.
 
-### Eval JSON Format
+### Optimized safetensors (recommended for inference)
 
-```json
-{
-  "name": "compare_adapters",
-  "data_dir": "/path/to/dataset",
-  "output_dir": "/path/to/eval_output",
-  "steps": 25,
-  "adapters": [
-    {"id": "baseline", "path": null},
-    {"id": "lr_1e4", "path": "/path/to/lr_1e4/adapter_final.pt"},
-    {"id": "rank32", "path": "/path/to/rank32/adapter_final.pt"}
-  ]
-}
-```
+From [phazei/HunyuanVideo-Foley](https://huggingface.co/phazei/HunyuanVideo-Foley):
 
-### Hyperparameter Recommendations
+| File | Size | Notes |
+|---|---|---|
+| `hunyuanvideo_foley.safetensors` | ~10.3 GB | FP16 main model |
+| `hunyuanvideo_foley_fp8_e4m3fn.safetensors` | ~5.3 GB | FP8 main model |
+| `hunyuanvideo_foley_fp8_e5m2.safetensors` | ~5.3 GB | FP8 (better torch.compile compat on 30-series) |
+| `synchformer_state_dict_fp16.safetensors` | ~475 MB | Sync encoder |
+| `vae_128d_48k_fp16.safetensors` | ~743 MB | DAC-VAE |
 
-| Dataset Size | Rank | Steps | LR | Target |
-|---|---|---|---|---|
-| 1-5 clips | 16-32 | 1000-2000 | 5e-5 | audio_attn |
-| 5-20 clips | 32-64 | 2000-4000 | 1e-4 | audio_cross |
-| 20+ clips | 64-128 | 3000-6000 | 1e-4 | all_attn_mlp |
+Set quantization to `auto` or `fp8` in the Model Loader when using FP8 files.
 
-## 🙏 Credits
+### Original PyTorch files (recommended for training)
 
-* Model & weights: **Tencent HunyuanVideo‑Foley**.
-* ComfyUI and community for the scaffolding.
-* This repo adds VRAM‑friendly loading, **FP8** weight‑only option, **block swap** for ultra-low VRAM, and an optional **torch.compile** speed path.
+From [tencent/HunyuanVideo-Foley](https://huggingface.co/tencent/HunyuanVideo-Foley):
 
+| File | Size | Notes |
+|---|---|---|
+| `hunyuanvideo_foley.pth` | ~10.3 GB | Full precision transformer |
+| `synchformer_state_dict.pth` | ~0.95 GB | Full precision sync encoder |
+| `vae_128d_48k.pth` | ~1.49 GB | Full precision DAC-VAE |
+
+Use the full-precision `.pth` files for training. The FP16 safetensors lose precision that matters during fine-tuning. FP8 models are inference-only.
+
+---
+
+## VRAM Guide
+
+FoleyTune scales from ultra-low VRAM laptops to high-end workstations.
+
+### Inference
+
+| VRAM | Config | Speed |
+|---|---|---|
+| **4 GB** | FP8 + BlockSwap (50+ blocks) | ~60s for 5s audio |
+| **8 GB** | FP8 quantization | Normal |
+| **12 GB** | FP16, batch 1 | Normal |
+| **24 GB** | BF16, batch 2-4 | Fast |
+| **24 GB** | BF16 + Torch Compile | ~30% faster |
+
+### Training
+
+| VRAM | Config |
+|---|---|
+| **10 GB** | Gradient checkpointing + 40 blocks swapped, batch 2 |
+| **12 GB** | Gradient checkpointing + 20 blocks swapped, batch 8 |
+| **16 GB** | Gradient checkpointing, batch 8 |
+| **24 GB** | No offload, batch 8 |
+| **48+ GB** | No offload, batch 16-32 |
+
+---
+
+## Acknowledgements
+
+FoleyTune builds on the work of many projects and contributors:
+
+| Project | Role |
+|---|---|
+| [Tencent HunyuanVideo-Foley](https://github.com/Tencent/HunyuanVideo) | Base model, architecture, and weights |
+| [ComfyUI](https://github.com/comfyanonymous/ComfyUI) | Node framework |
+| [phazei](https://huggingface.co/phazei/HunyuanVideo-Foley) | Optimized FP8/FP16 safetensors conversions |
+| [LAION CLAP](https://github.com/LAION-AI/CLAP) | Text-audio conditioning model (`laion/larger_clap_general`) |
+| [Google SigLIP2](https://huggingface.co/google/siglip2-base-patch16-512) | Visual feature extraction |
+| [Synchformer](https://github.com/v-iashin/Synchformer) | Audio-visual synchronization features |
+| [DAC (Descript Audio Codec)](https://github.com/descriptinc/descript-audio-codec) | Neural audio codec (VAE) |
+
+## License
+
+This project uses the [Tencent Hunyuan Community License](LICENSE). Commercial use above 100M monthly active users requires a separate license from Tencent.

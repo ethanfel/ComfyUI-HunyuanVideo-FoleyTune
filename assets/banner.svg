@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 260">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d1117"/>
+      <stop offset="50%" style="stop-color:#161b22"/>
+      <stop offset="100%" style="stop-color:#0d1117"/>
+    </linearGradient>
+    <linearGradient id="wave1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#58a6ff;stop-opacity:0"/>
+      <stop offset="15%" style="stop-color:#58a6ff;stop-opacity:0.6"/>
+      <stop offset="50%" style="stop-color:#bc8cff;stop-opacity:0.8"/>
+      <stop offset="85%" style="stop-color:#f78166;stop-opacity:0.6"/>
+      <stop offset="100%" style="stop-color:#f78166;stop-opacity:0"/>
+    </linearGradient>
+    <linearGradient id="wave2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#58a6ff;stop-opacity:0"/>
+      <stop offset="20%" style="stop-color:#58a6ff;stop-opacity:0.3"/>
+      <stop offset="50%" style="stop-color:#bc8cff;stop-opacity:0.4"/>
+      <stop offset="80%" style="stop-color:#f78166;stop-opacity:0.3"/>
+      <stop offset="100%" style="stop-color:#f78166;stop-opacity:0"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#58a6ff"/>
+      <stop offset="50%" style="stop-color:#bc8cff"/>
+      <stop offset="100%" style="stop-color:#f78166"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="softglow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="260" fill="url(#bg)" rx="12"/>
+
+  <!-- Subtle grid -->
+  <g opacity="0.03" stroke="#58a6ff">
+    <line x1="0" y1="65" x2="900" y2="65"/>
+    <line x1="0" y1="130" x2="900" y2="130"/>
+    <line x1="0" y1="195" x2="900" y2="195"/>
+  </g>
+
+  <!-- Background waveform (large, subtle) -->
+  <g filter="url(#softglow)">
+    <path d="M 0,130 Q 30,130 45,115 T 90,130 T 135,130 T 180,110 T 225,130 T 270,145 T 315,130 T 360,105 T 405,130 T 450,155 T 495,130 T 540,100 T 585,130 T 630,148 T 675,130 T 720,112 T 765,130 T 810,130 T 855,125 T 900,130"
+          fill="none" stroke="url(#wave2)" stroke-width="1.5" opacity="0.5"/>
+    <path d="M 0,130 Q 25,130 50,140 T 100,130 T 150,120 T 200,130 T 250,142 T 300,130 T 350,118 T 400,130 T 450,135 T 500,130 T 550,122 T 600,130 T 650,138 T 700,130 T 750,125 T 800,130 T 850,132 T 900,130"
+          fill="none" stroke="url(#wave2)" stroke-width="1" opacity="0.3"/>
+  </g>
+
+  <!-- Audio waveform bars (center-aligned, behind text) -->
+  <g filter="url(#glow)" opacity="0.25">
+    <!-- Left side bars -->
+    <rect x="60" y="118" width="3" height="24" rx="1.5" fill="url(#accent)"/>
+    <rect x="70" y="108" width="3" height="44" rx="1.5" fill="url(#accent)"/>
+    <rect x="80" y="114" width="3" height="32" rx="1.5" fill="url(#accent)"/>
+    <rect x="90" y="100" width="3" height="60" rx="1.5" fill="url(#accent)"/>
+    <rect x="100" y="110" width="3" height="40" rx="1.5" fill="url(#accent)"/>
+    <rect x="110" y="120" width="3" height="20" rx="1.5" fill="url(#accent)"/>
+    <rect x="120" y="104" width="3" height="52" rx="1.5" fill="url(#accent)"/>
+    <rect x="130" y="112" width="3" height="36" rx="1.5" fill="url(#accent)"/>
+
+    <!-- Right side bars -->
+    <rect x="770" y="112" width="3" height="36" rx="1.5" fill="url(#accent)"/>
+    <rect x="780" y="104" width="3" height="52" rx="1.5" fill="url(#accent)"/>
+    <rect x="790" y="120" width="3" height="20" rx="1.5" fill="url(#accent)"/>
+    <rect x="800" y="110" width="3" height="40" rx="1.5" fill="url(#accent)"/>
+    <rect x="810" y="100" width="3" height="60" rx="1.5" fill="url(#accent)"/>
+    <rect x="820" y="114" width="3" height="32" rx="1.5" fill="url(#accent)"/>
+    <rect x="830" y="108" width="3" height="44" rx="1.5" fill="url(#accent)"/>
+    <rect x="840" y="118" width="3" height="24" rx="1.5" fill="url(#accent)"/>
+  </g>
+
+  <!-- Main title -->
+  <text x="450" y="118" text-anchor="middle" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-size="52" font-weight="700" fill="#e6edf3" letter-spacing="-1">
+    FoleyTune
+  </text>
+
+  <!-- Subtitle -->
+  <text x="450" y="152" text-anchor="middle" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-size="16" fill="#8b949e" letter-spacing="3">
+    COMFYUI VIDEO-TO-AUDIO WITH LORA TRAINING
+  </text>
+
+  <!-- Accent line under subtitle -->
+  <rect x="300" y="166" width="300" height="1" rx="0.5" fill="url(#accent)" opacity="0.4"/>
+
+  <!-- Feature badges -->
+  <g font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-size="11" fill="#8b949e">
+    <text x="260" y="198" text-anchor="middle">29 Nodes</text>
+    <circle cx="320" cy="195" r="1.5" fill="#30363d"/>
+    <text x="380" y="198" text-anchor="middle">LoRA Fine-tuning</text>
+    <circle cx="450" cy="195" r="1.5" fill="#30363d"/>
+    <text x="520" y="198" text-anchor="middle">Dataset Pipeline</text>
+    <circle cx="595" cy="195" r="1.5" fill="#30363d"/>
+    <text x="660" y="198" text-anchor="middle">4GB to 96GB VRAM</text>
+  </g>
+
+  <!-- Bottom border accent -->
+  <rect x="0" y="256" width="900" height="4" rx="0 0 12 12" fill="url(#accent)" opacity="0.3"/>
+</svg>

@@ -75,6 +75,8 @@ The Chunked Sampler handles any audio length by generating in overlapping segmen
 
 Collect 15-60 video+audio pairs of the sound you want to train. Diversity matters more than quantity — vary the recording environment, distance, and intensity.
 
+**[8-cut](https://github.com/ethanfel/8-cut)** is a companion desktop tool for cutting exactly 8-second clips from source footage. It provides a visual scrubber, sound annotation, and exports labeled clips with a `dataset.json` manifest ready for the pipeline below.
+
 Optionally clean the audio with the dataset pipeline nodes:
 
 ```
@@ -231,6 +233,7 @@ FoleyTune builds on the work of many projects and contributors:
 | [Google SigLIP2](https://huggingface.co/google/siglip2-base-patch16-512) | Visual feature extraction |
 | [Synchformer](https://github.com/v-iashin/Synchformer) | Audio-visual synchronization features |
 | [DAC (Descript Audio Codec)](https://github.com/descriptinc/descript-audio-codec) | Neural audio codec (VAE) |
+| [8-cut](https://github.com/ethanfel/8-cut) | Companion tool for cutting 8-second training clips from source video |
 
 ## License
 

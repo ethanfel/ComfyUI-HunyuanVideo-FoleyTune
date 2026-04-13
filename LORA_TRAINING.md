@@ -49,7 +49,9 @@ Understanding the model helps choose training parameters:
 
 ### 1.1 Collect video+audio pairs
 
-Gather paired video and audio clips of the sound you want to train.
+Use **[8-cut](https://github.com/ethanfel/8-cut)** to cut exactly 8-second clips from source footage. It provides a visual scrubber, sound annotation (label + category), and exports labeled clips with a `dataset.json` manifest ready for the pipeline below.
+
+Alternatively, gather paired video and audio clips manually.
 
 | Guideline | Details |
 |---|---|

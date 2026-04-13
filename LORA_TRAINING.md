@@ -56,7 +56,7 @@ Alternatively, gather paired video and audio clips manually.
 | Guideline | Details |
 |---|---|
 | **Format** | WAV or FLAC preferred. Avoid MP3 — lossy compression degrades training |
-| **Aspect ratio** | 16:9 landscape preferred, 1:1 square also fine |
+| **Aspect ratio** | 16:9 landscape preferred, but portrait and square also work fine |
 | **Resolution** | >= 480p sufficient (downscaled to 512px and 224px internally) |
 | **Frame rate** | Any — set via the `frame_rate` input |
 | **Duration** | DAC handles variable lengths, but keep clips consistent (e.g. all ~5-8 seconds) |
@@ -72,6 +72,8 @@ Alternatively, gather paired video and audio clips manually.
 | **30-60 clips** | Teaching a new but acoustically simple sound | Reliable convergence |
 | **60-150 clips** | Unusual or complex sounds, strong style shift | Needed for stable generalization |
 | **150-300+ clips** | Sounds the model has never encountered | Required to avoid overfitting |
+
+> **Quality over quantity, but quantity matters.** A large dataset of diverse, high-quality clips will always outperform a small one. In testing, 399 unique clips produced dramatically better results than 47. Collect as many unique clips as you can.
 
 ### 1.3 Optimize audio quality (recommended)
 

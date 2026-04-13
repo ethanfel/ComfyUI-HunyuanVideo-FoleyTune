@@ -829,6 +829,128 @@ class FoleyTuneInpainter:
         return (audio_out,)
 
 # -----------------------------------------------------------------------------------
+# NODE: FoleyTune Feature Blender — mix conditioning from two videos
+# -----------------------------------------------------------------------------------
+
+class FoleyTuneFeatureBlender:
+    """Blend features from two FOLEYTUNE_FEATURES dicts for conditioning mixing.
+
+    Interpolates CLIP, sync, and text features between two sources.
+    Useful for blending visual guidance from different videos.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "features_a": ("FOLEYTUNE_FEATURES",),
+                "features_b": ("FOLEYTUNE_FEATURES",),
+                "blend": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
+                           "tooltip": "0.0=100% A, 1.0=100% B. Interpolates all feature tensors."}),
+            },
+        }
+
+    RETURN_TYPES = ("FOLEYTUNE_FEATURES",)
+    RETURN_NAMES = ("features",)
+    FUNCTION = "blend_features"
+    CATEGORY = "FoleyTune"
+    DESCRIPTION = (
+        "Blend conditioning features from two videos. "
+        "Useful for mixing visual guidance from different sources."
+    )
+
+    def blend_features(self, features_a, features_b, blend):
+        result = {}
+        for key in ("clip_feat", "sync_feat", "text_feat", "uncond_text_feat"):
+            a = features_a[key]
+            b = features_b[key]
+            min_len = min(a.shape[1], b.shape[1])
+            a = a[:, :min_len, :]
+            b = b[:, :min_len, :]
+            result[key] = (1 - blend) * a + blend * b
+        result["duration"] = (1 - blend) * features_a["duration"] + blend * features_b["duration"]
+        return (result,)
+
+# -----------------------------------------------------------------------------------
+# NODE: FoleyTune Style Transfer — latent AdaIN between audio
+# -----------------------------------------------------------------------------------
+
+class FoleyTuneStyleTransfer:
+    """Transfer audio style (timbre, room tone) from one audio to another via latent AdaIN.
+
+    Encodes both content and style audio through DAC, transfers channel-wise
+    mean and std from style to content in latent space, then decodes.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "content_audio": ("AUDIO", {"tooltip": "Audio whose structure/timing to keep."}),
+                "style_audio": ("AUDIO", {"tooltip": "Audio whose tonal quality/timbre to transfer."}),
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
+                "strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
+                              "tooltip": "Style transfer strength. 0.0=no change, 1.0=full style transfer."}),
+            },
+        }
+
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("audio",)
+    FUNCTION = "transfer_style"
+    CATEGORY = "FoleyTune"
+    DESCRIPTION = (
+        "Transfer tonal characteristics from style_audio to content_audio "
+        "using Adaptive Instance Normalization (AdaIN) in DAC latent space."
+    )
+
+    def transfer_style(self, content_audio, style_audio, hunyuan_deps, strength):
+        import torchaudio
+        device = mm.get_torch_device()
+        dac = hunyuan_deps["dac_model"]
+        dac.to(device=device, dtype=torch.float32)
+
+        def _prep_wav(audio_dict):
+            wav = audio_dict["waveform"]
+            sr = audio_dict["sample_rate"]
+            if wav.dim() == 2:
+                wav = wav.unsqueeze(0)
+            if wav.shape[1] > 1:
+                wav = wav[:, :1, :]
+            if sr != 48000:
+                wav = torchaudio.functional.resample(wav, sr, 48000)
+            return wav
+
+        content_wav = _prep_wav(content_audio)
+        style_wav = _prep_wav(style_audio)
+
+        z_content = encode_audio_to_latents(content_wav, dac, device)
+        z_style = encode_audio_to_latents(style_wav, dac, device)
+
+        # AdaIN: normalize content, apply style statistics
+        content_mean = z_content.mean(dim=-1, keepdim=True)
+        content_std = z_content.std(dim=-1, keepdim=True) + 1e-6
+        style_mean = z_style.mean(dim=-1, keepdim=True)
+        style_std = z_style.std(dim=-1, keepdim=True) + 1e-6
+
+        z_normalized = (z_content - content_mean) / content_std
+        z_styled = z_normalized * style_std + style_mean
+
+        # Blend with original based on strength
+        z_out = (1 - strength) * z_content + strength * z_styled
+
+        # Decode
+        with torch.inference_mode():
+            dac_weight = next(dac.parameters())
+            audio = dac.decode(z_out.to(device=dac_weight.device, dtype=dac_weight.dtype))
+
+        # DAC always outputs at 48kHz — trim to content length
+        content_samples = content_wav.shape[-1]
+        audio = audio[:, :, :content_samples]
+
+        audio_out = {"waveform": audio.float().cpu(), "sample_rate": 48000}
+        return (audio_out,)
+
+# -----------------------------------------------------------------------------------
 # NODE MAPPINGS - This is how ComfyUI discovers the nodes.
 # -----------------------------------------------------------------------------------
 NODE_CLASS_MAPPINGS = {
@@ -839,6 +961,8 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneBlockSwap": FoleyTuneBlockSwap,
     "FoleyTuneSelectAudioFromBatch": FoleyTuneSelectAudioFromBatch,
     "FoleyTuneInpainter": FoleyTuneInpainter,
+    "FoleyTuneFeatureBlender": FoleyTuneFeatureBlender,
+    "FoleyTuneStyleTransfer": FoleyTuneStyleTransfer,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneModelLoader": "FoleyTune Model Loader",
@@ -848,4 +972,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneBlockSwap": "FoleyTune BlockSwap Settings",
     "FoleyTuneSelectAudioFromBatch": "FoleyTune Select Audio From Batch",
     "FoleyTuneInpainter": "FoleyTune Inpainter",
+    "FoleyTuneFeatureBlender": "FoleyTune Feature Blender",
+    "FoleyTuneStyleTransfer": "FoleyTune Style Transfer",
 }

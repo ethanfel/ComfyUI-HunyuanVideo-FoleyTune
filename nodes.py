@@ -381,11 +381,15 @@ class FoleyTuneChunkedSampler:
             logger.info("Audio2Audio: strength=1.0 means init_audio is ignored (full generation from noise)")
         if init_audio is not None and strength < 1.0:
             init_waveform = init_audio["waveform"]
+            init_sr = init_audio["sample_rate"]
             # Ensure mono [B, 1, samples]
             if init_waveform.dim() == 2:
                 init_waveform = init_waveform.unsqueeze(0)
             if init_waveform.shape[1] > 1:
                 init_waveform = init_waveform[:, :1, :]  # take first channel
+            if init_sr != 48000:
+                import torchaudio
+                init_waveform = torchaudio.functional.resample(init_waveform, init_sr, 48000)
             init_latents = encode_audio_to_latents(init_waveform, hunyuan_deps["dac_model"], device)
             # Ensure init_latents match expected duration
             audio_frame_rate = hunyuan_cfg.model_config.model_kwargs.audio_frame_rate
@@ -747,10 +751,14 @@ class FoleyTuneInpainter:
 
         # Encode init audio
         init_waveform = init_audio["waveform"]
+        init_sr = init_audio["sample_rate"]
         if init_waveform.dim() == 2:
             init_waveform = init_waveform.unsqueeze(0)
         if init_waveform.shape[1] > 1:
             init_waveform = init_waveform[:, :1, :]
+        if init_sr != 48000:
+            import torchaudio
+            init_waveform = torchaudio.functional.resample(init_waveform, init_sr, 48000)
 
         # Apply torch.compile if configured
         if torch_compile_cfg is not None and not getattr(hunyuan_model, "_blocks_are_compiled", False):
@@ -781,6 +789,16 @@ class FoleyTuneInpainter:
         init_latents = encode_audio_to_latents(init_waveform, hunyuan_deps["dac_model"], device)
         target_dtype = hunyuan_model.dtype
         init_latents = init_latents.to(dtype=target_dtype)
+
+        # Ensure latent length matches what the denoiser will create
+        expected_frames = int(duration * audio_frame_rate)
+        if init_latents.shape[-1] != expected_frames:
+            logger.warning(f"Inpainting: DAC latent length {init_latents.shape[-1]} != "
+                           f"expected {expected_frames}. Adjusting.")
+            if init_latents.shape[-1] < expected_frames:
+                init_latents = F.pad(init_latents, (0, expected_frames - init_latents.shape[-1]))
+            else:
+                init_latents = init_latents[:, :, :expected_frames]
         T_latent = init_latents.shape[-1]
 
         # Build inpaint mask [1, 1, T] — 1.0 = regenerate, 0.0 = keep

@@ -183,7 +183,6 @@ def denoise_process_with_generator(
         latents = sigma_start * noise + (1 - sigma_start) * init_latents.to(device=device, dtype=target_dtype)
         latents = latents.repeat(batch_size, 1, 1) if latents.shape[0] == 1 else latents
     else:
-        start_step = 0
         timesteps = scheduler.timesteps
         latents = prepare_latents_with_generator(
             scheduler, batch_size=batch_size,
@@ -282,16 +281,18 @@ def denoise_process_with_generator(
             # Scheduler step
             latents = scheduler.step(noise_pred, t, latents)[0]
 
-            # Inpainting: replace known regions with properly noised original
-            if inpaint_mask is not None and inpaint_original is not None:
-                # Compute next sigma directly from schedule (avoids relying on
-                # scheduler._step_index which is unreliable with multi-order solvers)
-                abs_step = start_step + i
-                if i + 1 < len(timesteps):
-                    sigma_next = scheduler.sigmas[abs_step + 1]
+            # Inpainting: replace known regions with properly noised original.
+            # Only apply after complete solver steps — for multi-order solvers
+            # (heun-2, kutta-4), skip inner/predictor sub-steps where the scheduler
+            # hasn't finished its full update cycle.
+            if inpaint_mask is not None and inpaint_original is not None and scheduler.state_in_first_order:
+                # After a complete step, _step_index was incremented.
+                # sigmas[_step_index] is the sigma the sample has been denoised to.
+                if scheduler._step_index < len(scheduler.sigmas):
+                    sigma_current = scheduler.sigmas[scheduler._step_index]
                 else:
-                    sigma_next = 0.0  # final step: use clean original
-                original_noised = sigma_next * inpaint_noise + (1 - sigma_next) * inpaint_original
+                    sigma_current = 0.0
+                original_noised = sigma_current * inpaint_noise + (1 - sigma_current) * inpaint_original
                 # mask: 1.0 = regenerate (model output), 0.0 = keep original
                 mask_expanded = inpaint_mask.to(device=latents.device, dtype=latents.dtype)
                 latents = latents * mask_expanded + original_noised * (1 - mask_expanded)

@@ -579,23 +579,3 @@ Scalar metrics diverge from perceptual quality after extended training. The mode
 **torch.cat error on batching**
 All clips must have the same duration. The trainer enforces this by trimming to the shortest clip's latent length. If clips have very different durations, pad/trim them to a fixed length before feature extraction.
 
----
-
-## Differences from SelVA LoRA Training
-
-If you're coming from SelVA's LoRA pipeline, these are the key differences:
-
-| Aspect | SelVA | Foley |
-|---|---|---|
-| Model size | ~2 GB (large_44k) | ~10.3 GB |
-| VAE | Mel-spectrogram + BigVGAN vocoder | DAC single-stage neural codec |
-| Latent dim | 40D | 128D |
-| Sample rate | 44.1 kHz mono | 48 kHz (mono for training) |
-| Default rank | 16 | 128 (128D latent needs more capacity) |
-| Default target | `attn.qkv` | `all_attn_mlp` (4 presets available) |
-| Feature extractors | CLIP + TextSynchformer + T5 | SigLIP2 + Synchformer + CLAP |
-| HF Smoother | 12 kHz cutoff, 0.7 blend | 16 kHz cutoff, 0.5 blend (DAC handles HF better) |
-| Spectral Matcher | Hardcoded VAE distribution stats | Reference-based (from DAC roundtrip) |
-| CLI training | `train_lora.py` | ComfyUI nodes only |
-| Timestep default | `uniform` | `curriculum` |
-| Augmentation | Recommended | Use with caution (can hurt) |

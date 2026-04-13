@@ -302,7 +302,7 @@ def multi_resolution_spectral_loss(predicted, target, window_sizes=(4, 16, 64), 
         # HF emphasis: weight upper half of frequency bins
         n_bins = mag_pred.shape[-2]
         hf_mask = torch.zeros_like(mag_pred)
-        hf_mask[..., n_bins // 2:, :] = 1.0
+        hf_mask[..., n_bins // 2:, :] = hf_weight
         hf_loss = F.l1_loss(mag_pred * hf_mask, mag_tgt * hf_mask)
 
         total = total + convergence + log_loss + 0.5 * hf_loss

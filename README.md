@@ -228,7 +228,7 @@ FoleyTune builds on the work of many projects and contributors:
 |---|---|
 | [Tencent HunyuanVideo-Foley](https://github.com/Tencent/HunyuanVideo) | Base model, architecture, and weights |
 | [ComfyUI](https://github.com/comfyanonymous/ComfyUI) | Node framework |
-| [phazei](https://huggingface.co/phazei/HunyuanVideo-Foley) | Optimized FP8/FP16 safetensors conversions |
+| [phazei](https://github.com/phazei/ComfyUI-HunyuanVideo-Foley) | Original ComfyUI node pack and optimized FP8/FP16 safetensors conversions |
 | [LAION CLAP](https://github.com/LAION-AI/CLAP) | Text-audio conditioning model (`laion/larger_clap_general`) |
 | [Google SigLIP2](https://huggingface.co/google/siglip2-base-patch16-512) | Visual feature extraction |
 | [Synchformer](https://github.com/v-iashin/Synchformer) | Audio-visual synchronization features |

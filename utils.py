@@ -121,6 +121,24 @@ def prepare_latents_with_generator(scheduler, batch_size, num_channels_latents, 
     return latents
 
 
+def encode_audio_to_latents(audio_waveform, dac_model, device):
+    """Encode raw audio waveform to DAC latent space.
+
+    Args:
+        audio_waveform: [B, 1, samples] tensor at 48kHz
+        dac_model: DAC model in continuous mode
+        device: target device
+
+    Returns:
+        Latent tensor [B, 128, T] (deterministic via distribution mode)
+    """
+    with torch.no_grad():
+        dac_weight = next(dac_model.parameters())
+        waveform = audio_waveform.to(device=dac_weight.device, dtype=torch.float32)
+        z_dist, _, _, _, _ = dac_model.encode(waveform)
+        return z_dist.mode()  # deterministic: returns mean of distribution
+
+
 # Denoise keeps fast CFG path; we optimize memory elsewhere (ping-pong + precision + no extra repeats)
 def denoise_process_with_generator(
     visual_feats,

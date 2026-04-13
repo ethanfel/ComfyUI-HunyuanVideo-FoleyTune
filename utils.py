@@ -151,6 +151,8 @@ def denoise_process_with_generator(
     batch_size,
     sampler,
     generator=None,
+    init_latents=None,
+    strength=1.0,
 ):
     """
     An adaptation of the original denoise_process that accepts a torch.Generator for seeding,
@@ -164,14 +166,27 @@ def denoise_process_with_generator(
         solver=sampler
     )
     scheduler.set_timesteps(num_inference_steps, device=device)
-    timesteps = scheduler.timesteps
 
-    latents = prepare_latents_with_generator(
-        scheduler, batch_size=batch_size,
-        num_channels_latents=cfg.model_config.model_kwargs.audio_vae_latent_dim,
-        length=audio_len_in_s * cfg.model_config.model_kwargs.audio_frame_rate,
-        dtype=target_dtype, device=device, generator=generator
-    )
+    if init_latents is not None and strength < 1.0:
+        # Audio2Audio: start denoising from partially noised init_latents
+        start_step = max(num_inference_steps - int(num_inference_steps * strength), 0)
+        timesteps = scheduler.timesteps[start_step:]
+        sigma_start = scheduler.sigmas[start_step]
+
+        # Flow matching: x_t = sigma * noise + (1 - sigma) * data
+        noise = randn_tensor(
+            init_latents.shape, device=device, dtype=target_dtype, generator=generator
+        )
+        latents = sigma_start * noise + (1 - sigma_start) * init_latents.to(device=device, dtype=target_dtype)
+        latents = latents.repeat(batch_size, 1, 1) if latents.shape[0] == 1 else latents
+    else:
+        timesteps = scheduler.timesteps
+        latents = prepare_latents_with_generator(
+            scheduler, batch_size=batch_size,
+            num_channels_latents=cfg.model_config.model_kwargs.audio_vae_latent_dim,
+            length=audio_len_in_s * cfg.model_config.model_kwargs.audio_frame_rate,
+            dtype=target_dtype, device=device, generator=generator
+        )
 
     # Precompute CFG-invariant feature tensors once outside the loop to reduce allocator churn
     siglip2_feat_rep = visual_feats['siglip2_feat'].repeat(batch_size, 1, 1)

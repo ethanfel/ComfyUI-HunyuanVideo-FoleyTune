@@ -153,6 +153,9 @@ def denoise_process_with_generator(
     generator=None,
     init_latents=None,
     strength=1.0,
+    inpaint_mask=None,
+    inpaint_original=None,
+    inpaint_noise=None,
 ):
     """
     An adaptation of the original denoise_process that accepts a torch.Generator for seeding,
@@ -277,6 +280,19 @@ def denoise_process_with_generator(
 
             # Scheduler step
             latents = scheduler.step(noise_pred, t, latents)[0]
+
+            # Inpainting: replace known regions with properly noised original
+            if inpaint_mask is not None and inpaint_original is not None:
+                if i + 1 < len(timesteps):
+                    next_step_idx = scheduler._step_index  # already incremented by step()
+                    sigma_next = scheduler.sigmas[next_step_idx]
+                else:
+                    sigma_next = 0.0  # final step: use clean original
+                original_noised = sigma_next * inpaint_noise + (1 - sigma_next) * inpaint_original
+                # mask: 1.0 = regenerate (model output), 0.0 = keep original
+                mask_expanded = inpaint_mask.to(device=latents.device, dtype=latents.dtype)
+                latents = latents * mask_expanded + original_noised * (1 - mask_expanded)
+
             pbar.update(1)
 
     # Decode latents to audio waveform

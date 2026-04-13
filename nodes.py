@@ -91,6 +91,7 @@ from .utils import (
     feature_process_from_tensors,
     compute_chunk_boundaries,
     chunked_denoise_process,
+    encode_audio_to_latents,
     _wrap_fp8_inplace,
     _detect_ckpt_fp8,
     _detect_ckpt_major_precision,
@@ -293,6 +294,9 @@ class FoleyTuneChunkedSampler:
             "optional": {
                 "torch_compile_cfg": ("FOLEYTUNE_COMPILE_CFG",),
                 "block_swap_args": ("FOLEYTUNE_BLOCKSWAP",),
+                "init_audio": ("AUDIO", {"tooltip": "Reference audio for audio2audio. Connect to use img2img-style generation."}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                              "tooltip": "Denoising strength. 1.0=full generation, 0.0=keep original. Lower values preserve more of init_audio."}),
             }
         }
 
@@ -317,6 +321,8 @@ class FoleyTuneChunkedSampler:
         force_offload,
         torch_compile_cfg=None,
         block_swap_args=None,
+        init_audio=None,
+        strength=1.0,
     ):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
@@ -368,6 +374,18 @@ class FoleyTuneChunkedSampler:
         # Ensure DAC is on GPU
         hunyuan_deps["dac_model"].to(device=device, dtype=torch.float32)
 
+        # Encode init audio to DAC latents if provided
+        init_latents = None
+        if init_audio is not None and strength < 1.0:
+            init_waveform = init_audio["waveform"]
+            # Ensure mono [B, 1, samples]
+            if init_waveform.dim() == 2:
+                init_waveform = init_waveform.unsqueeze(0)
+            if init_waveform.shape[1] > 1:
+                init_waveform = init_waveform[:, :1, :]  # take first channel
+            init_latents = encode_audio_to_latents(init_waveform, hunyuan_deps["dac_model"], device)
+            logger.info(f"Audio2Audio: encoded init_audio to latents {init_latents.shape}, strength={strength}")
+
         # Run chunked denoising
         decoded_waveform, sample_rate = chunked_denoise_process(
             features=features,
@@ -381,6 +399,8 @@ class FoleyTuneChunkedSampler:
             batch_size=batch_size,
             sampler=sampler,
             generator=rng,
+            init_latents=init_latents,
+            strength=strength,
         )
 
         waveform_batch = decoded_waveform.float().cpu()

@@ -499,6 +499,8 @@ def chunked_denoise_process(
     batch_size,
     sampler,
     generator=None,
+    init_latents=None,
+    strength=1.0,
 ):
     """Chunked denoising with overlap stitching for long-form generation.
 
@@ -530,7 +532,6 @@ def chunked_denoise_process(
         t_start, t_end = chunks[0]
         chunk_feats = slice_features_for_chunk(features, t_start, t_end)
         chunk_dur = t_end - t_start
-        # Map to keys expected by denoise_process_with_generator
         visual = {
             "siglip2_feat": chunk_feats["clip_feat"].to(device),
             "syncformer_feat": chunk_feats["sync_feat"].to(device),
@@ -539,9 +540,16 @@ def chunked_denoise_process(
             "text_feat": chunk_feats["text_feat"].to(device),
             "uncond_text_feat": chunk_feats["uncond_text_feat"].to(device),
         }
+        # Slice init_latents for this chunk if provided
+        chunk_init = None
+        if init_latents is not None:
+            frame_start = int(t_start * audio_frame_rate)
+            frame_end = int(t_end * audio_frame_rate)
+            chunk_init = init_latents[:, :, frame_start:frame_end]
         return denoise_process_with_generator(
             visual, text, chunk_dur, model_dict, cfg,
-            guidance_scale, num_inference_steps, batch_size, sampler, generator
+            guidance_scale, num_inference_steps, batch_size, sampler, generator,
+            init_latents=chunk_init, strength=strength,
         )
 
     # --- Multi-chunk: set up per-chunk schedulers and latents ---
@@ -566,15 +574,36 @@ def chunked_denoise_process(
         chunk_dur = t_end - t_start
         latent_len = int(chunk_dur * audio_frame_rate)
 
-        latent = prepare_latents_with_generator(
-            chunk_schedulers[c_idx], batch_size, latent_dim, latent_len,
-            target_dtype, device, generator
-        )
+        if init_latents is not None and strength < 1.0:
+            # Slice init_latents for this chunk
+            frame_start = int(t_start * audio_frame_rate)
+            frame_end = int(t_end * audio_frame_rate)
+            chunk_init = init_latents[:, :, frame_start:frame_end].to(device=device, dtype=target_dtype)
+
+            # Calculate start step and sigma
+            start_step = max(num_inference_steps - int(num_inference_steps * strength), 0)
+            sigma_start = chunk_schedulers[c_idx].sigmas[start_step]
+
+            noise = randn_tensor(
+                chunk_init.shape, device=device, dtype=target_dtype, generator=generator
+            )
+            latent = sigma_start * noise + (1 - sigma_start) * chunk_init
+            latent = latent.repeat(batch_size, 1, 1) if latent.shape[0] == 1 else latent
+        else:
+            latent = prepare_latents_with_generator(
+                chunk_schedulers[c_idx], batch_size, latent_dim, latent_len,
+                target_dtype, device, generator
+            )
         chunk_latents.append(latent)
 
         c_feats = slice_features_for_chunk(features, t_start, t_end)
         chunk_visual_feats.append({k: c_feats[k].to(device) for k in ["clip_feat", "sync_feat"]})
         chunk_text_feats.append({k: c_feats[k].to(device) for k in ["text_feat", "uncond_text_feat"]})
+
+    # Truncate timesteps if using audio2audio
+    if init_latents is not None and strength < 1.0:
+        start_step = max(num_inference_steps - int(num_inference_steps * strength), 0)
+        timesteps = timesteps[start_step:]
 
     # --- Precompute per-chunk CFG features ---
     chunk_cfg_inputs = []

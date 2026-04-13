@@ -274,7 +274,7 @@ def multi_resolution_spectral_loss(predicted, target, window_sizes=(4, 16, 64), 
     pred_flat = predicted.reshape(B * C, T)
     tgt_flat = target.reshape(B * C, T)
 
-    total = 0.0
+    total = torch.tensor(0.0, device=predicted.device, dtype=predicted.dtype)
     for ws in window_sizes:
         if T < ws:
             continue  # skip if latent sequence too short for this window
@@ -301,8 +301,8 @@ def multi_resolution_spectral_loss(predicted, target, window_sizes=(4, 16, 64), 
 
         # HF emphasis: weight upper half of frequency bins
         n_bins = mag_pred.shape[-2]
-        hf_mask = torch.ones_like(mag_pred)
-        hf_mask[..., n_bins // 2:, :] = hf_weight
+        hf_mask = torch.zeros_like(mag_pred)
+        hf_mask[..., n_bins // 2:, :] = 1.0
         hf_loss = F.l1_loss(mag_pred * hf_mask, mag_tgt * hf_mask)
 
         total = total + convergence + log_loss + 0.5 * hf_loss

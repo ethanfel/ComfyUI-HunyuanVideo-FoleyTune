@@ -316,7 +316,10 @@ def multi_resolution_spectral_loss(predicted, target, window_sizes=(4, 16, 64), 
 
 # -- Loss computation --------------------------------------------------------
 
-def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dtype):
+def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dtype,
+                       timestep_max=1.0, use_min_snr=False, min_snr_gamma=5.0,
+                       use_spectral_loss=False, spectral_loss_weight=0.1,
+                       spectral_hf_weight=2.0):
     """Compute flow matching velocity prediction loss.
 
     Args:
@@ -328,10 +331,20 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
         text_feat: CLAP text embedding [B, N_text, D]
         device: torch device
         dtype: compute dtype
+        timestep_max: cap t values to [0, timestep_max] (1.0 = no cap)
+        use_min_snr: enable Min-SNR loss weighting
+        min_snr_gamma: Min-SNR clamp ceiling
+        use_spectral_loss: add multi-resolution STFT loss
+        spectral_loss_weight: weight of spectral loss vs MSE
+        spectral_hf_weight: extra weight on HF bins in spectral loss
 
     Returns:
         loss: scalar MSE loss
     """
+    # Cap timestep range for specialized training
+    if timestep_max < 1.0:
+        t = t * timestep_max
+
     B = x1.shape[0]
     x0 = torch.randn_like(x1)  # noise
 
@@ -367,7 +380,24 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
     )["x"]
 
     v_target = v_target.to(device=device, dtype=dtype)
-    loss = F.mse_loss(v_pred, v_target)
+
+    # Per-sample MSE loss: [B, C, T] -> [B] mean over C and T
+    mse = F.mse_loss(v_pred, v_target, reduction='none').mean(dim=(1, 2))  # [B]
+
+    # Min-SNR weighting
+    if use_min_snr:
+        weights = min_snr_weight(t, gamma=min_snr_gamma)  # [B]
+        mse = mse * weights
+
+    loss = mse.mean()
+
+    # Optional spectral loss on velocity prediction
+    if use_spectral_loss:
+        spec_loss = multi_resolution_spectral_loss(
+            v_pred, v_target, hf_weight=spectral_hf_weight,
+        )
+        loss = loss + spectral_loss_weight * spec_loss
+
     return loss
 
 

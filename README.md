@@ -8,9 +8,10 @@
 
 <p align="center">
   <a href="#quick-start-inference">Inference</a> &bull;
+  <a href="#audio-manipulation">Audio Manipulation</a> &bull;
   <a href="#quick-start-training">Training</a> &bull;
   <a href="LORA_TRAINING.md">Full Training Guide</a> &bull;
-  <a href="#node-reference">All 29 Nodes</a> &bull;
+  <a href="#node-reference">All 32 Nodes</a> &bull;
   <a href="#vram-guide">VRAM Guide</a>
 </p>
 
@@ -18,11 +19,12 @@
 
 ## What is FoleyTune?
 
-FoleyTune is a ComfyUI node pack for **Tencent HunyuanVideo-Foley** — a video-to-audio (and text-to-audio) diffusion model. It adds three things the original model doesn't have:
+FoleyTune is a ComfyUI node pack for **Tencent HunyuanVideo-Foley** — a video-to-audio (and text-to-audio) diffusion model. It adds four things the original model doesn't have:
 
 1. **LoRA training** — fine-tune the model on your own video+audio pairs to teach it sounds it doesn't know or gets wrong.
-2. **A dataset pipeline** — 15 nodes that clean, normalize, filter, and prepare audio before training.
-3. **Flexible VRAM management** — run on anything from a 4 GB laptop GPU to a 96 GB workstation, with FP8 quantization, block swapping, and torch.compile.
+2. **Audio manipulation** — audio-to-audio generation, inpainting, feature blending, and style transfer.
+3. **A dataset pipeline** — 15 nodes that clean, normalize, filter, and prepare audio before training.
+4. **Flexible VRAM management** — run on anything from a 4 GB laptop GPU to a 96 GB workstation, with FP8 quantization, block swapping, and torch.compile.
 
 ---
 
@@ -62,6 +64,60 @@ The Chunked Sampler handles any audio length by generating in overlapping segmen
 | **BlockSwap Settings** | Offload transformer blocks to CPU for ultra-low VRAM |
 | **LoRA Loader** | Load a trained adapter for custom sounds |
 | **Select Audio From Batch** | Pick one clip from a batch |
+| **init_audio + strength** | Connect audio to the Chunked Sampler for audio-to-audio generation (see [Audio Manipulation](#audio-manipulation)) |
+
+---
+
+## Audio Manipulation
+
+FoleyTune includes nodes for editing and transforming existing audio using the model's latent space. All manipulation nodes require video features for conditioning — the model uses visual context even when working with existing audio.
+
+### Audio-to-Audio (img2img for audio)
+
+Connect an **AUDIO** node to the Chunked Sampler's `init_audio` input and set `strength` below 1.0. The model starts from your audio instead of pure noise, preserving its structure while regenerating details guided by the video features.
+
+| Strength | Effect |
+|---|---|
+| **0.9** | Almost fully regenerated — keeps broad structure only |
+| **0.5** | Balanced — preserves rhythm and energy, regenerates texture |
+| **0.2** | Subtle — light resynthesis, mostly keeps original audio |
+| **1.0** | Default — `init_audio` is ignored, generates from scratch |
+
+### Inpainting
+
+The **Inpainter** node regenerates a specific time region while keeping the rest intact. Specify `start_seconds` and `end_seconds` for the region to replace. Soft mask edges (`fade_frames`) prevent boundary artifacts.
+
+```
+Model Loader -> Dependencies Loader -> Feature Extractor
+                                              |
+                              init_audio -> Inpainter -> Audio Output
+```
+
+Use cases: fix a glitch in generated audio, replace one sound event, regenerate a section with a different seed.
+
+> **Note:** Inpainting runs on the full audio duration in a single pass (not chunked). For audio longer than ~16 seconds, quality may degrade. Consider trimming first.
+
+### Feature Blending
+
+The **Feature Blender** mixes visual conditioning from two different videos. Connect two `FOLEYTUNE_FEATURES` outputs and set a `blend` ratio. The result is interpolated features that guide generation with characteristics of both sources.
+
+```
+Video A -> Feature Extractor A -> Feature Blender -> Chunked Sampler
+Video B -> Feature Extractor B ->      |
+```
+
+Example: blend features from a close-up of a piano (Video A) with a concert hall wide shot (Video B) to get piano timbre with room ambience.
+
+### Style Transfer
+
+The **Style Transfer** node transfers tonal characteristics (timbre, room tone) from one audio to another using Adaptive Instance Normalization (AdaIN) in the DAC latent space. This is a direct latent operation — no denoising model is needed, only the DAC-VAE from Dependencies Loader.
+
+| Strength | Effect |
+|---|---|
+| **0.0** | No change — returns content audio |
+| **0.3** | Subtle tonal shift toward style audio |
+| **0.7** | Strong style — timbre clearly transferred |
+| **1.0** | Full AdaIN — content structure with style's tonal profile |
 
 ---
 
@@ -117,10 +173,18 @@ For the full training guide with hyperparameter recommendations, checkpoint sele
 |---|---|
 | **FoleyTune Model Loader** | Load the transformer with precision and FP8 quantization options |
 | **FoleyTune Dependencies Loader** | Load DAC-VAE, SigLIP2, Synchformer, and CLAP |
-| **FoleyTune Chunked Sampler** | Generate audio from video/text with chunked overlap for any duration |
+| **FoleyTune Chunked Sampler** | Generate audio from video/text with chunked overlap; optional `init_audio` + `strength` for audio-to-audio |
 | **FoleyTune Torch Compile** | Optional `torch.compile` acceleration (~30% faster) |
 | **FoleyTune BlockSwap Settings** | Offload transformer blocks to CPU for low-VRAM operation |
 | **FoleyTune Select Audio From Batch** | Extract one audio clip from a batch by index |
+
+### Audio Manipulation (3 nodes)
+
+| Node | Description |
+|---|---|
+| **FoleyTune Inpainter** | Regenerate a time region of existing audio with soft mask edges |
+| **FoleyTune Feature Blender** | Blend visual conditioning features from two videos |
+| **FoleyTune Style Transfer** | Transfer tonal characteristics between audio via latent AdaIN |
 
 ### Training (7 nodes)
 

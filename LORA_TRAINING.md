@@ -25,7 +25,6 @@ soxr              # High-quality resampling
 pyloudnorm        # LUFS loudness normalization
 pedalboard         # Audio compression and filtering
 soundfile         # Audio I/O
-audiomentations   # Pitch/time-stretch augmentation (optional)
 matplotlib        # Loss curves and eval charts
 ```
 
@@ -56,7 +55,7 @@ Gather paired video and audio clips of the sound you want to train.
 |---|---|
 | **Format** | WAV or FLAC preferred. Avoid MP3 — lossy compression degrades training |
 | **Aspect ratio** | 16:9 landscape preferred, 1:1 square also fine |
-| **Resolution** | ≥ 480p sufficient (downscaled to 512px and 224px internally) |
+| **Resolution** | >= 480p sufficient (downscaled to 512px and 224px internally) |
 | **Frame rate** | Any — set via the `frame_rate` input |
 | **Duration** | DAC handles variable lengths, but keep clips consistent (e.g. all ~5-8 seconds) |
 
@@ -70,7 +69,7 @@ Gather paired video and audio clips of the sound you want to train.
 | **15-30 clips** | Fine-tuning a sound the model gets wrong | Good starting point |
 | **30-60 clips** | Teaching a new but acoustically simple sound | Reliable convergence |
 | **60-150 clips** | Unusual or complex sounds, strong style shift | Needed for stable generalization |
-| **150-300+ clips** | Sounds the model has never encountered | Required to avoid overfitting; consider rank 128 |
+| **150-300+ clips** | Sounds the model has never encountered | Required to avoid overfitting |
 
 ### 1.3 Optimize audio quality (recommended)
 
@@ -78,12 +77,12 @@ Chain the Foley Dataset Pipeline nodes in ComfyUI to clean and normalize your au
 
 ```
 Foley Dataset Loader (folder of raw audio)
-  → Foley Dataset Resampler (48000 Hz)
-  → Foley Dataset LUFS Normalizer (-23 LUFS, -1 dBTP)
-  → Foley Dataset Compressor (ratio 2.5:1, mix 0.4)
-  → Foley Dataset HF Smoother (cutoff 16000 Hz, blend 0.5)
-  → Foley Dataset Inspector (remove clipped/noisy/silent clips)
-  → Foley Dataset Saver (output to cleaned folder as 24-bit FLAC)
+  -> Foley Dataset Resampler (48000 Hz)
+  -> Foley Dataset LUFS Normalizer (-23 LUFS, -1 dBTP)
+  -> Foley Dataset Compressor (ratio 2.5:1, mix 0.4)
+  -> Foley Dataset HF Smoother (cutoff 16000 Hz, blend 0.5)
+  -> Foley Dataset Inspector (remove clipped/noisy/silent clips)
+  -> Foley Dataset Saver (output to cleaned folder as 24-bit FLAC)
 ```
 
 | Node | Purpose | Key defaults |
@@ -104,20 +103,22 @@ If you want to match your training audio's spectral profile to what DAC reproduc
 2. Save those roundtripped clips to a reference directory.
 3. Use `Foley Dataset Spectral Matcher` with that reference directory to EQ your training audio toward DAC's preferred distribution.
 
-This is the Foley equivalent of SelVA's hardcoded VAE spectral matching, but reference-based instead of hardcoded.
+### 1.5 Augmentation — use with caution
 
-### 1.5 Optional: Expand small datasets with augmentation
+> **Warning:** Sweep testing showed that augmented duplicates (same video, slightly different audio) can *hurt* training quality. The model learns averaged spectral patterns instead of following video cues, producing mechanical-sounding output.
+>
+> In one test, removing augmented copies (99 clips -> 47 unique clips) improved spectral convergence from 0.99 to 0.47 and MCD from 17.9 to 6.5. The improvement was dramatic.
+
+**Rule of thumb:** More unique clips is always better than augmenting existing ones. Only use augmentation if you truly cannot collect more source material, and keep it subtle:
 
 ```
 Foley Dataset Augmenter
-    variants_per_clip: 2-3
-    gain_range_db: 3.0
-    pitch_range_semitones: 0.5  (requires audiomentations)
-    time_stretch_range: 0.1     (requires audiomentations)
+    variants_per_clip: 1       (keep it minimal)
+    gain_range_db: 2.0
+    pitch_range_semitones: 0.3
+    time_stretch_range: 0.05
     keep_originals: true
 ```
-
-This turns 20 clips into 60. Keep augmentation subtle — extreme pitch shifts create unrealistic training targets.
 
 ---
 
@@ -127,15 +128,17 @@ For each video+audio pair, run the `Foley Feature Extractor` node in ComfyUI:
 
 ```
 HunyuanDependenciesLoader (vae_128d_48k.pth, synchformer_state_dict.pth)
-  → Foley Feature Extractor
+  -> Foley Feature Extractor
       image: video frames (from Load Video node)
       audio: paired audio (cleaned from Step 1)
       prompt: "description of the sound"
       frame_rate: source video FPS
-      duration: 0 (auto from audio length)
+      duration: 8.0
       cache_dir: /path/to/features/
       name: "gunshot"
 ```
+
+> **Important:** Always set `duration=8.0` explicitly. The auto-detect (`total_frames / frame_rate`) gives wrong results when the video fps doesn't match the `frame_rate` input (e.g., 30fps video with frame_rate=25 computes 9.6s instead of 8.0s). This causes misaligned visual features that break audio-video sync during training.
 
 Queue once per clip. Each execution saves one `.npz` + `.wav` pair with auto-incremented names (`gunshot_001.npz`, `gunshot_002.npz`, etc.).
 
@@ -149,7 +152,7 @@ Each `.npz` contains:
 - `duration` — clip duration in seconds
 - `fps` — source frame rate
 
-A matching `.wav` file (resampled to 48kHz) is saved alongside.
+A matching audio file (resampled to 48kHz) is saved alongside.
 
 ### Prompt guide
 
@@ -164,8 +167,17 @@ The prompt conditions the CLAP text features used during training. Imprecise pro
 
 **Rules of thumb:**
 - Describe the *sound*, not the visual scene
+- Use action + texture — "wet sucking and slurping", "heavy boots on wood"
+- Add acoustic modifiers — "rhythmic", "loud", "close", "deep bass"
 - Keep prompts consistent across all clips for the same sound class
-- Avoid negations (`no background noise`)
+- Avoid negations (`no background noise`) — use positive descriptions instead
+- Stay concise — 77 token limit in CLAP, shorter is better
+
+**The prompt affects inference more than training.** During training, the model learns audio patterns from all three conditioning streams (visual, sync, text). At inference, CFG amplifies the text guidance, so the prompt steers generation.
+
+### Validation clip (recommended)
+
+Set aside one clip as a validation sample — ideally a rejected clip from the same domain that you didn't include in the training set. Save its `.npz` path as the `eval_npz` parameter in the trainer. This generates separate validation audio at each checkpoint, letting you detect overfitting (training eval improves while validation plateaus or degrades).
 
 ### Directory structure
 
@@ -173,11 +185,13 @@ After feature extraction:
 
 ```
 dataset/my_sound/
-    gunshot_001.npz    ← features from Foley Feature Extractor
-    gunshot_001.wav    ← paired audio (48kHz)
+    gunshot_001.npz    <- features from Foley Feature Extractor
+    gunshot_001.wav    <- paired audio (48kHz)
     gunshot_002.npz
     gunshot_002.wav
     ...
+    val_clip.npz       <- held-out validation clip
+    val_clip.wav
 ```
 
 ---
@@ -189,9 +203,10 @@ Connect the nodes in ComfyUI:
 ```
 HunyuanModelLoader (hunyuanvideo_foley.pth)
 HunyuanDependenciesLoader (vae_128d_48k.pth, synchformer_state_dict.pth)
-  → Foley LoRA Trainer
+  -> Foley LoRA Trainer
       data_dir: /path/to/features/
       output_dir: /path/to/lora_output/
+      eval_npz: /path/to/features/val_clip.npz  (optional but recommended)
       (hyperparameters — see below)
 ```
 
@@ -199,7 +214,7 @@ The trainer:
 1. Loads all `.npz` features and DAC-encodes the paired audio to latents.
 2. Applies LoRA layers to the transformer, freezes base weights.
 3. Runs the flow matching training loop.
-4. Saves checkpoints, eval audio samples, and loss curves at intervals.
+4. Saves checkpoints, eval audio samples, spectrograms, and loss curves at intervals.
 5. Returns the model with LoRA active for immediate inference.
 
 ### Hyperparameters
@@ -213,30 +228,32 @@ Controls which transformer layers get LoRA adapters. More layers = more capacity
 | `audio_attn` | Audio self-attention QKV + proj | 36 | Minimal adaptation, fine details |
 | `audio_cross` | Above + audio cross-attention + text cross-KV | 90 | Good for text-conditioned sounds |
 | `all_attn` | Above + visual conditioning attention | 162 | Full attention adaptation |
-| `all_attn_mlp` | Above + MLP layers (fc1/fc2) | 234 | Maximum capacity (recommended with 96 GB) |
+| `all_attn_mlp` | Above + MLP layers (fc1/fc2) | 234 | Maximum capacity (recommended) |
 
-**Default:** `all_attn_mlp` — with 96 GB VRAM there's no reason to limit capacity.
+**Default:** `all_attn_mlp` — with sufficient VRAM there's no reason to limit capacity.
 
 #### Rank
 
 | Rank | Use case | Trainable params (all_attn_mlp) |
 |---|---|---|
 | 16 | Fine details on a known sound | ~2.4M |
-| 32 | Good balance | ~4.8M |
-| 64 | **Recommended** — high capacity for 128D latent space | ~9.6M |
-| 128 | Very complex sounds, 150+ clips | ~19.2M |
+| 32 | Good balance for small datasets | ~4.8M |
+| 64 | Moderate capacity | ~9.6M |
+| 128 | **Recommended** — proven best across all sweeps | ~19.2M |
 
-**Default:** 64. Foley's 128D latent space (vs SelVA's 40D) benefits from higher rank.
+**Default:** 128. Foley's 128D latent space benefits from high rank. Sweep testing showed rank 128 with curriculum timestep sampling consistently outperformed rank 64 across all metrics.
 
 #### Learning rate
 
-`1e-4` is the recommended default. If training is unstable (loss spikes in the first 200 steps), try `5e-5`. If convergence is very slow, try `2e-4`.
+`1e-4` constant is the recommended default. If training is unstable (loss spikes in the first 200 steps), try `5e-5`. Half LR (5e-5) reaches the same destination at double the compute — no advantage.
 
 Warmup (default 100 steps) ramps the LR from 0 to avoid instability at the start.
 
+> **Cosine decay hurts.** Sweep testing showed cosine LR decays too fast — the model stops learning by step 6k, wasting the remaining steps at near-zero LR. Use `constant` schedule.
+
 #### Batch size
 
-| Batch size | VRAM (bf16, rank 64, all_attn_mlp) | Notes |
+| Batch size | VRAM (bf16, rank 128, all_attn_mlp) | Notes |
 |---|---|---|
 | 1 | ~22 GB | Noisy gradients, slow |
 | 4 | ~25 GB | Reasonable starting point |
@@ -248,13 +265,14 @@ Higher batch size gives smoother loss curves and faster convergence. With 96 GB,
 
 #### Steps
 
-| Dataset size | Recommended steps |
-|---|---|
-| 10-20 clips | 2000-4000 |
-| 20-50 clips | 4000-8000 |
-| 50+ clips | 6000-15000 |
+| Dataset size | Recommended steps | Notes |
+|---|---|---|
+| 10-30 clips | 3000-5000 | |
+| 30-60 clips | 5000-10000 | |
+| 60-150 clips | 10000-15000 | |
+| 150-400 clips | 13000-15000 | Best checkpoint often at 13-14k |
 
-Watch the loss curve — if the smoothed line has been flat for 2000+ steps, training has converged. Adding more clips will let it go lower.
+> **Scalar metrics and perceptual quality diverge.** In a 400-clip sweep, all metrics (SC, MCD, PBC) kept improving through 25k steps, but perceptual testing showed step 13-14k produced the best-sounding output. Later checkpoints lost subtle ambient details — faint breath, room tone, quiet textures — that metrics don't capture. Always validate top candidates by listening to the eval samples.
 
 #### Timestep sampling
 
@@ -263,43 +281,92 @@ Controls how training timesteps are sampled. Flow matching trains by interpolati
 | Mode | Description | When to use |
 |---|---|---|
 | `uniform` | All timesteps equally | Safe baseline |
-| `logit_normal` | Concentrates near t=0.5 via `sigmoid(N(0, σ))` | **Recommended** — 0.2-0.3 dB lower loss floor |
-| `curriculum` | logit_normal first, then uniform | Experimental — may improve fine detail |
+| `logit_normal` | Concentrates near t=0.5 via `sigmoid(N(0, sigma))` | Good default, 0.2-0.3 dB lower loss floor |
+| `curriculum` | logit_normal first, then switches to uniform | **Recommended** — best results across all sweeps |
 
-**Default:** `logit_normal` with `sigma=1.0`.
+**Default:** `curriculum` with `curriculum_switch=0.6`.
 
-The `logit_normal_sigma` parameter controls the distribution width:
-- σ=0.5: sharp peak at t=0.5, less coverage of extremes
-- σ=1.0: moderate peak, balanced coverage (default)
-- σ=2.0: broader, approaches uniform
+Curriculum sampling starts with logit_normal (focusing on "easy" mid-range timesteps) then switches to uniform at 60% of total steps (exposing the model to all timesteps for fine detail). This prevents the mild overfitting that hits constant-distribution approaches in long training runs.
+
+In sweep testing, curriculum was the first config to break SC < 1.0 and was still improving at 10k steps while constant LR had already peaked and started regressing.
 
 #### Advanced options
 
 | Parameter | Default | Description |
 |---|---|---|
-| `alpha` | 64 | LoRA scaling factor. 1:1 ratio with rank is the HunyuanVideo convention |
+| `alpha` | 128 | LoRA scaling factor. 1:1 ratio with rank is the HunyuanVideo convention |
 | `grad_accum` | 1 | Gradient accumulation steps. Use when batch size alone doesn't fit |
 | `init_mode` | `standard` | `standard` (Kaiming A, zero B) or `pissa` (SVD-based) |
 | `use_rslora` | false | Rank-stabilized scaling: `alpha/sqrt(rank)` instead of `alpha/rank` |
 | `lora_dropout` | 0.0 | Dropout on the LoRA path. 0.05-0.1 helps on small datasets (<20 clips) |
-| `lora_plus_ratio` | 1.0 | B-matrix LR multiplier. 16.0 enables LoRA+ (faster convergence) |
-| `schedule_type` | `constant` | `constant` or `cosine` LR decay after warmup |
+| `lora_plus_ratio` | 1.0 | B-matrix LR multiplier (see warning below) |
+| `schedule_type` | `constant` | LR schedule after warmup. Use `constant` (see warning below) |
 | `latent_mixup_alpha` | 0.0 | Beta-distribution latent interpolation for augmentation |
 | `latent_noise_sigma` | 0.0 | Additive Gaussian noise on target latents for regularization |
 | `precision` | `bf16` | `bf16` (Ampere+), `fp16` (older GPUs), `fp32` (debug only) |
+| `gradient_checkpointing` | false | Recompute activations to save VRAM (~3-5 GB, ~25% slower) |
+| `blocks_to_swap` | 0 | Offload N transformer blocks to CPU (0-54, uses prefetch=2) |
+
+> **LoRA+ warning:** Setting `lora_plus_ratio=16.0` enables LoRA+ (higher LR for B matrices). Sweep testing showed this overfits on small-to-medium datasets — loss drops below the noise floor (~0.5), producing mechanical sound on some inputs and pure noise on others. Standard LR (ratio 1.0) generalizes better.
+
+> **Cosine schedule warning:** `schedule_type=cosine` decays the learning rate to zero. Testing showed this wastes the final ~40% of training steps at near-zero LR. Use `constant`.
 
 ---
 
-## Step 4 — Use the adapter
+## Step 4 — Select the best checkpoint
+
+Training produces checkpoints at regular intervals. Don't just use `adapter_final.pt` — the best checkpoint is often earlier than the final one.
+
+### Reading the metrics
+
+Each checkpoint records spectral metrics in `metrics_history.json`:
+
+| Metric | What it measures | Better |
+|---|---|---|
+| **Spectral Convergence (SC)** | Normalized spectral distance vs reference | Lower |
+| **Mel Cepstral Distortion (MCD)** | Perceptual distance in mel-cepstral space | Lower |
+| **Per-Band Correlation (PBC)** | Avg correlation across 80 mel bands vs ref | Higher (max 1.0) |
+| **Log Spectral Distance (LSD)** | dB-scale spectral envelope error vs ref | Lower |
+| **Loss (MSE)** | Raw training loss | See note below |
+
+**Priority for checkpoint selection:**
+1. Lowest SC (overall spectral fidelity)
+2. Lowest MCD (perceptual quality)
+3. Highest PBC (temporal tracking accuracy)
+4. **Then listen to the eval samples** — metrics miss subtle ambient detail
+
+### Understanding the loss curve
+
+The raw MSE loss appears flat (~1.3-1.5) throughout training. This is **normal** for flow matching — the loss is dominated by the irreducible stochastic variance of the velocity target. The actual learning signal is a tiny fraction of the total. Do not use loss alone to judge training progress.
+
+### Overfitting indicators
+
+- Loss dropping well below the noise floor (< 1.3): model is fitting noise
+- SC/MCD improving on training eval but validation eval degrades: memorization
+- Horizontal spectral banding in eval spectrograms: averaged patterns from small dataset
+- PBC > 0.9 on training eval: too close to reference, won't generalize
+- Temporal variance collapsing: model producing flat/static audio
+
+### Healthy training indicators
+
+- Loss stable around 1.4-1.5
+- SC, MCD, LSD all trending down together
+- PBC trending up but staying below 0.85
+- Validation and training metrics moving in the same direction
+- Temporal variance close to reference value (dynamic, not flat)
+
+---
+
+## Step 5 — Use the adapter
 
 Connect `Foley LoRA Loader` between the model loader and the sampler:
 
 ```
 HunyuanModelLoader (hunyuanvideo_foley.pth)
-  → Foley LoRA Loader
-      adapter_path: /path/to/lora_output/adapter_final.pt
+  -> Foley LoRA Loader
+      adapter_path: /path/to/lora_output/adapter_step14000.pt
       strength: 1.0
-  → HunyuanFoleySampler (normal inference)
+  -> HunyuanFoleySampler (normal inference)
 ```
 
 > **Important:** Wire the LoRA Loader output to the **Sampler**, not the Feature Extractor. The LoRA adapts the transformer which only runs in the Sampler.
@@ -323,17 +390,29 @@ Use `Foley LoRA Scheduler` to run multiple experiments from a JSON configuration
   "name": "rank_sweep",
   "data_dir": "dataset/gunshots",
   "output_root": "lora_output/rank_sweep",
-  "base": { "rank": 64, "lr": 1e-4, "steps": 3000, "target": "all_attn_mlp" },
+  "eval_npz": "/path/to/validation_clip.npz",
+  "base": { "rank": 128, "lr": 1e-4, "steps": 15000, "target": "all_attn_mlp",
+            "timestep_mode": "curriculum", "curriculum_switch": 0.6 },
   "experiments": [
-    {"id": "rank32", "rank": 32},
-    {"id": "rank64"},
-    {"id": "rank128", "rank": 128},
-    {"id": "loraplus", "lora_plus_ratio": 16.0}
+    {"id": "baseline_r128"},
+    {"id": "r64", "rank": 64},
+    {"id": "r128_20k", "steps": 20000}
   ]
 }
 ```
 
 The scheduler loads the dataset once, runs each experiment sequentially, and produces a `loss_comparison.png` overlay chart. Completed experiments are skipped on resume. Drop a `skip_current.flag` file in the output root to abort the current experiment and move to the next.
+
+**Validation (`eval_npz`):** Optional path to an NPZ file outside the training dataset, with a matching audio file alongside it (same stem, e.g., `val_clip.npz` + `val_clip.wav`). When set, generates validation audio at each checkpoint so you can detect overfitting — training eval improves while validation plateaus or degrades.
+
+### VRAM offload options (per-experiment)
+
+| Option | JSON key | Default | Effect |
+|---|---|---|---|
+| Gradient checkpointing | `gradient_checkpointing` | false | Saves ~3-5 GB VRAM, ~25% slower |
+| Block swap | `blocks_to_swap` | 0 | Offloads N of 54 blocks to CPU (prefetch=2) |
+
+These can be set in `base` (applies to all experiments) or per-experiment overrides.
 
 ---
 
@@ -350,21 +429,12 @@ Use `Foley LoRA Evaluator` to compare multiple adapters on the same dataset:
   "seed": 42,
   "adapters": [
     {"id": "baseline"},
-    {"id": "rank64", "path": "/path/to/adapter_final.pt"}
+    {"id": "r128_14k", "path": "/path/to/adapter_step14000.pt"}
   ]
 }
 ```
 
-Computes spectral metrics for each adapter:
-- HF energy ratio (>4kHz / total)
-- Spectral centroid (Hz)
-- Spectral rolloff (85% energy)
-- Spectral flatness (0=tone, 1=noise)
-- Temporal variance (dynamic range)
-- Log spectral distance vs reference (dB)
-- Mel cepstral distortion vs reference
-
-Outputs a `metric_comparison.png` bar chart and per-adapter WAV files for manual listening.
+Computes spectral metrics for each adapter and outputs a `metric_comparison.png` bar chart and per-adapter WAV files for manual listening.
 
 ---
 
@@ -373,7 +443,7 @@ Outputs a `metric_comparison.png` bar chart and per-adapter WAV files for manual
 Use `Foley VAE Roundtrip` to check DAC codec quality on your audio:
 
 ```
-HunyuanDependenciesLoader → Foley VAE Roundtrip (audio input) → Preview Audio
+HunyuanDependenciesLoader -> Foley VAE Roundtrip (audio input) -> Preview Audio
 ```
 
 This encodes audio through DAC and decodes it back. The output reveals the quality ceiling — your LoRA can never produce audio better than what DAC can reconstruct. If roundtrip quality is poor, the dataset pipeline (HF Smoother, Spectral Matcher) can help bring the audio into DAC's comfort zone.
@@ -384,16 +454,22 @@ This encodes audio through DAC and decodes it back. The output reveals the quali
 
 ```
 lora_output/my_sound/
-    adapter_step00500.pt      ← step checkpoint (includes optimizer state for resume)
+    adapter_step00500.pt      <- step checkpoint (includes optimizer state for resume)
     adapter_step01000.pt
     ...
-    adapter_final.pt          ← final adapter with embedded metadata
-    meta.json                 ← human-readable training config
+    adapter_final.pt          <- final adapter with embedded metadata
+    meta.json                 <- human-readable training config
+    metrics_history.json      <- spectral metrics at each checkpoint
+    loss.png                  <- loss curve
     samples/
-        step_00500.wav        ← eval audio sample at each checkpoint
-        step_01000.wav
-    loss_raw.png              ← raw loss curve
-    loss_smoothed.png         ← EMA-smoothed loss curve
+        step_00000.wav        <- pre-training baseline
+        step_00000.png        <- spectrogram
+        step_00500.wav
+        step_00500.png
+        ...
+        val_step_00000.wav    <- validation samples (if eval_npz set)
+        val_step_00500.wav
+        val_reference.png     <- ground-truth validation spectrogram
 ```
 
 `adapter_final.pt` format:
@@ -402,9 +478,9 @@ lora_output/my_sound/
     "state_dict": { "triple_blocks.0.audio_self_attn_qkv.lora_A": ..., ... },
     "meta": {
         "target": "all_attn_mlp",
-        "rank": 64,
-        "alpha": 64.0,
-        "steps": 3000,
+        "rank": 128,
+        "alpha": 128.0,
+        "steps": 15000,
         "init_mode": "standard",
         "use_rslora": false,
         ...
@@ -430,31 +506,36 @@ The fp16 VAE and Synchformer lose precision that matters during training. With s
 
 ---
 
-## VRAM estimates (96 GB target)
+## VRAM estimates
 
-All configurations fit comfortably within 96 GB with no need for gradient checkpointing or model offloading.
+| Config | Estimated VRAM | Target GPU |
+|---|---|---|
+| bf16 + rank 128 + batch 8, no offload | ~18-20 GB | 24+ GB (4090, A5000) |
+| + gradient checkpointing | ~13-15 GB | 16 GB (4080, A4000) |
+| + grad ckpt + 20 blocks swapped | ~10-12 GB | 12 GB (3060 12GB) |
+| + grad ckpt + 40 blocks swapped, batch 2 | ~8-9 GB | 10 GB |
+| bf16 + rank 128 + batch 16, no offload | ~45 GB | 48+ GB |
+| bf16 + rank 128 + batch 32, no offload | ~70 GB | 96 GB |
 
-| Config | Estimated VRAM |
-|---|---|
-| bf16 + rank 64 + all_attn_mlp + batch 8 | ~30 GB |
-| bf16 + rank 64 + all_attn_mlp + batch 16 | ~45 GB |
-| bf16 + rank 64 + all_attn_mlp + batch 32 | ~70 GB |
-| bf16 + rank 128 + all_attn_mlp + batch 16 | ~55 GB |
+High-VRAM systems (48+ GB) need no offloading at all.
 
 ---
 
-## Recommended defaults (96 GB)
+## Recommended defaults
 
-Optimized for maximum quality on high-VRAM hardware:
+Optimized based on five rounds of sweep testing:
 
 | Parameter | Value | Rationale |
 |---|---|---|
 | target | `all_attn_mlp` | Maximum adaptation capacity (234 layers) |
-| rank | 64 | High capacity for 128D latent space |
-| alpha | 64 | 1:1 ratio (HunyuanVideo convention) |
+| rank | 128 | Best across all sweeps for 128D latent space |
+| alpha | 128 | 1:1 ratio with rank (HunyuanVideo convention) |
 | lr | 1e-4 | Proven across AudioLDM and SelVA |
+| schedule_type | `constant` | Cosine decays too fast, wastes later steps |
 | batch_size | 8 | Good gradient quality without excess |
-| timestep_mode | `logit_normal` | 0.2-0.3 dB lower loss floor |
+| timestep_mode | `curriculum` | Best config — first to break SC < 1.0, no late-stage regression |
+| curriculum_switch | 0.6 | Transition from logit_normal to uniform at 60% |
+| steps | 15000 | Select best checkpoint by metrics + listening |
 | precision | bf16 | Full quality, Ampere+ standard |
 | warmup_steps | 100 | Stable start |
 | save_every | 500 | Regular checkpoints + eval samples |
@@ -488,6 +569,9 @@ Make sure the Foley LoRA Loader output is wired to the **Sampler**, not the Feat
 **Loss plateaus early (above 0.7)**
 Dataset is the bottleneck. Add more clips with diverse recordings.
 
+**Metrics keep improving but audio sounds worse**
+Scalar metrics diverge from perceptual quality after extended training. The model over-specializes on dominant spectral features at the cost of low-energy ambient sounds (breath, room tone, quiet textures). Pick the checkpoint that sounds best, not the one with the best numbers.
+
 **torch.cat error on batching**
 All clips must have the same duration. The trainer enforces this by trimming to the shortest clip's latent length. If clips have very different durations, pad/trim them to a fixed length before feature extraction.
 
@@ -503,10 +587,11 @@ If you're coming from SelVA's LoRA pipeline, these are the key differences:
 | VAE | Mel-spectrogram + BigVGAN vocoder | DAC single-stage neural codec |
 | Latent dim | 40D | 128D |
 | Sample rate | 44.1 kHz mono | 48 kHz (mono for training) |
-| Default rank | 16 | 64 (128D latent needs more capacity) |
+| Default rank | 16 | 128 (128D latent needs more capacity) |
 | Default target | `attn.qkv` | `all_attn_mlp` (4 presets available) |
 | Feature extractors | CLIP + TextSynchformer + T5 | SigLIP2 + Synchformer + CLAP |
 | HF Smoother | 12 kHz cutoff, 0.7 blend | 16 kHz cutoff, 0.5 blend (DAC handles HF better) |
 | Spectral Matcher | Hardcoded VAE distribution stats | Reference-based (from DAC roundtrip) |
 | CLI training | `train_lora.py` | ComfyUI nodes only |
-| Timestep default | `uniform` | `logit_normal` |
+| Timestep default | `uniform` | `curriculum` |
+| Augmentation | Recommended | Use with caution (can hurt) |

@@ -442,6 +442,50 @@ producing mechanical-sounding output. Unique clips train cleaner.
 Duplicated videos with varied audio teach "this visual = average of these sounds"
 rather than "follow the video cues." More unique clips > more augmentations.
 
+### Fifth Sweep Results — 399 clips, extended to 40k
+
+**Config:** r128, curriculum (switch 0.6), lr=1e-4, batch=8, 399 unique clips from 46 source videos.
+Trained to 15k, extended to 25k, then 40k. Portrait + landscape mix (~20-30% portrait).
+
+**Scalars over training:**
+
+| Step | Loss | SC | MCD | LSD | PBC |
+|------|------|----|-----|-----|-----|
+| 5k | 1.511 | 3.218 | 7.64 | 18.7 | 0.34 |
+| 9k | 1.500 | 3.054 | 6.86 | 17.3 | 0.46 |
+| 10k | 1.428 | 2.990 | 6.28 | 16.5 | 0.47 |
+| 13k | 1.426 | 2.877 | 6.32 | 16.3 | 0.58 |
+| 14k | 1.427 | 2.836 | 7.18 | 17.7 | 0.63 |
+| 15k | 1.421 | 2.865 | 6.11 | 15.5 | 0.63 |
+| 20k | 1.417 | 2.774 | 5.15 | 14.3 | 0.74 |
+| 25k | 1.411 | 2.683 | 5.20 | 13.9 | 0.78 |
+
+**Scalars vs perceptual quality diverge after ~14k.** All metrics continued improving
+through 25k (SC 2.87→2.68, PBC 0.63→0.78), but perceptual testing on unseen clips
+revealed that step 13-14k produced the best-sounding output. Later checkpoints
+lost subtle ambient details — faint breath, room tone, quiet wet textures — that
+the metrics don't capture because they weight all frequencies equally.
+
+The model over-specializes on dominant spectral features at the cost of low-energy
+ambient sounds. This creates technically better metric scores but perceptually
+less natural audio.
+
+**Best checkpoint: step 13-14k** — best balance of learned fidelity and preserved
+subtlety. Recommended recipe for similar content:
+
+| Parameter | Value |
+|-----------|-------|
+| Rank | 128 |
+| Timestep mode | curriculum (switch 0.6) |
+| Learning rate | 1e-4 constant |
+| Dataset size | ~400 unique clips |
+| Steps | 13-14k |
+| Batch size | 8 |
+
+**Key insight:** Scalar metrics (SC, MCD, PBC) are necessary but not sufficient
+for checkpoint selection. Always validate top candidates perceptually on unseen clips.
+Metrics track dominant spectral fidelity; subtle ambient details require listening.
+
 ### Text Prompt Guidelines (CLAP Conditioning)
 
 **CLAP model:** `laion/larger_clap_general` — trained on AudioSet + AudioCaps captions.

@@ -523,6 +523,54 @@ The fp16 VAE and Synchformer lose precision that matters during training. With s
 
 High-VRAM systems (48+ GB) need no offloading at all.
 
+### 24 GB GPUs (RTX 4090, A5000)
+
+Use `batch_size: 1` with `grad_accum: 8` for effective batch 8, plus gradient checkpointing and block swapping:
+
+```json
+{
+  "name": "my_lora",
+  "dataset_json": "/path/to/features/dataset.json",
+  "output_root": "/path/to/output",
+  "base": {
+    "target": "all_attn_mlp",
+    "rank": 128,
+    "alpha": 128,
+    "lr": 1e-4,
+    "steps": 15000,
+    "batch_size": 1,
+    "grad_accum": 8,
+    "warmup_steps": 100,
+    "save_every": 1000,
+    "timestep_mode": "curriculum",
+    "precision": "bf16",
+    "seed": 42,
+    "logit_normal_sigma": 1.0,
+    "curriculum_switch": 0.6,
+    "init_mode": "standard",
+    "use_rslora": false,
+    "lora_dropout": 0.0,
+    "lora_plus_ratio": 1.0,
+    "schedule_type": "constant",
+    "latent_mixup_alpha": 0.0,
+    "latent_noise_sigma": 0.0,
+    "gradient_checkpointing": true,
+    "blocks_to_swap": 30,
+    "resume_from": ""
+  },
+  "experiments": [
+    {"id": "baseline_r128"}
+  ]
+}
+```
+
+Key settings:
+- **`gradient_checkpointing: true`** — saves ~3-5 GB VRAM by recomputing activations (~25% slower)
+- **`blocks_to_swap: 30`** — offloads 30 of 57 transformer blocks to CPU RAM, frees ~8 GB VRAM
+- **`batch_size: 1` + `grad_accum: 8`** — same gradient quality as batch 8, fits in VRAM
+
+If you still run out of VRAM, increase `blocks_to_swap` to 40 or lower `rank` to 64.
+
 ---
 
 ## Recommended defaults

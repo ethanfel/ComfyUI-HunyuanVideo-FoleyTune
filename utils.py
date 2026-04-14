@@ -141,8 +141,9 @@ def denoise_process_with_generator(
     target_dtype = model_dict.foley_model.dtype
     device = model_dict.device
 
+    shift = getattr(model_dict.foley_model, '_flow_shift_override', cfg.diffusion_config.sample_flow_shift)
     scheduler = FlowMatchDiscreteScheduler(
-        shift=cfg.diffusion_config.sample_flow_shift,
+        shift=shift,
         solver=sampler
     )
     scheduler.set_timesteps(num_inference_steps, device=device)
@@ -499,9 +500,10 @@ def chunked_denoise_process(
     # CRITICAL: each chunk needs its own scheduler instance because
     # FlowMatchDiscreteScheduler.step() increments an internal _step_index.
     chunk_schedulers = []
+    shift = getattr(model_dict.foley_model, '_flow_shift_override', cfg.diffusion_config.sample_flow_shift)
     for _ in chunks:
         sched = FlowMatchDiscreteScheduler(
-            shift=cfg.diffusion_config.sample_flow_shift,
+            shift=shift,
             solver=sampler
         )
         sched.set_timesteps(num_inference_steps, device=device)

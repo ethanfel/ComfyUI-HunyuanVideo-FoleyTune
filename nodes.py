@@ -397,6 +397,40 @@ class FoleyTuneChunkedSampler:
         return (audio_first, audio_batch)
 
 # -----------------------------------------------------------------------------------
+# NODE: FoleyTune Model Sampling (shift override)
+# -----------------------------------------------------------------------------------
+
+class FoleyTuneModelSampling:
+    """Override the flow matching shift parameter on the model.
+
+    Shift controls the sigma schedule: 1.0 = linear (default), >1 biases
+    toward higher noise levels (more creative/diverse), <1 biases toward
+    lower noise levels (more conservative/faithful).
+
+    Connect between Model Loader and Sampler.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("FOLEYTUNE_MODEL",),
+                "shift": ("FLOAT", {
+                    "default": 1.0, "min": 0.1, "max": 10.0, "step": 0.05,
+                    "tooltip": "Flow matching shift. 1.0=linear (default). >1=more noise/diversity. <1=less noise/more faithful.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("FOLEYTUNE_MODEL",)
+    FUNCTION = "set_shift"
+    CATEGORY = "FoleyTune"
+
+    def set_shift(self, model, shift):
+        model._flow_shift_override = shift
+        return (model,)
+
+# -----------------------------------------------------------------------------------
 # NODE: FoleyTune Torch Compile (optional accelerator)
 # -----------------------------------------------------------------------------------
 
@@ -638,6 +672,7 @@ class FoleyTuneSelectAudioFromBatch:
 NODE_CLASS_MAPPINGS = {
     "FoleyTuneModelLoader": FoleyTuneModelLoader,
     "FoleyTuneDependenciesLoader": FoleyTuneDependenciesLoader,
+    "FoleyTuneModelSampling": FoleyTuneModelSampling,
     "FoleyTuneChunkedSampler": FoleyTuneChunkedSampler,
     "FoleyTuneTorchCompile": FoleyTuneTorchCompile,
     "FoleyTuneBlockSwap": FoleyTuneBlockSwap,
@@ -646,6 +681,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneModelLoader": "FoleyTune Model Loader",
     "FoleyTuneDependenciesLoader": "FoleyTune Dependencies Loader",
+    "FoleyTuneModelSampling": "FoleyTune Model Sampling",
     "FoleyTuneChunkedSampler": "FoleyTune Chunked Sampler",
     "FoleyTuneTorchCompile": "FoleyTune Torch Compile",
     "FoleyTuneBlockSwap": "FoleyTune BlockSwap Settings",

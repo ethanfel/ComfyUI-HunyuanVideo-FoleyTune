@@ -938,19 +938,24 @@ class FoleyTuneVideoQualityFilter:
         w_sq = weight_spectral / w_total
         w_cl = (weight_clap / w_total) if use_clap else 0.0
 
-        # --- Phase 1: parallel extraction + scoring via ProcessPoolExecutor ---
-        # Separate processes bypass the GIL so both FFmpeg I/O and
-        # numpy/torch spectral scoring run truly in parallel.
-        # IMPORTANT: CLAP model must NOT be loaded before this — forking after
-        # CUDA init causes child process crashes.
+        # --- Phase 1: parallel extraction + scoring ---
+        # Try ProcessPoolExecutor first (bypasses GIL for CPU-bound scoring).
+        # Falls back to ThreadPoolExecutor on Windows where spawn-mode processes
+        # crash when the parent has CUDA initialized.
         import time
-        from concurrent.futures import ProcessPoolExecutor, as_completed
+        import sys
+        from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
         t0 = time.time()
-        print(f"[VideoQualityFilter] Phase 1: extracting + scoring + resample "
-              f"{len(files)} clips with {num_workers} workers...", flush=True)
         folder_str = str(folder)
         results = []
-        with ProcessPoolExecutor(max_workers=num_workers) as pool:
+
+        use_threads = sys.platform == "win32"
+        pool_type = "threads" if use_threads else "processes"
+        PoolClass = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
+        print(f"[VideoQualityFilter] Phase 1: extracting + scoring + resample "
+              f"{len(files)} clips with {num_workers} {pool_type}...", flush=True)
+
+        with PoolClass(max_workers=num_workers) as pool:
             futures = [pool.submit(_extract_and_score, (f, folder_str, need_clap)) for f in files]
             for i, future in enumerate(as_completed(futures)):
                 r = future.result()

@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torchaudio
+from comfy.model_management import throw_exception_if_processing_interrupted
 
 FOLEYTUNE_AUDIO_DATASET = "FOLEYTUNE_AUDIO_DATASET"
 FOLEYTUNE_DS_CATEGORY = "FoleyTune"
@@ -632,6 +633,7 @@ class FoleyTuneDatasetQualityFilter:
         reject_reasons = {}
 
         for item in dataset:
+            throw_exception_if_processing_interrupted()
             wav = item["waveform"]
             sr = item["sample_rate"]
             name = item["name"]
@@ -958,6 +960,7 @@ class FoleyTuneVideoQualityFilter:
         with PoolClass(max_workers=num_workers) as pool:
             futures = [pool.submit(_extract_and_score, (f, folder_str, need_clap)) for f in files]
             for i, future in enumerate(as_completed(futures)):
+                throw_exception_if_processing_interrupted()
                 r = future.result()
                 if "error" not in r:
                     r["wav"] = torch.from_numpy(r["wav_np"])
@@ -1050,6 +1053,7 @@ class FoleyTuneVideoQualityFilter:
             t_gpu = time.time()
             all_embeds = []
             for chunk_start in range(0, len(mel_features), CLAP_BATCH):
+                throw_exception_if_processing_interrupted()
                 chunk_feats = mel_features[chunk_start:chunk_start + CLAP_BATCH]
                 max_t = max(f.shape[0] for f in chunk_feats)
                 n_mel = chunk_feats[0].shape[1]

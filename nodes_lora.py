@@ -603,6 +603,7 @@ class FoleyTuneBatchFeatureExtractor:
                 prefetch_idx += 1
 
             for i in range(n):
+                mm.throw_exception_if_processing_interrupted()
                 # Wait for current clip's prefetch
                 idx, processed = pending.pop(i).result()
                 # Submit next prefetch while GPU works
@@ -632,6 +633,7 @@ class FoleyTuneBatchFeatureExtractor:
                 prefetch_idx += 1
 
             for i in range(n):
+                mm.throw_exception_if_processing_interrupted()
                 idx, processed = pending.pop(i).result()
                 if prefetch_idx < n:
                     pending[prefetch_idx] = pool.submit(_prefetch_sync, prefetch_idx)
@@ -988,6 +990,7 @@ class FoleyTuneLoRATrainer:
 
         step = start_step  # default in case loop doesn't execute
         for step in range(start_step, steps):
+            mm.throw_exception_if_processing_interrupted()
             # Check for skip flag
             skip_flag = output_path.parent / "skip_current.flag"
             if skip_flag.exists():
@@ -1548,6 +1551,7 @@ class FoleyTuneLoRAScheduler:
                     model.train()
 
                     for step in range(start_step, config["steps"]):
+                        mm.throw_exception_if_processing_interrupted()
                         # Skip flag
                         skip_flag = output_root / "skip_current.flag"
                         if skip_flag.exists():

@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from loguru import logger
 from diffusers.utils.torch_utils import randn_tensor
 from comfy.utils import load_torch_file, ProgressBar
+from comfy.model_management import throw_exception_if_processing_interrupted
 
 # --- Optional imports from the original HunyuanVideo-Foley package ---
 try:
@@ -202,6 +203,7 @@ def denoise_process_with_generator(
     pbar = ProgressBar(len(timesteps))
     with torch.inference_mode():
         for i, t in enumerate(timesteps):
+            throw_exception_if_processing_interrupted()
             # Prepare inputs for classifier-free guidance
             latent_input = torch.cat([latents] * 2) if guidance_scale > 1.0 else latents
 
@@ -573,6 +575,7 @@ def chunked_denoise_process(
 
     with torch.inference_mode():
         for step_idx, t in enumerate(timesteps):
+            throw_exception_if_processing_interrupted()
             if not torch.is_tensor(t):
                 t = torch.tensor(t, dtype=torch.long, device=device)
             else:

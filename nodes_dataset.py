@@ -647,11 +647,16 @@ class FoleyTuneDatasetQualityFilter:
                 mono = wav[0].mean(0, keepdim=True)  # [1, L]
                 if sr != 48000:
                     mono = torchaudio.functional.resample(mono, sr, 48000)
-                audio_inputs = clap_processor(
-                    audios=[mono.squeeze(0).numpy()],
-                    sampling_rate=48000,
-                    return_tensors="pt",
-                )
+                try:
+                    audio_inputs = clap_processor(
+                        audios=[mono.squeeze(0).numpy()],
+                        sampling_rate=48000, return_tensors="pt",
+                    )
+                except (ValueError, TypeError):
+                    audio_inputs = clap_processor(
+                        audio=[mono.squeeze(0).numpy()],
+                        sampling_rate=48000, return_tensors="pt",
+                    )
                 with torch.no_grad():
                     audio_embed = clap_model.get_audio_features(**audio_inputs)
                     if not isinstance(audio_embed, torch.Tensor):
@@ -725,9 +730,14 @@ def _clap_preprocess(npy_path):
     Takes path to a .npy file (not raw array) to avoid pipe serialization bottleneck.
     """
     mono_np = np.load(npy_path)
-    inputs = _worker_clap_proc(
-        audios=[mono_np], sampling_rate=48000, return_tensors="np",
-    )
+    try:
+        inputs = _worker_clap_proc(
+            audios=[mono_np], sampling_rate=48000, return_tensors="np",
+        )
+    except (ValueError, TypeError):
+        inputs = _worker_clap_proc(
+            audio=[mono_np], sampling_rate=48000, return_tensors="np",
+        )
     feats = inputs["input_features"][0]  # (1, T, F) or (T, F)
     if feats.ndim == 3:
         feats = feats[0]  # squeeze channel dim → (T, F)

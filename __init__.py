@@ -4,10 +4,13 @@
 import sys
 import os
 import warnings
-from pydantic.warnings import UnsupportedFieldAttributeWarning
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-warnings.filterwarnings("ignore", category=UnsupportedFieldAttributeWarning)
+try:
+    from pydantic.warnings import UnsupportedFieldAttributeWarning
+    warnings.filterwarnings("ignore", category=UnsupportedFieldAttributeWarning)
+except ImportError:
+    pass
 
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 from .nodes_lora import (

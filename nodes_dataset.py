@@ -1164,6 +1164,22 @@ class FoleyTuneVideoQualityFilter:
             f"Passed: {n_passed} | Rejected: {n_rejected} | "
             f"Skipped: {n_skipped} | Avg score: {avg_score:.2f}"
         )
+
+        # Score distribution: how many clips survive at each threshold
+        if scores_all:
+            sorted_scores = sorted(scores_all)
+            total = len(sorted_scores)
+            lines.append("")
+            lines.append("Score distribution (threshold -> clips remaining):")
+            # From min score (rounded down to 0.05) up to 0.95
+            min_s = int(sorted_scores[0] * 20) / 20  # round down to nearest 0.05
+            threshold = max(0.0, min_s)
+            while threshold <= 0.95:
+                remaining = sum(1 for s in sorted_scores if s >= threshold)
+                bar = "#" * int(remaining / total * 40)
+                lines.append(f"  >= {threshold:.2f}: {remaining:4d}/{total} {bar}")
+                threshold = round(threshold + 0.05, 2)
+
         if do_copy:
             copied = n_passed if skip_rejected else (n_passed + n_rejected)
             lines.append(f"Copied {copied} files to {out_dir}")

@@ -1024,31 +1024,40 @@ class FoleyTuneVideoQualityFilter:
                     mel_features = list(pool.map(_clap_preprocess, npy_paths, chunksize=8))
             print(f"[VideoQualityFilter] Phase 2a done in {time.time()-t_pre:.1f}s", flush=True)
 
-            # Step 2: single batched GPU forward pass
-            print(f"[VideoQualityFilter] Phase 2b: CLAP model inference (batched)...", flush=True)
+            # Step 2: chunked GPU forward pass (avoid OOM on large datasets)
+            CLAP_BATCH = 64
+            print(f"[VideoQualityFilter] Phase 2b: CLAP model inference "
+                  f"({len(mel_features)} clips, batch={CLAP_BATCH})...", flush=True)
             t_gpu = time.time()
-            # Stack all mel features into one batch tensor
-            # Each feature is [T, F] from ClapProcessor — pad on T (axis 0)
-            max_t = max(f.shape[0] for f in mel_features)
-            n_mel = mel_features[0].shape[1]
-            padded = np.zeros((len(mel_features), max_t, n_mel),
-                              dtype=mel_features[0].dtype)
-            for j, f in enumerate(mel_features):
-                padded[j, :f.shape[0], :] = f
-            input_features = torch.from_numpy(padded).unsqueeze(1).to(clap_device)  # (B,1,T,F)
+            all_embeds = []
+            for chunk_start in range(0, len(mel_features), CLAP_BATCH):
+                chunk_feats = mel_features[chunk_start:chunk_start + CLAP_BATCH]
+                max_t = max(f.shape[0] for f in chunk_feats)
+                n_mel = chunk_feats[0].shape[1]
+                padded = np.zeros((len(chunk_feats), max_t, n_mel),
+                                  dtype=chunk_feats[0].dtype)
+                for j, f in enumerate(chunk_feats):
+                    padded[j, :f.shape[0], :] = f
+                input_features = torch.from_numpy(padded).unsqueeze(1).to(clap_device)
 
-            with torch.no_grad():
-                audio_embeds = clap_model.get_audio_features(input_features=input_features)
-                if not isinstance(audio_embeds, torch.Tensor):
-                    audio_embeds = audio_embeds.pooler_output
-                audio_embeds = audio_embeds / audio_embeds.norm(dim=-1, keepdim=True)
+                with torch.no_grad():
+                    embeds = clap_model.get_audio_features(input_features=input_features)
+                    if not isinstance(embeds, torch.Tensor):
+                        embeds = embeds.pooler_output
+                    embeds = embeds / embeds.norm(dim=-1, keepdim=True)
+                    all_embeds.append(embeds.cpu())
+
+                if (chunk_start + CLAP_BATCH) % 256 == 0 or chunk_start + CLAP_BATCH >= len(mel_features):
+                    print(f"  [{min(chunk_start + CLAP_BATCH, len(mel_features))}/{len(mel_features)}]", flush=True)
+
+            audio_embeds = torch.cat(all_embeds, dim=0)
 
             for j, bi in enumerate(batch_indices):
                 embed = audio_embeds[j:j+1]
                 if use_clap:
-                    clap_scores[bi] = float((embed @ text_embed.T).squeeze())
+                    clap_scores[bi] = float((embed @ text_embed.cpu().T).squeeze())
                 if use_neg_clap:
-                    neg_clap_scores[bi] = float((embed @ neg_text_embed.T).squeeze())
+                    neg_clap_scores[bi] = float((embed @ neg_text_embed.cpu().T).squeeze())
 
             print(f"[VideoQualityFilter] Phase 2b done in {time.time()-t_gpu:.1f}s", flush=True)
 

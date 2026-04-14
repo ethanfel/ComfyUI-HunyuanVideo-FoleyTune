@@ -648,7 +648,7 @@ class FoleyTuneDatasetQualityFilter:
                 if sr != 48000:
                     mono = torchaudio.functional.resample(mono, sr, 48000)
                 audio_inputs = clap_processor(
-                    audio=[mono.squeeze(0).numpy()],
+                    audios=[mono.squeeze(0).numpy()],
                     sampling_rate=48000,
                     return_tensors="pt",
                 )
@@ -726,7 +726,7 @@ def _clap_preprocess(npy_path):
     """
     mono_np = np.load(npy_path)
     inputs = _worker_clap_proc(
-        audio=[mono_np], sampling_rate=48000, return_tensors="np",
+        audios=[mono_np], sampling_rate=48000, return_tensors="np",
     )
     feats = inputs["input_features"][0]  # (1, T, F) or (T, F)
     if feats.ndim == 3:

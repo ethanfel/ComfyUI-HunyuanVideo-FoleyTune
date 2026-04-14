@@ -1379,7 +1379,7 @@ class FoleyTuneLoRAScheduler:
                     last_ckpt = exp_dir / f"adapter_step{prev_steps:05d}.pt"
                     if not last_ckpt.exists():
                         last_ckpt = exp_dir / "adapter_final.pt"
-                    if last_ckpt.exists() and not config_check.get("resume_from"):
+                    if last_ckpt.exists():
                         exp["resume_from"] = str(last_ckpt)
                     logger.info(f"Extending experiment {exp_id}: {prev_steps} -> {config_check['steps']} steps "
                                 f"(resume from {exp.get('resume_from', config_check.get('resume_from', '?'))})")

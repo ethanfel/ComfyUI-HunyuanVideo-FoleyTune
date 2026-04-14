@@ -606,13 +606,10 @@ Place a `.wav`, `.flac`, `.ogg`, or `.aiff` file with the exact same stem next t
 Lower adapter strength to 0.6-0.7 in Foley LoRA Loader. Also try lowering CFG scale in the Sampler. More clips and more steps will reduce this.
 
 **LoRA appears to have no effect**
-Make sure the Foley LoRA Loader output is wired to the **Sampler**, not the Feature Extractor.
+Check that the LoRA Loader output is connected to the Sampler's model input and that adapter strength is high enough (0.8-1.0).
 
 **Loss does not decrease**
-- Increase batch_size for more stable gradients
-- Try a higher learning rate (2e-4) or check warmup isn't too long
-- Verify audio files are clean and contain the target sound
-- Check that `.npz` features were extracted with a relevant prompt
+This is normal for FoleyTune — the flow matching loss typically stays flat or fluctuates around a value rather than steadily decreasing. Judge training progress by listening to eval samples at checkpoints, not by watching the loss curve.
 
 **Loss explodes or NaN**
 - Lower the learning rate (5e-5)

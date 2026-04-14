@@ -512,12 +512,16 @@ The fp16 VAE and Synchformer lose precision that matters during training. With s
 
 ## VRAM estimates
 
+**Minimum VRAM for training: ~13 GB** with bf16 model (batch_size=1, gradient checkpointing, rank 128), or **~8 GB** with the fp8 model. GPUs with less than 10 GB cannot train this model.
+
+**Note:** Block swapping (`blocks_to_swap`) is inference-only. During training, the backward pass requires all transformer blocks on GPU, so block swap is automatically skipped.
+
 | Config | Estimated VRAM | Target GPU |
 |---|---|---|
+| fp8 + rank 128 + batch 1 + grad_accum 8 + grad ckpt | ~8 GB | 10-12 GB (3060 12GB) |
+| bf16 + rank 128 + batch 1 + grad_accum 8 + grad ckpt | ~13 GB | 16 GB+ (minimum for bf16) |
+| bf16 + rank 128 + batch 8 + grad ckpt | ~15 GB | 24 GB (4090, A5000) |
 | bf16 + rank 128 + batch 8, no offload | ~18-20 GB | 24+ GB (4090, A5000) |
-| + gradient checkpointing | ~13-15 GB | 16 GB (4080, A4000) |
-| + grad ckpt + 20 blocks swapped | ~10-12 GB | 12 GB (3060 12GB) |
-| + grad ckpt + 40 blocks swapped, batch 2 | ~8-9 GB | 10 GB |
 | bf16 + rank 128 + batch 16, no offload | ~45 GB | 48+ GB |
 | bf16 + rank 128 + batch 32, no offload | ~70 GB | 96 GB |
 
@@ -555,7 +559,7 @@ Use `batch_size: 1` with `grad_accum: 8` for effective batch 8, plus gradient ch
     "latent_mixup_alpha": 0.0,
     "latent_noise_sigma": 0.0,
     "gradient_checkpointing": true,
-    "blocks_to_swap": 30,
+    "blocks_to_swap": 0,
     "resume_from": ""
   },
   "experiments": [
@@ -566,10 +570,10 @@ Use `batch_size: 1` with `grad_accum: 8` for effective batch 8, plus gradient ch
 
 Key settings:
 - **`gradient_checkpointing: true`** — saves ~3-5 GB VRAM by recomputing activations (~25% slower)
-- **`blocks_to_swap: 30`** — offloads 30 of 57 transformer blocks to CPU RAM, frees ~8 GB VRAM
 - **`batch_size: 1` + `grad_accum: 8`** — same gradient quality as batch 8, fits in VRAM
+- **`blocks_to_swap: 0`** — block swapping is inference-only (backward pass needs all blocks on GPU)
 
-If you still run out of VRAM, increase `blocks_to_swap` to 40 or lower `rank` to 64.
+If you still run out of VRAM, lower `rank` to 64.
 
 ---
 

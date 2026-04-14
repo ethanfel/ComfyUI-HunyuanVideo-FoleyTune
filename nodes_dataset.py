@@ -959,7 +959,8 @@ class FoleyTuneVideoQualityFilter:
 
         with PoolClass(max_workers=num_workers) as pool:
             futures = [pool.submit(_extract_and_score, (f, folder_str, need_clap)) for f in files]
-            for i, future in enumerate(as_completed(futures)):
+            try:
+              for i, future in enumerate(as_completed(futures)):
                 throw_exception_if_processing_interrupted()
                 r = future.result()
                 if "error" not in r:
@@ -973,6 +974,10 @@ class FoleyTuneVideoQualityFilter:
                 results.append(r)
                 if (i + 1) % 10 == 0 or (i + 1) == len(futures):
                     print(f"  [{i+1}/{len(futures)}] done ({time.time()-t0:.1f}s)", flush=True)
+            except:
+                for f in futures:
+                    f.cancel()
+                raise
 
         t1 = time.time()
         print(f"[VideoQualityFilter] Phase 1 done in {t1-t0:.1f}s", flush=True)

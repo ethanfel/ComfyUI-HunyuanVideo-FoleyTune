@@ -882,8 +882,9 @@ class FoleyTuneLoRATrainer:
             logger.info("Gradient checkpointing enabled for all layers")
 
         if blocks_to_swap > 0:
-            model.block_swap(blocks_to_swap, use_non_blocking=True, prefetch_blocks=2)
-            logger.info(f"BlockSwap enabled: {blocks_to_swap} blocks offloaded to CPU with prefetch=2")
+            logger.warning(f"BlockSwap ({blocks_to_swap} blocks) ignored during training — "
+                           "backward pass requires all blocks on GPU. "
+                           "Use gradient_checkpointing + batch_size=1 + grad_accum to save VRAM instead.")
 
         target_suffixes = FOLEY_TARGET_PRESETS[target]
         n_wrapped = apply_lora(
@@ -1421,8 +1422,9 @@ class FoleyTuneLoRAScheduler:
                         logger.info(f"[{exp_id}] Gradient checkpointing enabled")
 
                     if config.get("blocks_to_swap", 0) > 0:
-                        model.block_swap(config["blocks_to_swap"], use_non_blocking=True, prefetch_blocks=2)
-                        logger.info(f"[{exp_id}] BlockSwap: {config['blocks_to_swap']} blocks offloaded with prefetch=2")
+                        logger.warning(f"[{exp_id}] BlockSwap ({config['blocks_to_swap']} blocks) ignored during training — "
+                                       "backward pass requires all blocks on GPU. "
+                                       "Use gradient_checkpointing + batch_size=1 + grad_accum instead.")
 
                     target_suffixes = FOLEY_TARGET_PRESETS[config["target"]]
                     n_wrapped = apply_lora(

@@ -857,7 +857,7 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
                 if block_idx >= swap_start_idx:
                     block.to(self.offload_device, non_blocking=self.use_non_blocking)
 
-        x = audio 
+        x = audio
         if sync_vec is not None:
             vec = vec.unsqueeze(1).repeat(1, cond_seq_len + v_cond_seq_len, 1)
             vec = torch.cat((vec, sync_vec), dim=1)

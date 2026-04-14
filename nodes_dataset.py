@@ -1032,9 +1032,15 @@ class FoleyTuneVideoQualityFilter:
                     p = os.path.join(tmpdir, f"{i}.npy")
                     np.save(p, mono)
                     npy_paths.append(p)
-                with ProcessPoolExecutor(max_workers=num_workers,
-                                         initializer=_init_clap_worker) as pool:
-                    mel_features = list(pool.map(_clap_preprocess, npy_paths, chunksize=8))
+                if sys.platform == "win32":
+                    # Windows: threads avoid spawn-mode CUDA crashes
+                    _init_clap_worker()  # init in main thread
+                    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+                        mel_features = list(pool.map(_clap_preprocess, npy_paths, chunksize=8))
+                else:
+                    with ProcessPoolExecutor(max_workers=num_workers,
+                                             initializer=_init_clap_worker) as pool:
+                        mel_features = list(pool.map(_clap_preprocess, npy_paths, chunksize=8))
             print(f"[VideoQualityFilter] Phase 2a done in {time.time()-t_pre:.1f}s", flush=True)
 
             # Step 2: chunked GPU forward pass (avoid OOM on large datasets)

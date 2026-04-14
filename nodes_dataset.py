@@ -1116,6 +1116,14 @@ class FoleyTuneVideoQualityFilter:
                     "sample_rate": r["sr"],
                     "name": r["rel"].stem,
                     "video_path": str(r["path"]),
+                    "scores": {
+                        "bandwidth": round(bw, 4),
+                        "spectral": round(sq, 4),
+                        "clap": round(cl, 4) if cl is not None else None,
+                        "neg_clap": round(neg_cl, 4) if neg_cl is not None else None,
+                        "composite": round(composite, 4),
+                        "duration": round(duration, 2),
+                    },
                 })
             else:
                 n_rejected += 1
@@ -1491,10 +1499,26 @@ class FoleyTuneDatasetSaver:
         with open(sweep_path, "w") as f:
             json.dump(sweep_json, f, indent=2)
 
+        # Write scores.json — per-clip quality scores for later filtering/reuse
+        scores_data = {}
+        for item in dataset:
+            if item.get("scores"):
+                scores_data[item["name"]] = item["scores"]
+        if scores_data:
+            # Sort by composite score descending for easy top-N selection
+            scores_sorted = dict(sorted(scores_data.items(),
+                                        key=lambda x: x[1].get("composite", 0),
+                                        reverse=True))
+            scores_path = out_path / "scores.json"
+            with open(scores_path, "w") as f:
+                json.dump(scores_sorted, f, indent=2)
+
         lines = [f"[FoleyTuneDatasetSaver] Saved {saved} clips -> {out_path}"]
         lines.append(f"  FLAC: {saved}  NPZ: {features_saved}")
         lines.append(f"  Train: {len(train_names)}  Val: {1 if val_name else 0}")
         lines.append(f"  sweep.json -> {sweep_path}")
+        if scores_data:
+            lines.append(f"  scores.json -> {scores_path} ({len(scores_data)} clips)")
 
         report = "\n".join(lines)
         print(report, flush=True)

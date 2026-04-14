@@ -548,28 +548,28 @@ class FoleyTuneDatasetQualityFilter:
                     "tooltip": "Global text prompt for CLAP similarity. Empty = skip CLAP.",
                 }),
                 "min_bandwidth_score": ("FLOAT", {
-                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Minimum bandwidth sub-score (~0.3 = 6.2 kHz effective).",
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Hard floor: rejects any clip below this bandwidth score, regardless of composite. 0=disabled. Set >0 only if you need a strict per-metric cutoff (e.g. 0.3 = require 6.2 kHz effective bandwidth).",
                 }),
                 "min_spectral_score": ("FLOAT", {
                     "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Minimum spectral quality sub-score.",
+                    "tooltip": "Hard floor: rejects any clip below this spectral quality score, regardless of composite. Catches genuinely bad audio (silence, heavy clipping). 0=disabled.",
                 }),
                 "min_clap_score": ("FLOAT", {
-                    "default": 0.1, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Minimum CLAP similarity sub-score (per GenAU paper).",
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Hard floor: rejects any clip below this CLAP similarity score, regardless of composite. 0=disabled. Usually not needed since weight_clap already controls CLAP's influence on the composite.",
                 }),
                 "weight_bandwidth": ("FLOAT", {
                     "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1,
-                    "tooltip": "Weight of bandwidth score in composite.",
+                    "tooltip": "Soft influence: how much bandwidth contributes to the composite score (composite = w_bw*BW + w_sq*SQ + w_cl*CL). Set 0 for content with naturally low bandwidth (e.g. speech, vocals).",
                 }),
                 "weight_spectral": ("FLOAT", {
                     "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1,
-                    "tooltip": "Weight of spectral quality score in composite.",
+                    "tooltip": "Soft influence: how much spectral quality contributes to the composite score (composite = w_bw*BW + w_sq*SQ + w_cl*CL). Higher = prioritize clean, natural-sounding audio.",
                 }),
                 "weight_clap": ("FLOAT", {
                     "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.1,
-                    "tooltip": "Weight of CLAP similarity score in composite.",
+                    "tooltip": "Soft influence: how much CLAP text similarity contributes to the composite score (composite = w_bw*BW + w_sq*SQ + w_cl*CL). Higher = prioritize prompt-matching content.",
                 }),
             },
         }
@@ -586,9 +586,9 @@ class FoleyTuneDatasetQualityFilter:
 
     def filter_quality(self, dataset, min_quality_score: float,
                        skip_rejected: bool, clap_prompt: str = "",
-                       min_bandwidth_score: float = 0.3,
+                       min_bandwidth_score: float = 0.0,
                        min_spectral_score: float = 0.2,
-                       min_clap_score: float = 0.1,
+                       min_clap_score: float = 0.0,
                        weight_bandwidth: float = 0.4,
                        weight_spectral: float = 0.4,
                        weight_clap: float = 0.2):
@@ -629,6 +629,7 @@ class FoleyTuneDatasetQualityFilter:
         rejected = []
         lines = ["=== Quality Filter Report ==="]
         scores_all = []
+        reject_reasons = {}
 
         for item in dataset:
             wav = item["waveform"]
@@ -682,6 +683,8 @@ class FoleyTuneDatasetQualityFilter:
 
             if reasons:
                 rejected.append(name)
+                for r in reasons:
+                    reject_reasons[r] = reject_reasons.get(r, 0) + 1
                 if not skip_rejected:
                     passed.append(item)
             else:
@@ -693,6 +696,11 @@ class FoleyTuneDatasetQualityFilter:
             f"Passed: {len(passed)}/{len(dataset)} | "
             f"Rejected: {len(rejected)} | Avg score: {avg_score:.2f}"
         )
+        if reject_reasons:
+            lines.append("")
+            lines.append("Rejection reasons:")
+            for reason, count in sorted(reject_reasons.items(), key=lambda x: -x[1]):
+                lines.append(f"  {reason}: {count} clips")
         report = "\n".join(lines)
         print(f"[FoleyTuneDatasetQualityFilter]\n{report}", flush=True)
         return (passed, report)
@@ -845,28 +853,28 @@ class FoleyTuneVideoQualityFilter:
                     "tooltip": "Reject clips scoring above this against the negative prompt.",
                 }),
                 "min_bandwidth_score": ("FLOAT", {
-                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Minimum bandwidth sub-score (~0.3 = 6.2 kHz effective).",
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Hard floor: rejects any clip below this bandwidth score, regardless of composite. 0=disabled. Set >0 only if you need a strict per-metric cutoff (e.g. 0.3 = require 6.2 kHz effective bandwidth).",
                 }),
                 "min_spectral_score": ("FLOAT", {
                     "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Minimum spectral quality sub-score.",
+                    "tooltip": "Hard floor: rejects any clip below this spectral quality score, regardless of composite. Catches genuinely bad audio (silence, heavy clipping). 0=disabled.",
                 }),
                 "min_clap_score": ("FLOAT", {
-                    "default": 0.1, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Minimum CLAP similarity sub-score.",
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Hard floor: rejects any clip below this CLAP similarity score, regardless of composite. 0=disabled. Usually not needed since weight_clap already controls CLAP's influence on the composite.",
                 }),
                 "weight_bandwidth": ("FLOAT", {
                     "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1,
-                    "tooltip": "Weight of bandwidth score in composite.",
+                    "tooltip": "Soft influence: how much bandwidth contributes to the composite score (composite = w_bw*BW + w_sq*SQ + w_cl*CL). Set 0 for content with naturally low bandwidth (e.g. speech, vocals).",
                 }),
                 "weight_spectral": ("FLOAT", {
                     "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1,
-                    "tooltip": "Weight of spectral quality score in composite.",
+                    "tooltip": "Soft influence: how much spectral quality contributes to the composite score (composite = w_bw*BW + w_sq*SQ + w_cl*CL). Higher = prioritize clean, natural-sounding audio.",
                 }),
                 "weight_clap": ("FLOAT", {
                     "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.1,
-                    "tooltip": "Weight of CLAP similarity score in composite.",
+                    "tooltip": "Soft influence: how much CLAP text similarity contributes to the composite score (composite = w_bw*BW + w_sq*SQ + w_cl*CL). Higher = prioritize prompt-matching content.",
                 }),
                 "seed": ("INT", {
                     "default": 42,
@@ -892,9 +900,9 @@ class FoleyTuneVideoQualityFilter:
                       clap_prompt: str = "",
                       clap_negative_prompt: str = "",
                       max_negative_clap_score: float = 0.3,
-                      min_bandwidth_score: float = 0.3,
+                      min_bandwidth_score: float = 0.0,
                       min_spectral_score: float = 0.2,
-                      min_clap_score: float = 0.1,
+                      min_clap_score: float = 0.0,
                       weight_bandwidth: float = 0.4,
                       weight_spectral: float = 0.4,
                       weight_clap: float = 0.2,
@@ -1069,6 +1077,7 @@ class FoleyTuneVideoQualityFilter:
         n_rejected = 0
         n_skipped = 0
         scores_all = []
+        reject_reasons = {}
         lines = ["=== Video Quality Filter Report ==="]
 
         valid_idx = 0
@@ -1136,6 +1145,8 @@ class FoleyTuneVideoQualityFilter:
                 })
             else:
                 n_rejected += 1
+                for reason in reasons:
+                    reject_reasons[reason] = reject_reasons.get(reason, 0) + 1
                 status = f"REJECT: {', '.join(reasons)}"
                 lines.append(
                     f"  {status}  {rel} ({duration:.1f}s): "
@@ -1173,6 +1184,11 @@ class FoleyTuneVideoQualityFilter:
             f"Passed: {n_passed} | Rejected: {n_rejected} | "
             f"Skipped: {n_skipped} | Avg score: {avg_score:.2f}"
         )
+        if reject_reasons:
+            lines.append("")
+            lines.append("Rejection reasons:")
+            for reason, count in sorted(reject_reasons.items(), key=lambda x: -x[1]):
+                lines.append(f"  {reason}: {count} clips")
 
         # Score distribution: how many clips survive at each threshold
         if scores_all:

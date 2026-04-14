@@ -21,5 +21,11 @@ omegaconf
 loguru
 tqdm
 
+# Audio processing
+soundfile
+soxr
+pyloudnorm
+pedalboard
+
 # LoRA training (loss curves, eval charts)
 matplotlib

@@ -1014,6 +1014,10 @@ class FoleyTuneVideoQualityFilter:
                     "default": 42,
                     "tooltip": "Seed for random val clip selection from rejected clips.",
                 }),
+                "denoise_settings": (FOLEYTUNE_DENOISE_SETTINGS, {
+                    "tooltip": "Connect a Denoiser Settings node to denoise clips "
+                               "before scoring. Denoised audio flows downstream.",
+                }),
             },
         }
 
@@ -1040,7 +1044,8 @@ class FoleyTuneVideoQualityFilter:
                       weight_bandwidth: float = 0.4,
                       weight_spectral: float = 0.4,
                       weight_clap: float = 0.2,
-                      seed: int = 42):
+                      seed: int = 42,
+                      denoise_settings=None):
         import shutil
 
         folder = Path(video_folder.strip())
@@ -1116,6 +1121,82 @@ class FoleyTuneVideoQualityFilter:
 
         # Sort by relative path to keep report deterministic
         results.sort(key=lambda r: str(r["rel"]))
+
+        # --- Optional denoising pass (between extraction and CLAP/decisions) ---
+        if denoise_settings is not None and denoise_settings["strength"] > 0:
+            import re as _re
+            import noisereduce as nr
+            from voice_analysis import group_by_source
+
+            strength = denoise_settings["strength"]
+            stationary = denoise_settings["stationary"]
+            n_fft = denoise_settings["n_fft"]
+
+            valid = [r for r in results if "error" not in r]
+            names = [r["rel"].stem for r in valid]
+            groups = group_by_source(names)
+
+            # Find quietest segment per source as noise reference
+            noise_profiles = {}
+            for prefix, indices in groups.items():
+                if len(indices) < 2:
+                    noise_profiles[prefix] = None
+                    continue
+                best_i, best_rms = indices[0], float("inf")
+                for i in indices:
+                    rms = valid[i]["wav"][0].float().pow(2).mean().sqrt().item()
+                    if rms < best_rms:
+                        best_rms = rms
+                        best_i = i
+                quiet_wav = valid[best_i]["wav"][0].float().cpu().numpy()
+                noise_profiles[prefix] = (
+                    quiet_wav.mean(axis=0) if quiet_wav.ndim > 1 else quiet_wav
+                )
+
+            # Denoise each clip, recompute scores and CLAP mono
+            for i, r in enumerate(valid):
+                throw_exception_if_processing_interrupted()
+                wav = r["wav"][0].float()  # [C, L]
+                sr = r["sr"]
+                wav_np = wav.cpu().numpy()
+                rms_in = np.sqrt(np.mean(wav_np ** 2)).clip(1e-8)
+
+                prefix = _re.sub(r"_\d+$", "", names[i])
+                y_noise = noise_profiles.get(prefix)
+
+                denoised = np.stack([
+                    nr.reduce_noise(
+                        y=wav_np[c], sr=sr, y_noise=y_noise,
+                        prop_decrease=strength, stationary=stationary,
+                        n_fft=n_fft,
+                    )
+                    for c in range(wav_np.shape[0])
+                ])
+
+                rms_out = np.sqrt(np.mean(denoised ** 2)).clip(1e-8)
+                denoised = denoised * (rms_in / rms_out)
+                peak = np.abs(denoised).max()
+                if peak > 1.0:
+                    denoised = denoised / peak
+
+                new_wav = torch.from_numpy(denoised).float().unsqueeze(0)  # [1, C, L]
+                r["wav"] = new_wav
+
+                # Recompute quality scores on denoised audio
+                r["bw"] = _bandwidth_score(new_wav, sr)
+                r["sq"] = _spectral_quality_score(new_wav, sr)
+
+                # Recompute CLAP mono if needed
+                if need_clap:
+                    mono = new_wav[0].mean(0, keepdim=True)
+                    if sr != 48000:
+                        mono_48k = torchaudio.functional.resample(mono, sr, 48000)
+                    else:
+                        mono_48k = mono
+                    r["mono_48k_np"] = mono_48k.numpy()
+
+            print(f"[VideoQualityFilter] Denoised {len(valid)} clips  "
+                  f"strength={strength}  stationary={stationary}", flush=True)
 
         # --- CLAP model loading (deferred until after Phase 1 forks are done) ---
         clap_model = None

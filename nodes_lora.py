@@ -775,7 +775,6 @@ class FoleyTuneLoRATrainer:
                 "latent_mixup_alpha": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0}),
                 "latent_noise_sigma": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.1}),
                 "gradient_checkpointing": ("BOOLEAN", {"default": False}),
-                "blocks_to_swap": ("INT", {"default": 0, "min": 0, "max": 54, "tooltip": "Number of transformer blocks to offload to CPU (0=disabled). Saves VRAM at the cost of speed."}),
                 "resume_from": ("STRING", {"default": ""}),
                 "dataset_json": ("STRING", {
                     "default": "",
@@ -801,7 +800,7 @@ class FoleyTuneLoRATrainer:
               init_mode="standard", use_rslora=False, lora_dropout=0.0,
               lora_plus_ratio=1.0, schedule_type="constant",
               latent_mixup_alpha=0.0, latent_noise_sigma=0.0,
-              gradient_checkpointing=False, blocks_to_swap=0,
+              gradient_checkpointing=False,
               resume_from="", dataset_json=""):
 
         import random
@@ -818,7 +817,7 @@ class FoleyTuneLoRATrainer:
             logit_normal_sigma, curriculum_switch, init_mode, use_rslora,
             lora_dropout, lora_plus_ratio, schedule_type,
             latent_mixup_alpha, latent_noise_sigma,
-            gradient_checkpointing, blocks_to_swap, resume_from,
+            gradient_checkpointing, resume_from,
             dataset_json,
         )
 
@@ -828,7 +827,7 @@ class FoleyTuneLoRATrainer:
                      logit_normal_sigma, curriculum_switch, init_mode, use_rslora,
                      lora_dropout, lora_plus_ratio, schedule_type,
                      latent_mixup_alpha, latent_noise_sigma,
-                     gradient_checkpointing, blocks_to_swap, resume_from,
+                     gradient_checkpointing, resume_from,
                      dataset_json=""):
         import random
 
@@ -880,11 +879,6 @@ class FoleyTuneLoRATrainer:
             model.gradient_checkpoint = True
             model.gradient_checkpoint_layers = -1  # all layers
             logger.info("Gradient checkpointing enabled for all layers")
-
-        if blocks_to_swap > 0:
-            logger.warning(f"BlockSwap ({blocks_to_swap} blocks) ignored during training — "
-                           "backward pass requires all blocks on GPU. "
-                           "Use gradient_checkpointing + batch_size=1 + grad_accum to save VRAM instead.")
 
         target_suffixes = FOLEY_TARGET_PRESETS[target]
         n_wrapped = apply_lora(
@@ -956,7 +950,6 @@ class FoleyTuneLoRATrainer:
             "latent_mixup_alpha": latent_mixup_alpha,
             "latent_noise_sigma": latent_noise_sigma,
             "gradient_checkpointing": gradient_checkpointing,
-            "blocks_to_swap": blocks_to_swap,
             "n_clips": n_clips, "precision": precision, "seed": seed,
         }
 
@@ -1261,7 +1254,7 @@ class FoleyTuneLoRAScheduler:
         "init_mode": "standard", "use_rslora": False, "lora_dropout": 0.0,
         "lora_plus_ratio": 1.0, "schedule_type": "constant",
         "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
-        "gradient_checkpointing": False, "blocks_to_swap": 0,
+        "gradient_checkpointing": False,
         "resume_from": "",
     }
 
@@ -1420,11 +1413,6 @@ class FoleyTuneLoRAScheduler:
                         model.gradient_checkpoint = True
                         model.gradient_checkpoint_layers = -1
                         logger.info(f"[{exp_id}] Gradient checkpointing enabled")
-
-                    if config.get("blocks_to_swap", 0) > 0:
-                        logger.warning(f"[{exp_id}] BlockSwap ({config['blocks_to_swap']} blocks) ignored during training — "
-                                       "backward pass requires all blocks on GPU. "
-                                       "Use gradient_checkpointing + batch_size=1 + grad_accum instead.")
 
                     target_suffixes = FOLEY_TARGET_PRESETS[config["target"]]
                     n_wrapped = apply_lora(

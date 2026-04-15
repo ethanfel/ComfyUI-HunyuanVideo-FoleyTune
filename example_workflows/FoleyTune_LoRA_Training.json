@@ -1,7 +1,7 @@
 {
   "id": "a3bce590-f31e-4952-96f3-7ffa47c05d09",
   "revision": 0,
-  "last_node_id": 56,
+  "last_node_id": 61,
   "last_link_id": 90,
   "nodes": [
     {
@@ -751,32 +751,32 @@
       ],
       "outputs": [
         {
-          "name": "source_fps🟨",
+          "name": "source_fps\ud83d\udfe8",
           "type": "FLOAT",
           "links": null
         },
         {
-          "name": "source_frame_count🟨",
+          "name": "source_frame_count\ud83d\udfe8",
           "type": "INT",
           "links": null
         },
         {
-          "name": "source_duration🟨",
+          "name": "source_duration\ud83d\udfe8",
           "type": "FLOAT",
           "links": null
         },
         {
-          "name": "source_width🟨",
+          "name": "source_width\ud83d\udfe8",
           "type": "INT",
           "links": null
         },
         {
-          "name": "source_height🟨",
+          "name": "source_height\ud83d\udfe8",
           "type": "INT",
           "links": null
         },
         {
-          "name": "loaded_fps🟦",
+          "name": "loaded_fps\ud83d\udfe6",
           "type": "FLOAT",
           "links": [
             45,
@@ -784,24 +784,24 @@
           ]
         },
         {
-          "name": "loaded_frame_count🟦",
+          "name": "loaded_frame_count\ud83d\udfe6",
           "type": "INT",
           "links": null
         },
         {
-          "name": "loaded_duration🟦",
+          "name": "loaded_duration\ud83d\udfe6",
           "type": "FLOAT",
           "links": [
             46
           ]
         },
         {
-          "name": "loaded_width🟦",
+          "name": "loaded_width\ud83d\udfe6",
           "type": "INT",
           "links": null
         },
         {
-          "name": "loaded_height🟦",
+          "name": "loaded_height\ud83d\udfe6",
           "type": "INT",
           "links": null
         }
@@ -1428,7 +1428,7 @@
         "Node name for S&R": "PrimitiveString"
       },
       "widgets_values": [
-        ""
+        "/path/to/output/features"
       ]
     },
     {
@@ -1467,7 +1467,7 @@
         "Node name for S&R": "PrimitiveString"
       },
       "widgets_values": [
-        ""
+        "/path/to/your/video/clips"
       ]
     },
     {
@@ -1508,7 +1508,7 @@
         }
       },
       "widgets_values": [
-        ""
+        "describe your target sound here (e.g. dog barking, gunshot, footsteps on gravel)"
       ]
     },
     {
@@ -1861,6 +1861,136 @@
         42,
         "fixed"
       ]
+    },
+    {
+      "id": 57,
+      "type": "Note",
+      "pos": [
+        -96,
+        -240
+      ],
+      "size": [
+        576,
+        220
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Getting Started",
+      "properties": {
+        "text": ""
+      },
+      "widgets_values": [
+        "HOW TO TRAIN A FOLEYTUNE LoRA\n\n1. Set your paths in the 3 purple string boxes below (Prompt, Input Folder, Output Folder)\n2. Run Step 1 (data pipeline) to filter, process, and extract features from your clips\n3. Copy the sweep.json path from the DatasetSaver output into the LoRA Scheduler\n4. Bypass Step 1 nodes, enable Step 2, and run training\n5. After training, enable Step 3 to test your adapter\n\nMinimum VRAM: 13 GB (bf16) or 8 GB (fp8). See LORA_TRAINING.md for full details."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 58,
+      "type": "Note",
+      "pos": [
+        544,
+        -200
+      ],
+      "size": [
+        480,
+        200
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Step 1 Instructions",
+      "properties": {
+        "text": ""
+      },
+      "widgets_values": [
+        "STEP 1 \u2014 DATA PIPELINE\n\n\u2022 Set 'Input Unfiltered Dataset Folder' to a folder of video files (.mp4, .mkv, etc)\n\u2022 Set 'Prompt' to describe the sound you're training (e.g. 'dog barking')\n\u2022 Set 'Output Filtered Dataset Folder' to where features will be saved\n\u2022 Adjust VideoQualityFilter's min_quality_score to control how strict filtering is\n\u2022 Run this step FIRST, then check the reports in the preview nodes on the right\n\u2022 Once happy with results, bypass all Step 1 nodes before running Step 2"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 59,
+      "type": "Note",
+      "pos": [
+        2048,
+        -200
+      ],
+      "size": [
+        512,
+        200
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Step 2 Instructions",
+      "properties": {
+        "text": ""
+      },
+      "widgets_values": [
+        "STEP 2 \u2014 TRAINING\n\nOption A (recommended): Use the LoRA Scheduler node\n\u2022 Paste the sweep.json path from Step 1's DatasetSaver output\n\u2022 The sweep.json has all training settings \u2014 edit it to tune parameters\n\u2022 For 24GB GPUs: set gradient_checkpointing=true, batch_size=1, grad_accum=8\n\nOption B: Use the LoRA Trainer node directly (bypassed by default)\n\u2022 Set data_dir to your features folder from Step 1\n\u2022 Block swap does NOT work for training \u2014 use gradient checkpointing instead"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 60,
+      "type": "Note",
+      "pos": [
+        2624,
+        -200
+      ],
+      "size": [
+        480,
+        180
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Step 3 Instructions",
+      "properties": {
+        "text": ""
+      },
+      "widgets_values": [
+        "STEP 3 \u2014 TEST YOUR LoRA\n\n\u2022 Set the LoRA Loader's adapter_path to a checkpoint from training\n  (e.g. output/baseline_r128/adapter_final.pt)\n\u2022 Load a test video in VHS_LoadVideo\n\u2022 Enable the Feature Extractor, LoRA Loader, and Sampler nodes\n\u2022 Run to generate audio with your trained LoRA\n\u2022 Adjust adapter strength (0.0-1.0) and CFG scale to taste"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 61,
+      "type": "Note",
+      "pos": [
+        -96,
+        -20
+      ],
+      "size": [
+        576,
+        40
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Model Loader Note",
+      "properties": {
+        "text": ""
+      },
+      "widgets_values": [
+        "Load these ONCE \u2014 they're shared across all steps. Don't bypass these."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
     }
   ],
   "links": [
@@ -2225,7 +2355,7 @@
     },
     {
       "id": 2,
-      "title": "Step 1 — Data Pipeline",
+      "title": "Step 1 \u2014 Data Pipeline",
       "bounding": [
         544,
         32,
@@ -2238,7 +2368,7 @@
     },
     {
       "id": 3,
-      "title": "Step 2 — LoRA Training",
+      "title": "Step 2 \u2014 LoRA Training",
       "bounding": [
         2048,
         512,
@@ -2251,7 +2381,7 @@
     },
     {
       "id": 4,
-      "title": "Step 3 — Inference (test your adapter)",
+      "title": "Step 3 \u2014 Inference (test your adapter)",
       "bounding": [
         2624,
         32,
@@ -2264,7 +2394,7 @@
     },
     {
       "id": 5,
-      "title": "Optional — VAE Roundtrip (DAC quality ceiling)",
+      "title": "Optional \u2014 VAE Roundtrip (DAC quality ceiling)",
       "bounding": [
         -96,
         864,
@@ -2277,7 +2407,7 @@
     },
     {
       "id": 6,
-      "title": "Step 2 — LoRA Training Scheduler",
+      "title": "Step 2 \u2014 LoRA Training Scheduler",
       "bounding": [
         2048,
         32,

@@ -523,7 +523,8 @@ class FoleyTuneBatchFeatureExtractor:
                 continue
 
             txt_path = video_path.with_suffix(".txt")
-            clip_prompt = txt_path.read_text().strip() if txt_path.exists() else prompt
+            clip_prompt = (txt_path.read_text().strip() if txt_path.exists()
+                           else item.get("prompt") or prompt)
 
             clips.append({
                 "item": item,

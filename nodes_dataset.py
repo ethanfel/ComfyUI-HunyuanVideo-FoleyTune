@@ -714,8 +714,10 @@ class FoleyTuneDatasetQualityFilter:
                 )
 
             # Denoise each clip
+            print(f"[QualityFilter] Denoising {len(dataset)} clips...", flush=True)
+            t_dn = time.time()
             denoised_dataset = []
-            for item in dataset:
+            for di, item in enumerate(dataset):
                 throw_exception_if_processing_interrupted()
                 wav = item["waveform"][0].float()
                 sr = item["sample_rate"]
@@ -743,6 +745,9 @@ class FoleyTuneDatasetQualityFilter:
                 new_item = dict(item)
                 new_item["waveform"] = torch.from_numpy(denoised).float().unsqueeze(0)
                 denoised_dataset.append(new_item)
+
+                if (di + 1) % 10 == 0 or (di + 1) == len(dataset):
+                    print(f"  [{di+1}/{len(dataset)}] denoised ({time.time()-t_dn:.1f}s)", flush=True)
 
             dataset = denoised_dataset
             print(f"[QualityFilter] Denoised {len(dataset)} clips  "
@@ -1154,6 +1159,8 @@ class FoleyTuneVideoQualityFilter:
                 )
 
             # Denoise each clip, recompute scores and CLAP mono
+            print(f"[VideoQualityFilter] Denoising {len(valid)} clips...", flush=True)
+            t_dn = time.time()
             for i, r in enumerate(valid):
                 throw_exception_if_processing_interrupted()
                 wav = r["wav"][0].float()  # [C, L]
@@ -1194,6 +1201,9 @@ class FoleyTuneVideoQualityFilter:
                     else:
                         mono_48k = mono
                     r["mono_48k_np"] = mono_48k.numpy()
+
+                if (i + 1) % 10 == 0 or (i + 1) == len(valid):
+                    print(f"  [{i+1}/{len(valid)}] denoised ({time.time()-t_dn:.1f}s)", flush=True)
 
             print(f"[VideoQualityFilter] Denoised {len(valid)} clips  "
                   f"strength={strength}  stationary={stationary}", flush=True)
@@ -1238,21 +1248,23 @@ class FoleyTuneVideoQualityFilter:
         if need_clap and valid_results:
             # Collect mono arrays from workers
             batch_indices = [i for i, r in enumerate(valid_results) if "mono_48k_np" in r]
-            batch_monos = [valid_results[i]["mono_48k_np"].squeeze(0) for i in batch_indices]
 
             # Step 1: parallel mel spectrogram computation across workers
             # Save mono arrays to temp .npy files to avoid pipe serialization bottleneck
             # (710 clips × ~2MB each = ~1.4GB through pipes causes hangs)
             import tempfile
-            print(f"[VideoQualityFilter] Phase 2a: CLAP preprocessing {len(batch_monos)} clips "
+            print(f"[VideoQualityFilter] Phase 2a: CLAP preprocessing {len(batch_indices)} clips "
                   f"with {num_workers} workers...", flush=True)
             t_pre = time.time()
             with tempfile.TemporaryDirectory() as tmpdir:
                 npy_paths = []
-                for i, mono in enumerate(batch_monos):
-                    p = os.path.join(tmpdir, f"{i}.npy")
-                    np.save(p, mono)
+                for j, bi in enumerate(batch_indices):
+                    p = os.path.join(tmpdir, f"{j}.npy")
+                    np.save(p, valid_results[bi]["mono_48k_np"].squeeze(0))
                     npy_paths.append(p)
+                # Free mono arrays from results to reduce memory
+                for bi in batch_indices:
+                    del valid_results[bi]["mono_48k_np"]
                 if sys.platform == "win32":
                     # Windows: threads avoid spawn-mode CUDA crashes
                     _init_clap_worker()  # init in main thread

@@ -692,9 +692,15 @@ class FoleyTuneDatasetQualityFilter:
             names = [item["name"] for item in dataset]
             groups = group_by_source(names)
 
-            # Find quietest segment per source as noise reference
+            # Find quietest segment per source as noise reference.
+            # For single-segment sources, use None (let noisereduce auto-detect
+            # from the clip itself) — using the only segment as y_noise would
+            # treat the entire signal as noise and over-denoise.
             noise_profiles = {}
             for prefix, indices in groups.items():
+                if len(indices) < 2:
+                    noise_profiles[prefix] = None
+                    continue
                 best_idx, best_rms = indices[0], float("inf")
                 for idx in indices:
                     wav = dataset[idx]["waveform"][0].float().cpu()
@@ -735,7 +741,7 @@ class FoleyTuneDatasetQualityFilter:
                     denoised = denoised / peak
 
                 new_item = dict(item)
-                new_item["waveform"] = torch.from_numpy(denoised).unsqueeze(0)
+                new_item["waveform"] = torch.from_numpy(denoised).float().unsqueeze(0)
                 denoised_dataset.append(new_item)
 
             dataset = denoised_dataset

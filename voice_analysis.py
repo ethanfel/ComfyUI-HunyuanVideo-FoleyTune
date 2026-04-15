@@ -100,6 +100,22 @@ def generate_descriptor(median_f0: float, mean_hnr: float,
     return f"{breath} {pitch} {gender}"
 
 
+def waveform_to_mono_numpy(wav) -> "np.ndarray":
+    """Convert a waveform (torch tensor or numpy array) to mono 1D numpy.
+
+    Handles [1, C, L] torch tensors, [C, L] numpy arrays, etc.
+    """
+    if hasattr(wav, "numpy"):
+        wav_np = wav[0].cpu().numpy()  # [C, L]
+    elif isinstance(wav, np.ndarray):
+        wav_np = wav[0]
+    else:
+        wav_np = np.array(wav)[0]
+    if wav_np.ndim > 1:
+        wav_np = wav_np.mean(axis=0)  # mono [L]
+    return wav_np
+
+
 def tag_prompt(prompt: str, descriptor: str, position: str = "prepend") -> str:
     """Prepend or append a voice descriptor to a prompt.
 

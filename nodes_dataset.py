@@ -2299,11 +2299,11 @@ class FoleyTuneVoiceTagger:
     def tag_voices(self, dataset, num_speakers, samples_per_source,
                    min_f0_female=165.0, descriptor_mode="auto",
                    custom_descriptors="", tag_position="prepend"):
-        import re
         import json
+        import re
         from voice_analysis import (
             extract_voice_features, group_by_source, sample_indices,
-            generate_descriptor, tag_prompt,
+            generate_descriptor, tag_prompt, waveform_to_mono_numpy,
         )
 
         names = [item["name"] for item in dataset]
@@ -2317,6 +2317,7 @@ class FoleyTuneVoiceTagger:
         # --- Analyze samples per source ---
         source_features = {}  # prefix -> {median_f0, mean_hnr}
         for prefix, indices in sorted(groups.items()):
+            throw_exception_if_processing_interrupted()
             pick = sample_indices(len(indices), samples_per_source)
             sampled_indices = [indices[i] for i in pick]
             sampled_names = [names[i] for i in sampled_indices]
@@ -2324,19 +2325,8 @@ class FoleyTuneVoiceTagger:
             f0s, hnrs = [], []
             for idx in sampled_indices:
                 item = dataset[idx]
-                wav = item["waveform"]
-                sr = item["sample_rate"]
-                # Convert to mono numpy — waveform is [1, C, L] torch tensor
-                if hasattr(wav, "numpy"):
-                    wav_np = wav[0].numpy()  # [C, L]
-                elif isinstance(wav, np.ndarray):
-                    wav_np = wav[0]
-                else:
-                    wav_np = np.array(wav)[0]
-                if wav_np.ndim > 1:
-                    wav_np = wav_np.mean(axis=0)  # mono [L]
-
-                feats = extract_voice_features(wav_np, sr)
+                wav_np = waveform_to_mono_numpy(item["waveform"])
+                feats = extract_voice_features(wav_np, item["sample_rate"])
                 f0s.append(feats["median_f0"])
                 hnrs.append(feats["mean_hnr"])
 
@@ -2353,7 +2343,10 @@ class FoleyTuneVoiceTagger:
         # --- Generate descriptors ---
         source_descriptors = {}
         if descriptor_mode == "custom" and custom_descriptors.strip():
-            source_descriptors = json.loads(custom_descriptors)
+            try:
+                source_descriptors = json.loads(custom_descriptors)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid custom_descriptors JSON: {e}") from e
         elif num_speakers <= 2:
             # Simple F0 threshold split
             for prefix, feats in source_features.items():
@@ -2375,21 +2368,13 @@ class FoleyTuneVoiceTagger:
             encoder = VoiceEncoder()
             source_embeddings = {}
             for prefix, indices in groups.items():
+                throw_exception_if_processing_interrupted()
                 pick = sample_indices(len(indices), samples_per_source)
                 embeds = []
                 for i in pick:
                     item = dataset[indices[i]]
-                    wav = item["waveform"]
-                    sr = item["sample_rate"]
-                    if hasattr(wav, "numpy"):
-                        wav_np = wav[0].numpy()
-                    elif isinstance(wav, np.ndarray):
-                        wav_np = wav[0]
-                    else:
-                        wav_np = np.array(wav)[0]
-                    if wav_np.ndim > 1:
-                        wav_np = wav_np.mean(axis=0)
-                    processed = preprocess_wav(wav_np, source_sr=sr)
+                    wav_np = waveform_to_mono_numpy(item["waveform"])
+                    processed = preprocess_wav(wav_np, source_sr=item["sample_rate"])
                     embeds.append(encoder.embed_utterance(processed))
                 source_embeddings[prefix] = np.mean(embeds, axis=0)
 
@@ -2417,27 +2402,31 @@ class FoleyTuneVoiceTagger:
         lines.append(json.dumps(source_descriptors, indent=2))
         lines.append("")
 
-        # --- Apply tags to dataset ---
+        # --- Apply tags to dataset (shallow copy, don't mutate input) ---
+        out = []
         tagged_count = 0
         for item in dataset:
             name = item["name"]
             prefix = re.sub(r"_\d+$", "", name)
             descriptor = source_descriptors.get(prefix, "")
             if descriptor:
-                old_prompt = item.get("prompt", "")
-                item["prompt"] = tag_prompt(old_prompt, descriptor, tag_position)
+                new_item = dict(item)
+                new_item["prompt"] = tag_prompt(item.get("prompt", ""), descriptor, tag_position)
+                out.append(new_item)
                 tagged_count += 1
+            else:
+                out.append(item)
 
         lines.append(f"Tagged {tagged_count}/{len(dataset)} clips")
 
         # Show a few examples
         lines.append("")
         lines.append("Examples:")
-        for item in dataset[:5]:
+        for item in out[:5]:
             lines.append(f"  {item['name']}: \"{item.get('prompt', '')}\"")
 
         report = "\n".join(lines)
-        return (dataset, report)
+        return (out, report)
 
 
 # ─── Node 13: Retag NPZ ─────────────────────────────────────────────────────
@@ -2492,7 +2481,10 @@ class FoleyTuneRetagNPZ:
         if not npz_dir.exists():
             raise FileNotFoundError(f"NPZ directory not found: {npz_dir}")
 
-        descriptors = json.loads(tag_map)
+        try:
+            descriptors = json.loads(tag_map)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid tag_map JSON: {e}") from e
         if not descriptors:
             return ("No tag_map provided, nothing to do.",)
 
@@ -2512,47 +2504,48 @@ class FoleyTuneRetagNPZ:
         updated = 0
         skipped = 0
 
-        # Load CLAP once
         hunyuan_deps.clap_model.to(device)
+        try:
+            for npz_path in npz_files:
+                throw_exception_if_processing_interrupted()
+                stem = npz_path.stem
+                prefix = re.sub(r"_\d+$", "", stem)
 
-        for npz_path in npz_files:
-            stem = npz_path.stem
-            prefix = re.sub(r"_\d+$", "", stem)
+                descriptor = descriptors.get(prefix)
+                if not descriptor:
+                    skipped += 1
+                    continue
 
-            descriptor = descriptors.get(prefix)
-            if not descriptor:
-                skipped += 1
-                continue
+                # Load existing data
+                data = dict(np.load(str(npz_path), allow_pickle=True))
+                old_prompt = str(data.get("prompt", ""))
+                new_prompt = tag_prompt(old_prompt, descriptor, tag_position)
 
-            # Load existing data
-            data = dict(np.load(str(npz_path), allow_pickle=True))
-            old_prompt = str(data.get("prompt", ""))
-            new_prompt = tag_prompt(old_prompt, descriptor, tag_position)
+                if new_prompt == old_prompt:
+                    skipped += 1
+                    continue
 
-            if new_prompt == old_prompt:
-                skipped += 1
-                continue
+                # Re-encode CLAP text embedding
+                text_inputs = hunyuan_deps.clap_tokenizer(
+                    [new_prompt], padding=True, truncation=True, max_length=100,
+                    return_tensors="pt"
+                ).to(device)
+                with torch.no_grad():
+                    clap_outputs = hunyuan_deps.clap_model(
+                        **text_inputs, output_hidden_states=True, return_dict=True
+                    )
+                new_text_embedding = clap_outputs.last_hidden_state.cpu().float().numpy()
 
-            # Re-encode CLAP text embedding
-            text_inputs = hunyuan_deps.clap_tokenizer(
-                [new_prompt], padding=True, truncation=True, max_length=100,
-                return_tensors="pt"
-            ).to(device)
-            with torch.no_grad():
-                clap_outputs = hunyuan_deps.clap_model(
-                    **text_inputs, output_hidden_states=True, return_dict=True
-                )
-            new_text_embedding = clap_outputs.last_hidden_state.cpu().float().numpy()
+                # Save updated NPZ
+                data["prompt"] = new_prompt
+                data["text_embedding"] = new_text_embedding
+                np.savez(str(npz_path.with_suffix("")), **data)
 
-            # Save updated NPZ
-            data["prompt"] = new_prompt
-            data["text_embedding"] = new_text_embedding
-            np.savez(str(npz_path.with_suffix("")), **data)
-
-            lines.append(f"  {stem}: \"{old_prompt}\" → \"{new_prompt}\"")
-            updated += 1
-
-        hunyuan_deps.clap_model.to(offload_device)
+                lines.append(f"  {stem}: \"{old_prompt}\" → \"{new_prompt}\"")
+                updated += 1
+        finally:
+            hunyuan_deps.clap_model.to(offload_device)
+            torch.cuda.empty_cache()
 
         lines.append("")
         lines.append(f"Updated: {updated}, Skipped: {skipped}")

@@ -1949,6 +1949,60 @@ def _save_eval_chart(ref_avg, adapter_results, path):
     plt.close(fig)
 
 
+# --- Node 8: Checkpoint Finalizer --------------------------------------------
+
+
+class FoleyTuneCheckpointFinalizer:
+    """Strip optimizer/scheduler state from a training checkpoint.
+
+    Converts an intermediate checkpoint (with resume data) into a final
+    adapter file — smaller and faster to load for inference.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "checkpoint_path": ("STRING", {
+                    "default": "",
+                    "tooltip": "Path to a training checkpoint .pt file.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("final_path",)
+    FUNCTION = "finalize"
+    CATEGORY = "FoleyTune"
+    OUTPUT_NODE = True
+
+    def finalize(self, checkpoint_path):
+        if not checkpoint_path or not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+        if "state_dict" not in ckpt:
+            raise ValueError("Not a valid training checkpoint (no state_dict)")
+
+        final = {"state_dict": ckpt["state_dict"], "meta": ckpt.get("meta", {})}
+
+        removed = []
+        for key in ("optimizer", "scheduler", "step"):
+            if key in ckpt:
+                removed.append(key)
+
+        out_path = checkpoint_path.replace(".pt", "_final.pt")
+        torch.save(final, out_path)
+
+        size_before = os.path.getsize(checkpoint_path) / (1024 * 1024)
+        size_after = os.path.getsize(out_path) / (1024 * 1024)
+        logger.info(f"Finalized checkpoint: {size_before:.1f} MB -> {size_after:.1f} MB "
+                    f"(removed: {', '.join(removed) or 'nothing'})")
+
+        return (out_path,)
+
+
 # --- Node Mappings -----------------------------------------------------------
 
 NODE_CLASS_MAPPINGS = {
@@ -1959,6 +2013,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneLoRAScheduler": FoleyTuneLoRAScheduler,
     "FoleyTuneLoRAEvaluator": FoleyTuneLoRAEvaluator,
     "FoleyTuneVAERoundtrip": FoleyTuneVAERoundtrip,
+    "FoleyTuneCheckpointFinalizer": FoleyTuneCheckpointFinalizer,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1969,4 +2024,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneLoRAScheduler": "FoleyTune LoRA Scheduler",
     "FoleyTuneLoRAEvaluator": "FoleyTune LoRA Evaluator",
     "FoleyTuneVAERoundtrip": "FoleyTune VAE Roundtrip",
+    "FoleyTuneCheckpointFinalizer": "FoleyTune Checkpoint Finalizer",
 }

@@ -620,6 +620,10 @@ class FoleyTuneDatasetQualityFilter:
                     "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.1,
                     "tooltip": "Soft influence: how much CLAP text similarity contributes to the composite score (composite = w_bw*BW + w_sq*SQ + w_cl*CL). Higher = prioritize prompt-matching content.",
                 }),
+                "denoise_settings": (FOLEYTUNE_DENOISE_SETTINGS, {
+                    "tooltip": "Connect a Denoiser Settings node to denoise clips "
+                               "before scoring. Denoised audio flows downstream.",
+                }),
             },
         }
 
@@ -640,7 +644,8 @@ class FoleyTuneDatasetQualityFilter:
                        min_clap_score: float = 0.0,
                        weight_bandwidth: float = 0.4,
                        weight_spectral: float = 0.4,
-                       weight_clap: float = 0.2):
+                       weight_clap: float = 0.2,
+                       denoise_settings=None):
         use_clap = bool(clap_prompt.strip())
         clap_model = None
         clap_processor = None
@@ -673,6 +678,69 @@ class FoleyTuneDatasetQualityFilter:
         w_bw = weight_bandwidth / w_total
         w_sq = weight_spectral / w_total
         w_cl = (weight_clap / w_total) if use_clap else 0.0
+
+        # --- Optional denoising pass ---
+        if denoise_settings is not None and denoise_settings["strength"] > 0:
+            import re
+            import noisereduce as nr
+            from voice_analysis import group_by_source
+
+            strength = denoise_settings["strength"]
+            stationary = denoise_settings["stationary"]
+            n_fft = denoise_settings["n_fft"]
+
+            names = [item["name"] for item in dataset]
+            groups = group_by_source(names)
+
+            # Find quietest segment per source as noise reference
+            noise_profiles = {}
+            for prefix, indices in groups.items():
+                best_idx, best_rms = indices[0], float("inf")
+                for idx in indices:
+                    wav = dataset[idx]["waveform"][0].float().cpu()
+                    rms = wav.pow(2).mean().sqrt().item()
+                    if rms < best_rms:
+                        best_rms = rms
+                        best_idx = idx
+                quiet_wav = dataset[best_idx]["waveform"][0].float().cpu().numpy()
+                noise_profiles[prefix] = (
+                    quiet_wav.mean(axis=0) if quiet_wav.ndim > 1 else quiet_wav
+                )
+
+            # Denoise each clip
+            denoised_dataset = []
+            for item in dataset:
+                throw_exception_if_processing_interrupted()
+                wav = item["waveform"][0].float()
+                sr = item["sample_rate"]
+                wav_np = wav.cpu().numpy()
+                rms_in = np.sqrt(np.mean(wav_np ** 2)).clip(1e-8)
+
+                prefix = re.sub(r"_\d+$", "", item["name"])
+                y_noise = noise_profiles.get(prefix)
+
+                denoised = np.stack([
+                    nr.reduce_noise(
+                        y=wav_np[c], sr=sr, y_noise=y_noise,
+                        prop_decrease=strength, stationary=stationary,
+                        n_fft=n_fft,
+                    )
+                    for c in range(wav_np.shape[0])
+                ])
+
+                rms_out = np.sqrt(np.mean(denoised ** 2)).clip(1e-8)
+                denoised = denoised * (rms_in / rms_out)
+                peak = np.abs(denoised).max()
+                if peak > 1.0:
+                    denoised = denoised / peak
+
+                new_item = dict(item)
+                new_item["waveform"] = torch.from_numpy(denoised).unsqueeze(0)
+                denoised_dataset.append(new_item)
+
+            dataset = denoised_dataset
+            print(f"[QualityFilter] Denoised {len(dataset)} clips  "
+                  f"strength={strength}  stationary={stationary}", flush=True)
 
         passed = []
         rejected = []

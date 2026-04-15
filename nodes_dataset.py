@@ -2440,6 +2440,127 @@ class FoleyTuneVoiceTagger:
         return (dataset, report)
 
 
+# ─── Node 13: Retag NPZ ─────────────────────────────────────────────────────
+
+
+class FoleyTuneRetagNPZ:
+    """Update prompt and CLAP text embedding in existing NPZ files.
+
+    Re-encodes prompts with voice descriptors without re-extracting
+    visual features (SigLIP2, Synchformer). Only updates text_embedding
+    and prompt fields.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
+                "npz_dir": ("STRING", {
+                    "default": "",
+                    "tooltip": "Path to folder with existing .npz files to update.",
+                }),
+                "tag_map": ("STRING", {
+                    "default": "{}",
+                    "multiline": True,
+                    "tooltip": 'JSON: {"clip_001": "breathy high-pitched female", ...}. '
+                               'Copy from VoiceTagger report output.',
+                }),
+            },
+            "optional": {
+                "tag_position": (["prepend", "append"], {"default": "prepend"}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("report",)
+    FUNCTION = "retag_npz"
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
+    OUTPUT_NODE = True
+    DESCRIPTION = (
+        "Update prompt and CLAP text embedding in existing NPZ files. "
+        "Only re-computes text embeddings — visual features are untouched."
+    )
+
+    def retag_npz(self, hunyuan_deps, npz_dir, tag_map, tag_position="prepend"):
+        import json
+        import re
+        import comfy.model_management as mm
+        from voice_analysis import tag_prompt
+
+        npz_dir = Path(npz_dir.strip())
+        if not npz_dir.exists():
+            raise FileNotFoundError(f"NPZ directory not found: {npz_dir}")
+
+        descriptors = json.loads(tag_map)
+        if not descriptors:
+            return ("No tag_map provided, nothing to do.",)
+
+        npz_files = sorted(npz_dir.glob("*.npz"))
+        if not npz_files:
+            return (f"No .npz files found in {npz_dir}",)
+
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+
+        lines = ["=== RetagNPZ Report ===", ""]
+        lines.append(f"Directory: {npz_dir}")
+        lines.append(f"NPZ files: {len(npz_files)}")
+        lines.append(f"Tag map entries: {len(descriptors)}")
+        lines.append("")
+
+        updated = 0
+        skipped = 0
+
+        # Load CLAP once
+        hunyuan_deps.clap_model.to(device)
+
+        for npz_path in npz_files:
+            stem = npz_path.stem
+            prefix = re.sub(r"_\d+$", "", stem)
+
+            descriptor = descriptors.get(prefix)
+            if not descriptor:
+                skipped += 1
+                continue
+
+            # Load existing data
+            data = dict(np.load(str(npz_path), allow_pickle=True))
+            old_prompt = str(data.get("prompt", ""))
+            new_prompt = tag_prompt(old_prompt, descriptor, tag_position)
+
+            if new_prompt == old_prompt:
+                skipped += 1
+                continue
+
+            # Re-encode CLAP text embedding
+            text_inputs = hunyuan_deps.clap_tokenizer(
+                [new_prompt], padding=True, truncation=True, max_length=100,
+                return_tensors="pt"
+            ).to(device)
+            with torch.no_grad():
+                clap_outputs = hunyuan_deps.clap_model(
+                    **text_inputs, output_hidden_states=True, return_dict=True
+                )
+            new_text_embedding = clap_outputs.last_hidden_state.cpu().float().numpy()
+
+            # Save updated NPZ
+            data["prompt"] = new_prompt
+            data["text_embedding"] = new_text_embedding
+            np.savez(str(npz_path.with_suffix("")), **data)
+
+            lines.append(f"  {stem}: \"{old_prompt}\" → \"{new_prompt}\"")
+            updated += 1
+
+        hunyuan_deps.clap_model.to(offload_device)
+
+        lines.append("")
+        lines.append(f"Updated: {updated}, Skipped: {skipped}")
+
+        report = "\n".join(lines)
+        return (report,)
+
+
 # ─── Node Mappings ───────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
@@ -2460,6 +2581,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneOutputNormalizer": FoleyTuneOutputNormalizer,
     "FoleyTuneDatasetBrowser": FoleyTuneDatasetBrowser,
     "FoleyTuneVoiceTagger": FoleyTuneVoiceTagger,
+    "FoleyTuneRetagNPZ": FoleyTuneRetagNPZ,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -2480,4 +2602,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneOutputNormalizer": "FoleyTune Output Normalizer",
     "FoleyTuneDatasetBrowser": "FoleyTune Dataset Browser",
     "FoleyTuneVoiceTagger": "FoleyTune Voice Tagger",
+    "FoleyTuneRetagNPZ": "FoleyTune Retag NPZ",
 }

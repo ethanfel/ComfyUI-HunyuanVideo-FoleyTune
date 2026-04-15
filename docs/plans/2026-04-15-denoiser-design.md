@@ -45,13 +45,17 @@ Lightweight, no ML models needed, adjustable strength.
 
 ### Algorithm
 
-1. For each clip, extract mono numpy from `[1, C, L]` waveform using
-   `waveform_to_mono_numpy` helper.
-2. Call `noisereduce.reduce_noise(y=wav, sr=sr, prop_decrease=strength,
-   stationary=stationary, n_fft=n_fft)`.
-3. Preserve RMS level — match output RMS to input RMS, clip peaks > 1.0.
-4. Shallow-copy item dict, update waveform key.
-5. Report: clip name, noise reduction in dB.
+1. Group clips by source prefix (reuse `group_by_source` from voice_analysis).
+2. Per source group, find the segment with lowest RMS — this is the quietest
+   segment and best proxy for "pure noise". Use it as `y_noise` for all
+   segments of the same source. This handles the case where individual
+   segments have no silence but other segments from the same source do.
+3. For each clip, call `noisereduce.reduce_noise(y=wav, sr=sr,
+   y_noise=noise_profile, prop_decrease=strength, stationary=stationary,
+   n_fft=n_fft)`.
+4. Preserve RMS level — match output RMS to input RMS, clip peaks > 1.0.
+5. Shallow-copy item dict, update waveform key.
+6. Report: per-source noise reference segment, per-clip noise reduction in dB.
 
 ### Pipeline Position
 

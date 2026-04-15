@@ -95,6 +95,7 @@ class FoleyTuneDatasetDenoiser:
     )
 
     def denoise(self, dataset, strength=0.7, stationary=True, n_fft=2048):
+        import re
         import noisereduce as nr
 
         out = []
@@ -103,6 +104,32 @@ class FoleyTuneDatasetDenoiser:
                       f"Stationary: {stationary}, n_fft: {n_fft}")
         lines.append("")
 
+        # --- Group by source and find quietest segment per source ---
+        # Individual segments may lack silence for noise profile estimation,
+        # but the quietest segment from the same source video is a good proxy.
+        from voice_analysis import group_by_source
+        names = [item["name"] for item in dataset]
+        groups = group_by_source(names)
+
+        # For each source, find the segment with lowest RMS (most noise-like)
+        noise_profiles = {}  # prefix -> mono numpy array of quietest segment
+        for prefix, indices in groups.items():
+            best_idx, best_rms = indices[0], float("inf")
+            for idx in indices:
+                wav = dataset[idx]["waveform"][0].float().cpu()
+                rms = wav.pow(2).mean().sqrt().item()
+                if rms < best_rms:
+                    best_rms = rms
+                    best_idx = idx
+            quiet_wav = dataset[best_idx]["waveform"][0].float().cpu().numpy()
+            # Use mono for noise profile
+            noise_profiles[prefix] = quiet_wav.mean(axis=0) if quiet_wav.ndim > 1 else quiet_wav
+            lines.append(f"  {prefix}: noise ref = {dataset[best_idx]['name']} "
+                          f"(RMS={best_rms:.4f})")
+
+        lines.append("")
+
+        # --- Denoise each clip using its source's noise profile ---
         for item in dataset:
             throw_exception_if_processing_interrupted()
             wav = item["waveform"][0].float()  # [C, L]
@@ -111,10 +138,15 @@ class FoleyTuneDatasetDenoiser:
             wav_np = wav.cpu().numpy()  # [C, L]
             rms_in = np.sqrt(np.mean(wav_np ** 2)).clip(1e-8)
 
+            # Look up noise profile for this source
+            prefix = re.sub(r"_\d+$", "", item["name"])
+            y_noise = noise_profiles.get(prefix)
+
             # Process each channel
             denoised = np.stack([
                 nr.reduce_noise(
                     y=wav_np[c], sr=sr,
+                    y_noise=y_noise,
                     prop_decrease=strength,
                     stationary=stationary,
                     n_fft=n_fft,
@@ -137,7 +169,7 @@ class FoleyTuneDatasetDenoiser:
             out.append(new_item)
 
             reduction_db = 20 * np.log10(rms_out / rms_in + 1e-8)
-            lines.append(f"  {item['name']}: noise floor {reduction_db:+.1f}dB")
+            lines.append(f"  {item['name']}: noise {reduction_db:+.1f}dB")
 
         lines.append("")
         lines.append(f"Denoised {len(out)} clips")

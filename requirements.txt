@@ -26,6 +26,7 @@ soundfile
 soxr
 pyloudnorm
 pedalboard
+praat-parselmouth
 
 # LoRA training (loss curves, eval charts)
 matplotlib

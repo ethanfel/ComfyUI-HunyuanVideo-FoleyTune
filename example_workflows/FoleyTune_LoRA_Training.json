@@ -818,96 +818,6 @@
       "widgets_values": {}
     },
     {
-      "id": 40,
-      "type": "VHS_VideoCombine",
-      "pos": [
-        3168,
-        1120
-      ],
-      "size": [
-        416,
-        334
-      ],
-      "flags": {},
-      "order": 30,
-      "mode": 2,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 55
-        },
-        {
-          "name": "audio",
-          "shape": 7,
-          "type": "AUDIO",
-          "link": 79
-        },
-        {
-          "name": "meta_batch",
-          "shape": 7,
-          "type": "VHS_BatchManager",
-          "link": null
-        },
-        {
-          "name": "vae",
-          "shape": 7,
-          "type": "VAE",
-          "link": null
-        },
-        {
-          "name": "frame_rate",
-          "type": "FLOAT",
-          "widget": {
-            "name": "frame_rate"
-          },
-          "link": 56
-        }
-      ],
-      "outputs": [
-        {
-          "name": "Filenames",
-          "type": "VHS_FILENAMES",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-videohelpersuite",
-        "ver": "1.7.9",
-        "Node name for S&R": "VHS_VideoCombine",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": {
-        "frame_rate": 8,
-        "loop_count": 0,
-        "filename_prefix": "AnimateDiff",
-        "format": "video/h264-mp4",
-        "pix_fmt": "yuv420p",
-        "crf": 19,
-        "save_metadata": true,
-        "trim_to_audio": false,
-        "pingpong": false,
-        "save_output": true,
-        "videopreview": {
-          "hidden": false,
-          "paused": false,
-          "params": {
-            "filename": "AnimateDiff_00068-audio.mp4",
-            "subfolder": "",
-            "type": "output",
-            "format": "video/h264-mp4",
-            "frame_rate": 64,
-            "workflow": "AnimateDiff_00068.png",
-            "fullpath": "/media/unraid/comfyui/output/AnimateDiff_00068-audio.mp4"
-          }
-        }
-      }
-    },
-    {
       "id": 26,
       "type": "PreviewAny",
       "pos": [
@@ -1872,15 +1782,105 @@
       ]
     },
     {
+      "id": 40,
+      "type": "VHS_VideoCombine",
+      "pos": [
+        3168,
+        1120
+      ],
+      "size": [
+        416,
+        334
+      ],
+      "flags": {},
+      "order": 30,
+      "mode": 2,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 55
+        },
+        {
+          "name": "audio",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": 79
+        },
+        {
+          "name": "meta_batch",
+          "shape": 7,
+          "type": "VHS_BatchManager",
+          "link": null
+        },
+        {
+          "name": "vae",
+          "shape": 7,
+          "type": "VAE",
+          "link": null
+        },
+        {
+          "name": "frame_rate",
+          "type": "FLOAT",
+          "widget": {
+            "name": "frame_rate"
+          },
+          "link": 56
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Filenames",
+          "type": "VHS_FILENAMES",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-videohelpersuite",
+        "ver": "1.7.9",
+        "Node name for S&R": "VHS_VideoCombine",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": {
+        "frame_rate": 8,
+        "loop_count": 0,
+        "filename_prefix": "FoleyTune/vid",
+        "format": "video/h264-mp4",
+        "pix_fmt": "yuv420p",
+        "crf": 19,
+        "save_metadata": true,
+        "trim_to_audio": false,
+        "pingpong": false,
+        "save_output": true,
+        "videopreview": {
+          "hidden": false,
+          "paused": false,
+          "params": {
+            "filename": "AnimateDiff_00068-audio.mp4",
+            "subfolder": "",
+            "type": "output",
+            "format": "video/h264-mp4",
+            "frame_rate": 64,
+            "workflow": "AnimateDiff_00068.png",
+            "fullpath": "/media/unraid/comfyui/output/AnimateDiff_00068-audio.mp4"
+          }
+        }
+      }
+    },
+    {
       "id": 57,
       "type": "Note",
       "pos": [
         -96,
-        -300
+        -320
       ],
       "size": [
-        640,
-        300
+        608,
+        320
       ],
       "flags": {},
       "order": 7,
@@ -1898,7 +1898,7 @@
         "font_size": 18
       },
       "widgets_values": [
-        "HOW TO TRAIN A FOLEYTUNE LoRA\n\n1. Set your paths in the 3 purple string boxes below (Prompt, Input Folder, Output Folder)\n2. Run Step 1 (data pipeline) to filter, process, and extract features from your clips\n3. Copy the sweep.json path from Step 1's DatasetSaver output into the LoRA Scheduler\n4. Bypass Step 1 nodes, enable Step 2, and run training\n5. After training, enable Step 3 to test your adapter\n\nMinimum VRAM: 13 GB (bf16) or 8 GB (fp8)\nFull guide: LORA_TRAINING.md (in the custom node folder)"
+        "HOW TO TRAIN A FOLEYTUNE LoRA\n\n1. Set your paths in the 3 purple string boxes below (Prompt, Input Folder, Output Folder)\n2. Run Step 1 (data pipeline) to filter, process, and extract features from your clips\n3. Copy the sweep.json path from Step 1's DatasetSaver output into the LoRA Scheduler\n4. Bypass Step 1 nodes, enable Step 2, and run training\n5. After training, enable Step 3 to test your adapter\n\nMinimum VRAM: 13 GB (bf16) or 8 GB (fp8)\nFull guide: LORA_TRAINING.md (in the custom node folder)\n\nhttps://github.com/ethanfel/ComfyUI-HunyuanVideo-FoleyTune/blob/main/LORA_TRAINING.md"
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1908,11 +1908,11 @@
       "type": "Note",
       "pos": [
         544,
-        -300
+        -320
       ],
       "size": [
-        560,
-        300
+        576,
+        320
       ],
       "flags": {},
       "order": 8,
@@ -1940,11 +1940,11 @@
       "type": "Note",
       "pos": [
         2048,
-        -300
+        -320
       ],
       "size": [
-        580,
-        300
+        608,
+        320
       ],
       "flags": {},
       "order": 9,
@@ -2397,10 +2397,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.48405323957813673,
+      "scale": 0.4000439996513535,
       "offset": [
-        3895.405048329437,
-        598.7805639921138
+        4561.704811787658,
+        1136.396786581941
       ]
     },
     "ue_links": [],

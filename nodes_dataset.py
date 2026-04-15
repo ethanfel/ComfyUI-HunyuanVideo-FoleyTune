@@ -442,6 +442,41 @@ class FoleyTuneDatasetInspector:
         return (clean, report)
 
 
+# ─── Denoise worker (used by both quality filters) ─────────────────────────
+
+
+def _denoise_clip(args):
+    """Denoise a single clip (designed for ProcessPoolExecutor).
+
+    Args:
+        args: tuple of (wav_np, sr, y_noise, strength, stationary, n_fft)
+
+    Returns:
+        denoised numpy array [C, L], float32
+    """
+    import noisereduce as nr
+    wav_np, sr, y_noise, strength, stationary, n_fft = args
+
+    rms_in = np.sqrt(np.mean(wav_np ** 2)).clip(1e-8)
+
+    denoised = np.stack([
+        nr.reduce_noise(
+            y=wav_np[c], sr=sr, y_noise=y_noise,
+            prop_decrease=strength, stationary=stationary,
+            n_fft=n_fft,
+        )
+        for c in range(wav_np.shape[0])
+    ])
+
+    rms_out = np.sqrt(np.mean(denoised ** 2)).clip(1e-8)
+    denoised = denoised * (rms_in / rms_out)
+    peak = np.abs(denoised).max()
+    if peak > 1.0:
+        denoised = denoised / peak
+
+    return denoised.astype(np.float32)
+
+
 # ─── Node 5b: Dataset Quality Filter ────────────────────────────────────────
 
 
@@ -682,7 +717,6 @@ class FoleyTuneDatasetQualityFilter:
         # --- Optional denoising pass ---
         if denoise_settings is not None and denoise_settings["strength"] > 0:
             import re
-            import noisereduce as nr
             from voice_analysis import group_by_source
 
             strength = denoise_settings["strength"]
@@ -713,41 +747,53 @@ class FoleyTuneDatasetQualityFilter:
                     quiet_wav.mean(axis=0) if quiet_wav.ndim > 1 else quiet_wav
                 )
 
-            # Denoise each clip
-            print(f"[QualityFilter] Denoising {len(dataset)} clips...", flush=True)
-            t_dn = time.time()
-            denoised_dataset = []
-            for di, item in enumerate(dataset):
-                throw_exception_if_processing_interrupted()
-                wav = item["waveform"][0].float()
-                sr = item["sample_rate"]
-                wav_np = wav.cpu().numpy()
-                rms_in = np.sqrt(np.mean(wav_np ** 2)).clip(1e-8)
+            # Denoise each clip (parallel)
+            import sys, time
+            from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
+            n_workers = max(1, min(os.cpu_count() or 4, len(dataset)))
+            use_threads = sys.platform == "win32"
+            PoolClass = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
+            pool_type = "threads" if use_threads else "processes"
+
+            print(f"[QualityFilter] Denoising {len(dataset)} clips "
+                  f"with {n_workers} {pool_type}...", flush=True)
+            t_dn = time.time()
+
+            # Build args for each clip
+            denoise_args = []
+            for item in dataset:
+                wav_np = item["waveform"][0].float().cpu().numpy()
                 prefix = re.sub(r"_\d+$", "", item["name"])
                 y_noise = noise_profiles.get(prefix)
+                denoise_args.append((wav_np, item["sample_rate"], y_noise,
+                                     strength, stationary, n_fft))
 
-                denoised = np.stack([
-                    nr.reduce_noise(
-                        y=wav_np[c], sr=sr, y_noise=y_noise,
-                        prop_decrease=strength, stationary=stationary,
-                        n_fft=n_fft,
-                    )
-                    for c in range(wav_np.shape[0])
-                ])
+            # Submit all to pool
+            denoised_results = [None] * len(dataset)
+            with PoolClass(max_workers=n_workers) as pool:
+                futures = {pool.submit(_denoise_clip, a): i
+                           for i, a in enumerate(denoise_args)}
+                try:
+                    done = 0
+                    for future in as_completed(futures):
+                        throw_exception_if_processing_interrupted()
+                        idx = futures[future]
+                        denoised_results[idx] = future.result()
+                        done += 1
+                        if done % 10 == 0 or done == len(futures):
+                            print(f"  [{done}/{len(futures)}] denoised "
+                                  f"({time.time()-t_dn:.1f}s)", flush=True)
+                except:
+                    for f in futures:
+                        f.cancel()
+                    raise
 
-                rms_out = np.sqrt(np.mean(denoised ** 2)).clip(1e-8)
-                denoised = denoised * (rms_in / rms_out)
-                peak = np.abs(denoised).max()
-                if peak > 1.0:
-                    denoised = denoised / peak
-
+            denoised_dataset = []
+            for item, dn in zip(dataset, denoised_results):
                 new_item = dict(item)
-                new_item["waveform"] = torch.from_numpy(denoised).float().unsqueeze(0)
+                new_item["waveform"] = torch.from_numpy(dn).unsqueeze(0)
                 denoised_dataset.append(new_item)
-
-                if (di + 1) % 10 == 0 or (di + 1) == len(dataset):
-                    print(f"  [{di+1}/{len(dataset)}] denoised ({time.time()-t_dn:.1f}s)", flush=True)
 
             dataset = denoised_dataset
             print(f"[QualityFilter] Denoised {len(dataset)} clips  "
@@ -1130,7 +1176,6 @@ class FoleyTuneVideoQualityFilter:
         # --- Optional denoising pass (between extraction and CLAP/decisions) ---
         if denoise_settings is not None and denoise_settings["strength"] > 0:
             import re as _re
-            import noisereduce as nr
             from voice_analysis import group_by_source
 
             strength = denoise_settings["strength"]
@@ -1158,42 +1203,53 @@ class FoleyTuneVideoQualityFilter:
                     quiet_wav.mean(axis=0) if quiet_wav.ndim > 1 else quiet_wav
                 )
 
-            # Denoise each clip, recompute scores and CLAP mono
-            print(f"[VideoQualityFilter] Denoising {len(valid)} clips...", flush=True)
-            t_dn = time.time()
-            for i, r in enumerate(valid):
-                throw_exception_if_processing_interrupted()
-                wav = r["wav"][0].float()  # [C, L]
-                sr = r["sr"]
-                wav_np = wav.cpu().numpy()
-                rms_in = np.sqrt(np.mean(wav_np ** 2)).clip(1e-8)
+            # Denoise each clip (parallel), then recompute scores
+            use_threads = sys.platform == "win32"
+            PoolClass = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
+            n_dn_workers = max(1, min(num_workers, len(valid)))
+            pool_type = "threads" if use_threads else "processes"
 
+            print(f"[VideoQualityFilter] Denoising {len(valid)} clips "
+                  f"with {n_dn_workers} {pool_type}...", flush=True)
+            t_dn = time.time()
+
+            # Build args for parallel denoise
+            denoise_args = []
+            for i, r in enumerate(valid):
+                wav_np = r["wav"][0].float().cpu().numpy()
                 prefix = _re.sub(r"_\d+$", "", names[i])
                 y_noise = noise_profiles.get(prefix)
+                denoise_args.append((wav_np, r["sr"], y_noise,
+                                     strength, stationary, n_fft))
 
-                denoised = np.stack([
-                    nr.reduce_noise(
-                        y=wav_np[c], sr=sr, y_noise=y_noise,
-                        prop_decrease=strength, stationary=stationary,
-                        n_fft=n_fft,
-                    )
-                    for c in range(wav_np.shape[0])
-                ])
+            denoised_results = [None] * len(valid)
+            with PoolClass(max_workers=n_dn_workers) as pool:
+                futures = {pool.submit(_denoise_clip, a): i
+                           for i, a in enumerate(denoise_args)}
+                try:
+                    done = 0
+                    for future in as_completed(futures):
+                        throw_exception_if_processing_interrupted()
+                        idx = futures[future]
+                        denoised_results[idx] = future.result()
+                        done += 1
+                        if done % 10 == 0 or done == len(futures):
+                            print(f"  [{done}/{len(futures)}] denoised "
+                                  f"({time.time()-t_dn:.1f}s)", flush=True)
+                except:
+                    for f in futures:
+                        f.cancel()
+                    raise
 
-                rms_out = np.sqrt(np.mean(denoised ** 2)).clip(1e-8)
-                denoised = denoised * (rms_in / rms_out)
-                peak = np.abs(denoised).max()
-                if peak > 1.0:
-                    denoised = denoised / peak
-
-                new_wav = torch.from_numpy(denoised).float().unsqueeze(0)  # [1, C, L]
+            # Apply denoised audio and recompute scores (main thread — uses torch)
+            for i, r in enumerate(valid):
+                new_wav = torch.from_numpy(denoised_results[i]).unsqueeze(0)
                 r["wav"] = new_wav
+                sr = r["sr"]
 
-                # Recompute quality scores on denoised audio
                 r["bw"] = _bandwidth_score(new_wav, sr)
                 r["sq"] = _spectral_quality_score(new_wav, sr)
 
-                # Recompute CLAP mono if needed
                 if need_clap:
                     mono = new_wav[0].mean(0, keepdim=True)
                     if sr != 48000:
@@ -1202,9 +1258,7 @@ class FoleyTuneVideoQualityFilter:
                         mono_48k = mono
                     r["mono_48k_np"] = mono_48k.numpy()
 
-                if (i + 1) % 10 == 0 or (i + 1) == len(valid):
-                    print(f"  [{i+1}/{len(valid)}] denoised ({time.time()-t_dn:.1f}s)", flush=True)
-
+            denoised_results = None  # free memory
             print(f"[VideoQualityFilter] Denoised {len(valid)} clips  "
                   f"strength={strength}  stationary={stationary}", flush=True)
 

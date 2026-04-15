@@ -25,6 +25,7 @@ tqdm
 soundfile
 soxr
 pyloudnorm
+noisereduce
 pedalboard
 praat-parselmouth
 

@@ -45,7 +45,7 @@ git commit -m "chore: add praat-parselmouth dependency for voice analysis"
 ### Task 2: Voice analysis helpers
 
 **Files:**
-- Create: `dataset/voice_analysis.py`
+- Create: `voice_analysis.py` (project root, alongside `nodes_dataset.py`)
 
 **Step 1: Write the voice analysis module**
 
@@ -176,14 +176,14 @@ def tag_prompt(prompt: str, descriptor: str, position: str = "prepend") -> str:
 
 Run:
 ```bash
-python3 -c "from dataset.voice_analysis import extract_voice_features, group_by_source, sample_indices, generate_descriptor, tag_prompt; print('OK')"
+python3 -c "from voice_analysis import extract_voice_features, group_by_source, sample_indices, generate_descriptor, tag_prompt; print('OK')"
 ```
 Expected: `OK`
 
 **Step 3: Commit**
 
 ```bash
-git add dataset/voice_analysis.py
+git add voice_analysis.py
 git commit -m "feat: add voice analysis helpers (F0, HNR, grouping, descriptors)"
 ```
 
@@ -252,7 +252,9 @@ class FoleyTuneVoiceTagger:
     def tag_voices(self, dataset, num_speakers, samples_per_source,
                    min_f0_female=165.0, descriptor_mode="auto",
                    custom_descriptors="", tag_position="prepend"):
-        from dataset.voice_analysis import (
+        import re
+        import json
+        from voice_analysis import (
             extract_voice_features, group_by_source, sample_indices,
             generate_descriptor, tag_prompt,
         )
@@ -277,15 +279,15 @@ class FoleyTuneVoiceTagger:
                 item = dataset[idx]
                 wav = item["waveform"]
                 sr = item["sample_rate"]
-                # Convert to mono numpy
+                # Convert to mono numpy — waveform is [1, C, L] torch tensor
                 if hasattr(wav, "numpy"):
-                    wav_np = wav.squeeze().numpy()
+                    wav_np = wav[0].numpy()  # [C, L]
                 elif isinstance(wav, np.ndarray):
-                    wav_np = wav.squeeze()
+                    wav_np = wav[0]
                 else:
-                    wav_np = np.array(wav).squeeze()
+                    wav_np = np.array(wav)[0]
                 if wav_np.ndim > 1:
-                    wav_np = wav_np.mean(axis=0)
+                    wav_np = wav_np.mean(axis=0)  # mono [L]
 
                 feats = extract_voice_features(wav_np, sr)
                 f0s.append(feats["median_f0"])
@@ -304,7 +306,6 @@ class FoleyTuneVoiceTagger:
         # --- Generate descriptors ---
         source_descriptors = {}
         if descriptor_mode == "custom" and custom_descriptors.strip():
-            import json
             source_descriptors = json.loads(custom_descriptors)
         elif num_speakers <= 2:
             # Simple F0 threshold split
@@ -315,8 +316,14 @@ class FoleyTuneVoiceTagger:
                 )
         else:
             # Multi-speaker: use Resemblyzer clustering
-            from resemblyzer import VoiceEncoder, preprocess_wav
-            from sklearn.cluster import KMeans
+            try:
+                from resemblyzer import VoiceEncoder, preprocess_wav
+                from sklearn.cluster import KMeans
+            except ImportError as e:
+                raise ImportError(
+                    "num_speakers > 2 requires 'resemblyzer' and 'scikit-learn'. "
+                    "Install with: pip install resemblyzer scikit-learn"
+                ) from e
 
             encoder = VoiceEncoder()
             source_embeddings = {}
@@ -328,11 +335,11 @@ class FoleyTuneVoiceTagger:
                     wav = item["waveform"]
                     sr = item["sample_rate"]
                     if hasattr(wav, "numpy"):
-                        wav_np = wav.squeeze().numpy()
+                        wav_np = wav[0].numpy()
                     elif isinstance(wav, np.ndarray):
-                        wav_np = wav.squeeze()
+                        wav_np = wav[0]
                     else:
-                        wav_np = np.array(wav).squeeze()
+                        wav_np = np.array(wav)[0]
                     if wav_np.ndim > 1:
                         wav_np = wav_np.mean(axis=0)
                     processed = preprocess_wav(wav_np, source_sr=sr)
@@ -352,7 +359,6 @@ class FoleyTuneVoiceTagger:
                 source_descriptors[prefix] = desc
 
         # --- Tag map JSON for RetagNPZ ---
-        import json
         lines.append("Tag assignments:")
         for prefix in sorted(source_descriptors.keys()):
             desc = source_descriptors[prefix]
@@ -387,11 +393,7 @@ class FoleyTuneVoiceTagger:
         return (dataset, report)
 ```
 
-**Step 2: Add `re` import at top of file if not present**
-
-Check if `import re` exists at the top of `nodes_dataset.py`. If not, add it.
-
-**Step 3: Register the node in NODE_CLASS_MAPPINGS and NODE_DISPLAY_NAME_MAPPINGS**
+**Step 2: Register the node in NODE_CLASS_MAPPINGS and NODE_DISPLAY_NAME_MAPPINGS**
 
 In `NODE_CLASS_MAPPINGS` dict add:
 ```python
@@ -403,7 +405,7 @@ In `NODE_DISPLAY_NAME_MAPPINGS` dict add:
     "FoleyTuneVoiceTagger": "FoleyTune Voice Tagger",
 ```
 
-**Step 4: Verify node loads**
+**Step 3: Verify node loads**
 
 Run:
 ```bash
@@ -411,7 +413,7 @@ python3 -c "from nodes_dataset import FoleyTuneVoiceTagger; print('INPUT_TYPES:'
 ```
 Expected: `INPUT_TYPES: ['dataset', 'num_speakers', 'samples_per_source']` then `OK`
 
-**Step 5: Commit**
+**Step 4: Commit**
 
 ```bash
 git add nodes_dataset.py
@@ -472,7 +474,8 @@ class FoleyTuneRetagNPZ:
     def retag_npz(self, hunyuan_deps, npz_dir, tag_map, tag_position="prepend"):
         import json
         import re
-        from dataset.voice_analysis import tag_prompt
+        import comfy.model_management as mm
+        from voice_analysis import tag_prompt
 
         npz_dir = Path(npz_dir.strip())
         if not npz_dir.exists():
@@ -616,35 +619,18 @@ git commit -m "feat: BatchFeatureExtractor respects per-item prompt from VoiceTa
 
 ---
 
-### Task 6: Add torch import guard to RetagNPZ
-
-**Files:**
-- Modify: `nodes_dataset.py`
-
-**Step 1: Verify torch is imported at module level**
-
-Check that `import torch` exists at the top of `nodes_dataset.py`. The RetagNPZ node
-uses `torch.no_grad()`. If not present, add it to the existing imports.
-
-**Step 2: Commit if changed**
-
-```bash
-git add nodes_dataset.py
-git commit -m "fix: ensure torch import for RetagNPZ node"
-```
-
----
-
-### Task 7: End-to-end smoke test
+### Task 6: End-to-end smoke test
 
 **Step 1: Test the full VoiceTagger pipeline on a small dataset**
 
 ```bash
 python3 -c "
+import torch
 import numpy as np
 from nodes_dataset import FoleyTuneVoiceTagger
 
 # Create fake dataset with 2 'sources', 3 segments each
+# Waveforms are [1, C, L] torch tensors to match real pipeline format
 dataset = []
 for src in range(2):
     for seg in range(3):
@@ -654,8 +640,9 @@ for src in range(2):
         # Source 0: high pitch (300Hz), Source 1: low pitch (120Hz)
         freq = 300 if src == 0 else 120
         wav = np.sin(2 * np.pi * freq * t).astype(np.float32)
+        wav_tensor = torch.from_numpy(wav).unsqueeze(0).unsqueeze(0)  # [1, 1, L]
         dataset.append({
-            'waveform': wav,
+            'waveform': wav_tensor,
             'sample_rate': sr,
             'name': f'clip_{src:03d}_{seg}',
             'prompt': 'test sound',
@@ -670,7 +657,7 @@ for item in result:
 "
 ```
 
-Expected: `clip_000_*` tagged with a female descriptor, `clip_001_*` tagged with a male descriptor.
+Expected: `clip_000_*` tagged with a female descriptor (F0=300Hz), `clip_001_*` tagged with a male descriptor (F0=120Hz).
 
 **Step 2: Commit all remaining changes**
 

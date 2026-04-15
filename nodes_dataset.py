@@ -34,6 +34,7 @@ import torchaudio
 from comfy.model_management import throw_exception_if_processing_interrupted
 
 FOLEYTUNE_AUDIO_DATASET = "FOLEYTUNE_AUDIO_DATASET"
+FOLEYTUNE_DENOISE_SETTINGS = "FOLEYTUNE_DENOISE_SETTINGS"
 FOLEYTUNE_DS_CATEGORY = "FoleyTune"
 FOLEYTUNE_AUDIO_CATEGORY = "FoleyTune"
 
@@ -515,6 +516,53 @@ def _spectral_quality_score(wav: torch.Tensor, sr: int) -> float:
     hf_score = min(1.0, hf_ratio / 0.1)
 
     return (flatness_score + temporal_score + hf_score) / 3.0
+
+
+# ─── Node: Denoiser Settings ────────────────────────────────────────────────
+
+
+class FoleyTuneDenoiserSettings:
+    """Configuration node for spectral gating noise reduction.
+
+    Connect to a Quality Filter's denoise_settings input to enable
+    denoising before quality scoring. Removes stationary noise like
+    AC hum, fans, and room tone.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "strength": ("FLOAT", {
+                    "default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Noise reduction strength. 0 = off, 1 = full removal. "
+                               "0.6-0.8 is good for AC noise without artifacts.",
+                }),
+            },
+            "optional": {
+                "stationary": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Assume noise is stationary (AC, fans). "
+                               "Disable for varying background noise.",
+                }),
+                "n_fft": ("INT", {
+                    "default": 2048, "min": 512, "max": 8192, "step": 512,
+                    "tooltip": "FFT window size. Larger = better frequency resolution, slower.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = (FOLEYTUNE_DENOISE_SETTINGS,)
+    RETURN_NAMES = ("denoise_settings",)
+    FUNCTION = "get_settings"
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
+    DESCRIPTION = (
+        "Configure spectral gating noise reduction. Connect to a "
+        "Quality Filter to denoise clips before scoring."
+    )
+
+    def get_settings(self, strength=0.7, stationary=True, n_fft=2048):
+        return ({"strength": strength, "stationary": stationary, "n_fft": n_fft},)
 
 
 class FoleyTuneDatasetQualityFilter:
@@ -2562,6 +2610,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneDatasetLUFSNormalizer": FoleyTuneDatasetLUFSNormalizer,
     "FoleyTuneDatasetCompressor": FoleyTuneDatasetCompressor,
     "FoleyTuneDatasetInspector": FoleyTuneDatasetInspector,
+    "FoleyTuneDenoiserSettings": FoleyTuneDenoiserSettings,
     "FoleyTuneDatasetQualityFilter": FoleyTuneDatasetQualityFilter,
     "FoleyTuneVideoQualityFilter": FoleyTuneVideoQualityFilter,
     "FoleyTuneDatasetHfSmoother": FoleyTuneDatasetHfSmoother,
@@ -2583,6 +2632,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneDatasetLUFSNormalizer": "FoleyTune Dataset LUFS Normalizer",
     "FoleyTuneDatasetCompressor": "FoleyTune Dataset Compressor",
     "FoleyTuneDatasetInspector": "FoleyTune Dataset Inspector",
+    "FoleyTuneDenoiserSettings": "FoleyTune Denoiser Settings",
     "FoleyTuneDatasetQualityFilter": "FoleyTune Dataset Quality Filter",
     "FoleyTuneVideoQualityFilter": "FoleyTune Video Quality Filter",
     "FoleyTuneDatasetHfSmoother": "FoleyTune Dataset HF Smoother",

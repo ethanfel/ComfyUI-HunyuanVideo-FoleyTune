@@ -204,6 +204,9 @@ def detect_slapping(waveform: np.ndarray, sr: int,
 
     result = {"detected": False, "onset_rate": 0.0, "regularity": 0.0}
 
+    if len(waveform) == 0:
+        return result
+
     # Bandpass 2-8kHz to isolate percussive transients from vocals
     nyq = sr / 2
     lo, hi = min(2000 / nyq, 0.99), min(8000 / nyq, 0.99)

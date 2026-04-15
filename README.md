@@ -10,7 +10,7 @@
   <a href="#quick-start-inference">Inference</a> &bull;
   <a href="#quick-start-training">Training</a> &bull;
   <a href="LORA_TRAINING.md">Full Training Guide</a> &bull;
-  <a href="#node-reference">All 29 Nodes</a> &bull;
+  <a href="#node-reference">All 31 Nodes</a> &bull;
   <a href="#vram-guide">VRAM Guide</a>
 </p>
 
@@ -134,7 +134,7 @@ For the full training guide with hyperparameter recommendations, checkpoint sele
 | **FoleyTune LoRA Evaluator** | Compare adapters with spectral metrics and generated audio |
 | **FoleyTune VAE Roundtrip** | Diagnostic: encode/decode audio through DAC to check codec quality |
 
-### Dataset Preparation (12 nodes)
+### Dataset Preparation (14 nodes)
 
 | Node | Description |
 |---|---|
@@ -145,6 +145,8 @@ For the full training guide with hyperparameter recommendations, checkpoint sele
 | **FoleyTune Dataset Inspector** | Flag quality issues: silence, clipping, loudness deviation |
 | **FoleyTune Dataset Quality Filter** | Score-based filtering for silence, anomalies, frequency balance |
 | **FoleyTune Video Quality Filter** | Filter video clips by analyzing their audio track quality |
+| **FoleyTune Denoiser Settings** | Configure spectral gating noise reduction (connects to Quality Filters) |
+| **FoleyTune Voice Tagger** | Auto-tag prompts with voice descriptors and rhythmic slapping detection |
 | **FoleyTune Dataset HF Smoother** | Soft high-frequency attenuation across the dataset |
 | **FoleyTune Dataset Augmenter** | Generate variants with pitch/time-stretch/gain changes |
 | **FoleyTune Dataset Spectral Matcher** | Adaptive EQ toward a reference audio distribution |

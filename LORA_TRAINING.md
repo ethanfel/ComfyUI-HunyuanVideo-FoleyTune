@@ -86,6 +86,8 @@ Foley Dataset Loader (folder of raw audio)
   -> Foley Dataset Compressor (ratio 2.5:1, mix 0.4)
   -> Foley Dataset HF Smoother (cutoff 16000 Hz, blend 0.5)
   -> Foley Dataset Inspector (remove clipped/noisy/silent clips)
+  -> Foley Dataset Quality Filter (+ optional Denoiser Settings)
+  -> Foley Voice Tagger (auto-tag voice + slapping)
   -> Foley Dataset Saver (output to cleaned folder as 24-bit FLAC)
 ```
 
@@ -107,7 +109,68 @@ If you want to match your training audio's spectral profile to what DAC reproduc
 2. Save those roundtripped clips to a reference directory.
 3. Use `Foley Dataset Spectral Matcher` with that reference directory to EQ your training audio toward DAC's preferred distribution.
 
-### 1.5 Augmentation — use with caution
+### 1.5 Remove background noise (optional)
+
+If your recordings have stationary background noise (AC hum, fans, room tone), connect a **Denoiser Settings** node to any Quality Filter to remove it before scoring:
+
+```
+FoleyTune Denoiser Settings
+    strength: 0.7          (0.6-0.8 is good for AC without artifacts)
+    stationary: true
+    n_fft: 2048
+  -> FoleyTune Quality Filter (denoise_settings input)
+```
+
+The denoiser groups clips by source video and finds the quietest segment per source as a noise reference. This prevents the model from learning to reproduce AC hum and room tone. Denoised audio flows downstream — all scoring and output uses clean audio.
+
+Works with both the Dataset Quality Filter and the Video Quality Filter.
+
+### 1.6 Tag voice characteristics (recommended for multi-speaker datasets)
+
+If your dataset contains multiple speakers/performers, use **Voice Tagger** to automatically tag prompts with voice descriptors so the model learns to distinguish them:
+
+```
+FoleyTune Quality Filter
+  -> FoleyTune Voice Tagger
+      num_speakers: 3
+      samples_per_source: 3
+  -> FoleyTune Batch Feature Extractor
+```
+
+The Voice Tagger analyzes vocal characteristics (pitch, breathiness, texture, brightness) per source video using Parselmouth, then assigns descriptors using vocal register terminology:
+
+| Register | F0 range | Gender |
+|---|---|---|
+| soprano | > 250 Hz | female |
+| mezzo-soprano | 190-250 Hz | female |
+| contralto | 165-190 Hz | female |
+| tenor | > 140 Hz | male |
+| baritone | 100-140 Hz | male |
+| bass | < 100 Hz | male |
+
+Additional qualities are added based on acoustic features:
+- **breathy** vs **clear** — harmonics-to-noise ratio
+- **raspy** vs **smooth** — pitch perturbation (jitter)
+- **bright** vs **warm** — spectral centroid
+
+Example output: `"breathy warm soprano voice, wet sounds"`, `"clear bright mezzo-soprano voice, wet sounds"`
+
+This gives CLAP distinct text embeddings per performer, preventing the model from merging multiple voices into one averaged output.
+
+#### Rhythmic slapping detection
+
+The Voice Tagger also detects rhythmic percussive content (skin slapping) per clip using spectral flux onset detection in the 2-8kHz band. When detected, it appends `, with rhythmic slapping` to the prompt.
+
+Unlike voice descriptors (per-source), slapping detection runs per-clip since it can start and stop mid-scene.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `detect_slapping` | true | Enable percussive content detection |
+| `min_onset_rate` | 2.0 | Minimum onsets/sec to tag as slapping |
+
+Example: `"breathy warm soprano voice, wet sounds, with rhythmic slapping"`
+
+### 1.7 Augmentation — use with caution
 
 > **Warning:** Sweep testing showed that augmented duplicates (same video, slightly different audio) can *hurt* training quality. The model learns averaged spectral patterns instead of following video cues, producing mechanical-sounding output.
 >

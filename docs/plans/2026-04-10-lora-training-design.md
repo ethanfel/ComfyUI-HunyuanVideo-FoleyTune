@@ -486,6 +486,67 @@ subtlety. Recommended recipe for similar content:
 for checkpoint selection. Always validate top candidates perceptually on unseen clips.
 Metrics track dominant spectral fidelity; subtle ambient details require listening.
 
+### Sixth Sweep Results — 836 clips, doggy POV dataset
+
+**Config:** r128, curriculum (switch 0.6), lr=1e-4, batch=8, 836 unique clips from 43 source videos, 15k steps.
+
+**Comparison with 399-clip run at step 1k:**
+
+| Metric | 399 clips @ 1k | 836 clips @ 1k |
+|--------|---------------|---------------|
+| Loss | 1.521 | **1.447** |
+| SC | 3.369 | **1.531** |
+| MCD | 9.986 | **9.823** |
+| Temp Var | 0.775 | **1.178** |
+
+SC was 2x better at step 1k — the larger dataset accelerates learning dramatically.
+
+**Scalars over training:**
+
+| Step | Loss | SC | MCD | PBC | Temp Var |
+|------|------|----|-----|-----|----------|
+| 1k | 1.447 | 1.531 | 9.82 | -0.05 | 1.18 |
+| 5k | — | — | — | — | — |
+| 8k | 1.428 | 1.544 | 10.48 | -0.13 | 1.94 |
+| 10k | 1.365 | 1.531 | 9.86 | -0.10 | 1.62 |
+| 11k | 1.369 | 1.507 | 9.84 | -0.07 | 1.51 |
+| **12k** | **1.379** | **1.496** | **9.57** | **-0.04** | **1.73** |
+| 13k | 1.370 | 1.523 | 9.68 | -0.00 | 1.29 |
+
+**Overfitting onset at step 13k:**
+- SC regressed (1.496 → 1.523) — first metric degradation
+- Temporal variance collapsed to 1.29 — audio becoming flat/uniform
+- Perceptual quality degraded: impacts lost natural variation, sound "weird"
+- Loss at 1.37 — approaching the noise floor
+
+**Best checkpoint: step 11-12k.** SC bottomed at 12k, temporal variance still
+healthy, and audio retained natural dynamics.
+
+**Pattern confirmed across datasets:** The perceptual peak arrives 2-3k steps
+after the curriculum transition (switch at 60% = step 9k), consistently around
+steps 11-14k for 15k runs regardless of dataset size. Temporal variance is the
+best early warning — when it starts dropping, the model is over-regularizing.
+
+**Resume experiment — training from 13k to 20k:**
+Resumed from step 13k (where overfitting was first detected) and trained to 20k.
+Scalars recovered and improved beyond the original 12k best:
+
+| Step | SC | MCD | PBC | TV |
+|------|----|-----|-----|----|
+| 12k (original best) | 1.496 | 9.57 | -0.04 | 1.73 |
+| 13k (overfit start) | 1.523 | 9.68 | -0.00 | 1.29 |
+| 20k (resumed) | 1.421 | 9.59 | 0.29 | 2.29 |
+
+SC hit a new best (1.421), PBC went positive (0.29), temporal variance recovered (2.29).
+But perceptually the audio was "a lot more metallic" — same over-specialization, just
+reached via a different path.
+
+**Key insight:** Resuming from an earlier checkpoint does not escape the overfitting
+trajectory. The model converges to the same over-specialized state regardless of path.
+More training steps always push toward dominant spectral features at the expense of
+subtle ambient textures. The perceptual sweet spot is fixed at 2-3k steps post-curriculum
+transition — extending training beyond that degrades naturalness even when metrics improve.
+
 ### Text Prompt Guidelines (CLAP Conditioning)
 
 **CLAP model:** `laion/larger_clap_general` — trained on AudioSet + AudioCaps captions.

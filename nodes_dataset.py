@@ -2243,6 +2243,203 @@ class FoleyTuneDatasetBrowser:
         return (video_path, raw_dir_str, clean_dir_str, audio_path, feat_dir_str, frames_dir, npz_path, ds_dir_str, prompt, count - 1)
 
 
+# ─── Node 12: Voice Tagger ───────────────────────────────────────────────────
+
+
+class FoleyTuneVoiceTagger:
+    """Analyze audio clips, cluster by speaker, and tag prompts with voice descriptors.
+
+    Groups clips by source video prefix, samples a few per source for acoustic
+    analysis (F0, HNR), clusters into speaker groups, and prepends/appends
+    voice descriptors to each clip's prompt field.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
+                "num_speakers": ("INT", {
+                    "default": 2, "min": 1, "max": 10,
+                    "tooltip": "Expected number of distinct voices in the dataset.",
+                }),
+                "samples_per_source": ("INT", {
+                    "default": 3, "min": 1, "max": 10,
+                    "tooltip": "How many clips to analyze per source video (evenly spaced).",
+                }),
+            },
+            "optional": {
+                "min_f0_female": ("FLOAT", {
+                    "default": 165.0, "min": 80.0, "max": 400.0, "step": 5.0,
+                    "tooltip": "F0 threshold (Hz) for male/female split. Only used when num_speakers <= 2.",
+                }),
+                "descriptor_mode": (["auto", "label_only", "custom"], {
+                    "default": "auto",
+                    "tooltip": "auto: F0+HNR descriptors. label_only: gender only. custom: user JSON.",
+                }),
+                "custom_descriptors": ("STRING", {
+                    "default": "",
+                    "tooltip": 'JSON: {"clip_001": "breathy soprano", "clip_002": "deep male"}',
+                }),
+                "tag_position": (["prepend", "append"], {
+                    "default": "prepend",
+                }),
+            },
+        }
+
+    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET, "STRING")
+    RETURN_NAMES = ("dataset", "report")
+    FUNCTION = "tag_voices"
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
+    DESCRIPTION = (
+        "Analyze vocal characteristics per source video, cluster by speaker, "
+        "and tag prompts with voice descriptors (pitch, breathiness, gender)."
+    )
+
+    def tag_voices(self, dataset, num_speakers, samples_per_source,
+                   min_f0_female=165.0, descriptor_mode="auto",
+                   custom_descriptors="", tag_position="prepend"):
+        import re
+        import json
+        from voice_analysis import (
+            extract_voice_features, group_by_source, sample_indices,
+            generate_descriptor, tag_prompt,
+        )
+
+        names = [item["name"] for item in dataset]
+        groups = group_by_source(names)
+
+        lines = ["=== Voice Tagger Report ===", ""]
+        lines.append(f"Sources: {len(groups)}, Clips: {len(dataset)}, "
+                      f"Speakers: {num_speakers}, Mode: {descriptor_mode}")
+        lines.append("")
+
+        # --- Analyze samples per source ---
+        source_features = {}  # prefix -> {median_f0, mean_hnr}
+        for prefix, indices in sorted(groups.items()):
+            pick = sample_indices(len(indices), samples_per_source)
+            sampled_indices = [indices[i] for i in pick]
+            sampled_names = [names[i] for i in sampled_indices]
+
+            f0s, hnrs = [], []
+            for idx in sampled_indices:
+                item = dataset[idx]
+                wav = item["waveform"]
+                sr = item["sample_rate"]
+                # Convert to mono numpy — waveform is [1, C, L] torch tensor
+                if hasattr(wav, "numpy"):
+                    wav_np = wav[0].numpy()  # [C, L]
+                elif isinstance(wav, np.ndarray):
+                    wav_np = wav[0]
+                else:
+                    wav_np = np.array(wav)[0]
+                if wav_np.ndim > 1:
+                    wav_np = wav_np.mean(axis=0)  # mono [L]
+
+                feats = extract_voice_features(wav_np, sr)
+                f0s.append(feats["median_f0"])
+                hnrs.append(feats["mean_hnr"])
+
+            avg_f0 = float(np.mean([f for f in f0s if f > 0])) if any(f > 0 for f in f0s) else 0.0
+            avg_hnr = float(np.mean(hnrs)) if hnrs else 0.0
+            source_features[prefix] = {"median_f0": avg_f0, "mean_hnr": avg_hnr}
+
+            lines.append(f"  {prefix} ({len(indices)} segs) — "
+                          f"sampled {sampled_names} — "
+                          f"F0={avg_f0:.0f}Hz HNR={avg_hnr:.1f}dB")
+
+        lines.append("")
+
+        # --- Generate descriptors ---
+        source_descriptors = {}
+        if descriptor_mode == "custom" and custom_descriptors.strip():
+            source_descriptors = json.loads(custom_descriptors)
+        elif num_speakers <= 2:
+            # Simple F0 threshold split
+            for prefix, feats in source_features.items():
+                source_descriptors[prefix] = generate_descriptor(
+                    feats["median_f0"], feats["mean_hnr"],
+                    min_f0_female=min_f0_female, mode=descriptor_mode,
+                )
+        else:
+            # Multi-speaker: use Resemblyzer clustering
+            try:
+                from resemblyzer import VoiceEncoder, preprocess_wav
+                from sklearn.cluster import KMeans
+            except ImportError as e:
+                raise ImportError(
+                    "num_speakers > 2 requires 'resemblyzer' and 'scikit-learn'. "
+                    "Install with: pip install resemblyzer scikit-learn"
+                ) from e
+
+            encoder = VoiceEncoder()
+            source_embeddings = {}
+            for prefix, indices in groups.items():
+                pick = sample_indices(len(indices), samples_per_source)
+                embeds = []
+                for i in pick:
+                    item = dataset[indices[i]]
+                    wav = item["waveform"]
+                    sr = item["sample_rate"]
+                    if hasattr(wav, "numpy"):
+                        wav_np = wav[0].numpy()
+                    elif isinstance(wav, np.ndarray):
+                        wav_np = wav[0]
+                    else:
+                        wav_np = np.array(wav)[0]
+                    if wav_np.ndim > 1:
+                        wav_np = wav_np.mean(axis=0)
+                    processed = preprocess_wav(wav_np, source_sr=sr)
+                    embeds.append(encoder.embed_utterance(processed))
+                source_embeddings[prefix] = np.mean(embeds, axis=0)
+
+            prefixes = sorted(source_embeddings.keys())
+            X = np.stack([source_embeddings[p] for p in prefixes])
+            labels = KMeans(n_clusters=num_speakers, random_state=42).fit_predict(X)
+
+            for prefix, label in zip(prefixes, labels):
+                feats = source_features[prefix]
+                desc = generate_descriptor(
+                    feats["median_f0"], feats["mean_hnr"],
+                    min_f0_female=min_f0_female, mode=descriptor_mode,
+                )
+                source_descriptors[prefix] = desc
+
+        # --- Tag map JSON for RetagNPZ ---
+        lines.append("Tag assignments:")
+        for prefix in sorted(source_descriptors.keys()):
+            desc = source_descriptors[prefix]
+            count = len(groups.get(prefix, []))
+            lines.append(f"  {prefix} ({count} clips) → \"{desc}\"")
+
+        lines.append("")
+        lines.append("tag_map JSON (for RetagNPZ):")
+        lines.append(json.dumps(source_descriptors, indent=2))
+        lines.append("")
+
+        # --- Apply tags to dataset ---
+        tagged_count = 0
+        for item in dataset:
+            name = item["name"]
+            prefix = re.sub(r"_\d+$", "", name)
+            descriptor = source_descriptors.get(prefix, "")
+            if descriptor:
+                old_prompt = item.get("prompt", "")
+                item["prompt"] = tag_prompt(old_prompt, descriptor, tag_position)
+                tagged_count += 1
+
+        lines.append(f"Tagged {tagged_count}/{len(dataset)} clips")
+
+        # Show a few examples
+        lines.append("")
+        lines.append("Examples:")
+        for item in dataset[:5]:
+            lines.append(f"  {item['name']}: \"{item.get('prompt', '')}\"")
+
+        report = "\n".join(lines)
+        return (dataset, report)
+
+
 # ─── Node Mappings ───────────────────────────────────────────────────────────
 
 NODE_CLASS_MAPPINGS = {
@@ -2262,6 +2459,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneHarmonicExciter": FoleyTuneHarmonicExciter,
     "FoleyTuneOutputNormalizer": FoleyTuneOutputNormalizer,
     "FoleyTuneDatasetBrowser": FoleyTuneDatasetBrowser,
+    "FoleyTuneVoiceTagger": FoleyTuneVoiceTagger,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -2281,4 +2479,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneHarmonicExciter": "FoleyTune Harmonic Exciter",
     "FoleyTuneOutputNormalizer": "FoleyTune Output Normalizer",
     "FoleyTuneDatasetBrowser": "FoleyTune Dataset Browser",
+    "FoleyTuneVoiceTagger": "FoleyTune Voice Tagger",
 }

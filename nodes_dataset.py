@@ -2499,6 +2499,14 @@ class FoleyTuneVoiceTagger:
                 "tag_position": (["prepend", "append"], {
                     "default": "prepend",
                 }),
+                "detect_slapping": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Detect rhythmic percussive slapping per clip and tag prompt.",
+                }),
+                "min_onset_rate": ("FLOAT", {
+                    "default": 2.0, "min": 0.5, "max": 10.0, "step": 0.5,
+                    "tooltip": "Minimum percussive onsets/sec to tag as slapping.",
+                }),
             },
         }
 
@@ -2508,17 +2516,20 @@ class FoleyTuneVoiceTagger:
     CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Analyze vocal characteristics per source video, cluster by speaker, "
-        "and tag prompts with voice descriptors (pitch, breathiness, gender)."
+        "and tag prompts with voice descriptors. Optionally detects rhythmic "
+        "percussive content (slapping) per clip."
     )
 
     def tag_voices(self, dataset, num_speakers, samples_per_source,
                    min_f0_female=165.0, descriptor_mode="auto",
-                   custom_descriptors="", tag_position="prepend"):
+                   custom_descriptors="", tag_position="prepend",
+                   detect_slapping=True, min_onset_rate=2.0):
         import json
         import re
         from voice_analysis import (
             extract_voice_features, group_by_source, sample_indices,
             generate_descriptor, tag_prompt, waveform_to_mono_numpy,
+            detect_slapping as _detect_slapping,
         )
 
         names = [item["name"] for item in dataset]
@@ -2636,19 +2647,44 @@ class FoleyTuneVoiceTagger:
         # --- Apply tags to dataset (shallow copy, don't mutate input) ---
         out = []
         tagged_count = 0
+        slap_count = 0
+        slap_lines = []
         for item in dataset:
+            throw_exception_if_processing_interrupted()
             name = item["name"]
             prefix = re.sub(r"_\d+$", "", name)
             descriptor = source_descriptors.get(prefix, "")
-            if descriptor:
-                new_item = dict(item)
-                new_item["prompt"] = tag_prompt(item.get("prompt", ""), descriptor, tag_position)
-                out.append(new_item)
-                tagged_count += 1
-            else:
-                out.append(item)
 
-        lines.append(f"Tagged {tagged_count}/{len(dataset)} clips")
+            new_item = dict(item)
+            prompt = item.get("prompt", "")
+
+            # Voice descriptor
+            if descriptor:
+                prompt = tag_prompt(prompt, descriptor, tag_position)
+                tagged_count += 1
+
+            # Per-clip slapping detection
+            if detect_slapping:
+                wav_np = waveform_to_mono_numpy(item["waveform"])
+                slap = _detect_slapping(wav_np, item["sample_rate"], min_onset_rate)
+                if slap["detected"]:
+                    prompt = f"{prompt}, with rhythmic slapping"
+                    slap_count += 1
+                slap_lines.append(
+                    f"  {name}: rate={slap['onset_rate']:.1f}/s "
+                    f"reg={slap['regularity']:.2f} "
+                    f"{'SLAP' if slap['detected'] else '-'}"
+                )
+
+            new_item["prompt"] = prompt
+            out.append(new_item)
+
+        lines.append(f"Tagged {tagged_count}/{len(dataset)} clips (voice)")
+        if detect_slapping:
+            lines.append(f"Slapping detected: {slap_count}/{len(dataset)} clips")
+            lines.append("")
+            lines.append("Percussive detection:")
+            lines.extend(slap_lines)
 
         # Show a few examples
         lines.append("")

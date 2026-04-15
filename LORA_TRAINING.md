@@ -63,6 +63,19 @@ Alternatively, gather paired video and audio clips manually.
 
 **Diversity beats quantity.** Ten clips of a sound in different environments train better than fifty clips of the same recording. Vary: distance, room acoustics, intensity, speed.
 
+### One LoRA or many?
+
+Group clips by **sound profile**, not by visual appearance. The model is conditioned on video frames, so it learns to map motion patterns to sounds — camera angle and framing don't matter.
+
+| Scenario | One LoRA? | Why |
+|---|---|---|
+| Same action, different camera angles | **Yes** | Same sound regardless of POV — angle diversity improves generalization |
+| Same action, different visual poses | **Yes** | If the sounds are similar (e.g., same intensity/rhythm), one LoRA handles it |
+| Different intensities of the same action | **Maybe** | If the audio profiles are genuinely different (slow/gentle vs fast/intense), consider splitting |
+| Completely different sound types | **No** | Train separate LoRAs for unrelated sounds (e.g., footsteps vs explosions) |
+
+**Rule of thumb:** if you'd describe two clips with the same CLAP prompt and they sound similar, they belong in the same LoRA. If the sounds are acoustically different enough to need different prompts, split them.
+
 ### 1.2 How many clips do I need?
 
 | Dataset size | Scenario | Expected result |
@@ -86,8 +99,6 @@ Foley Dataset Loader (folder of raw audio)
   -> Foley Dataset Compressor (ratio 2.5:1, mix 0.4)
   -> Foley Dataset HF Smoother (cutoff 16000 Hz, blend 0.5)
   -> Foley Dataset Inspector (remove clipped/noisy/silent clips)
-  -> Foley Dataset Quality Filter (+ optional Denoiser Settings)
-  -> Foley Voice Tagger (auto-tag voice + slapping)
   -> Foley Dataset Saver (output to cleaned folder as 24-bit FLAC)
 ```
 
@@ -109,68 +120,7 @@ If you want to match your training audio's spectral profile to what DAC reproduc
 2. Save those roundtripped clips to a reference directory.
 3. Use `Foley Dataset Spectral Matcher` with that reference directory to EQ your training audio toward DAC's preferred distribution.
 
-### 1.5 Remove background noise (optional)
-
-If your recordings have stationary background noise (AC hum, fans, room tone), connect a **Denoiser Settings** node to any Quality Filter to remove it before scoring:
-
-```
-FoleyTune Denoiser Settings
-    strength: 0.7          (0.6-0.8 is good for AC without artifacts)
-    stationary: true
-    n_fft: 2048
-  -> FoleyTune Quality Filter (denoise_settings input)
-```
-
-The denoiser groups clips by source video and finds the quietest segment per source as a noise reference. This prevents the model from learning to reproduce AC hum and room tone. Denoised audio flows downstream — all scoring and output uses clean audio.
-
-Works with both the Dataset Quality Filter and the Video Quality Filter.
-
-### 1.6 Tag voice characteristics (recommended for multi-speaker datasets)
-
-If your dataset contains multiple speakers/performers, use **Voice Tagger** to automatically tag prompts with voice descriptors so the model learns to distinguish them:
-
-```
-FoleyTune Quality Filter
-  -> FoleyTune Voice Tagger
-      num_speakers: 3
-      samples_per_source: 3
-  -> FoleyTune Batch Feature Extractor
-```
-
-The Voice Tagger analyzes vocal characteristics (pitch, breathiness, texture, brightness) per source video using Parselmouth, then assigns descriptors using vocal register terminology:
-
-| Register | F0 range | Gender |
-|---|---|---|
-| soprano | > 250 Hz | female |
-| mezzo-soprano | 190-250 Hz | female |
-| contralto | 165-190 Hz | female |
-| tenor | > 140 Hz | male |
-| baritone | 100-140 Hz | male |
-| bass | < 100 Hz | male |
-
-Additional qualities are added based on acoustic features:
-- **breathy** vs **clear** — harmonics-to-noise ratio
-- **raspy** vs **smooth** — pitch perturbation (jitter)
-- **bright** vs **warm** — spectral centroid
-
-Example output: `"breathy warm soprano voice, wet sounds"`, `"clear bright mezzo-soprano voice, wet sounds"`
-
-This gives CLAP distinct text embeddings per performer, preventing the model from merging multiple voices into one averaged output.
-
-#### Rhythmic slapping detection
-
-The Voice Tagger also detects rhythmic percussive content (skin slapping) per clip using spectral flux onset detection in the 2-8kHz band. When detected, it appends `, with rhythmic slapping` to the prompt.
-
-Unlike voice descriptors (per-source), slapping detection runs per-clip since it can start and stop mid-scene.
-
-| Parameter | Default | Description |
-|---|---|---|
-| `detect_slapping` | true | Enable percussive content detection |
-| `min_onset_rate` | 2.0 | Minimum onsets/sec to tag as slapping |
-
-Example: `"breathy warm soprano voice, wet sounds, with rhythmic slapping"`
-
-### 1.7 Augmentation — use with caution
+### 1.5 Augmentation — use with caution
 
 > **Warning:** Sweep testing showed that augmented duplicates (same video, slightly different audio) can *hurt* training quality. The model learns averaged spectral patterns instead of following video cues, producing mechanical-sounding output.
 >
@@ -372,7 +322,7 @@ In sweep testing, curriculum was the first config to break SC < 1.0 and was stil
 | `latent_noise_sigma` | 0.0 | Additive Gaussian noise on target latents for regularization |
 | `precision` | `bf16` | `bf16` (Ampere+), `fp16` (older GPUs), `fp32` (debug only) |
 | `gradient_checkpointing` | false | Recompute activations to save VRAM (~3-5 GB, ~25% slower) |
-| `blocks_to_swap` | 0 | Offload N transformer blocks to CPU (0-54, uses prefetch=2) |
+
 
 > **LoRA+ warning:** Setting `lora_plus_ratio=16.0` enables LoRA+ (higher LR for B matrices). Sweep testing showed this overfits on small-to-medium datasets — loss drops below the noise floor (~0.5), producing mechanical sound on some inputs and pure noise on others. Standard LR (ratio 1.0) generalizes better.
 
@@ -477,9 +427,7 @@ The scheduler loads the dataset once, runs each experiment sequentially, and pro
 | Option | JSON key | Default | Effect |
 |---|---|---|---|
 | Gradient checkpointing | `gradient_checkpointing` | false | Saves ~3-5 GB VRAM, ~25% slower |
-| Block swap | `blocks_to_swap` | 0 | Offloads N of 54 blocks to CPU (prefetch=2) |
-
-These can be set in `base` (applies to all experiments) or per-experiment overrides.
+This can be set in `base` (applies to all experiments) or per-experiment overrides.
 
 ---
 
@@ -577,7 +525,6 @@ The fp16 VAE and Synchformer lose precision that matters during training. With s
 
 **Minimum VRAM for training: ~13 GB** with bf16 model (batch_size=1, gradient checkpointing, rank 128), or **~8 GB** with the fp8 model. GPUs with less than 10 GB cannot train this model.
 
-**Note:** Block swapping (`blocks_to_swap`) is inference-only. During training, the backward pass requires all transformer blocks on GPU, so block swap is automatically skipped.
 
 | Config | Estimated VRAM | Target GPU |
 |---|---|---|
@@ -592,7 +539,7 @@ High-VRAM systems (48+ GB) need no offloading at all.
 
 ### 24 GB GPUs (RTX 4090, A5000)
 
-Use `batch_size: 1` with `grad_accum: 8` for effective batch 8, plus gradient checkpointing and block swapping:
+Use `batch_size: 1` with `grad_accum: 8` for effective batch 8, plus gradient checkpointing:
 
 ```json
 {
@@ -622,7 +569,6 @@ Use `batch_size: 1` with `grad_accum: 8` for effective batch 8, plus gradient ch
     "latent_mixup_alpha": 0.0,
     "latent_noise_sigma": 0.0,
     "gradient_checkpointing": true,
-    "blocks_to_swap": 0,
     "resume_from": ""
   },
   "experiments": [
@@ -634,7 +580,6 @@ Use `batch_size: 1` with `grad_accum: 8` for effective batch 8, plus gradient ch
 Key settings:
 - **`gradient_checkpointing: true`** — saves ~3-5 GB VRAM by recomputing activations (~25% slower)
 - **`batch_size: 1` + `grad_accum: 8`** — same gradient quality as batch 8, fits in VRAM
-- **`blocks_to_swap: 0`** — block swapping is inference-only (backward pass needs all blocks on GPU)
 
 If you still run out of VRAM, lower `rank` to 64.
 

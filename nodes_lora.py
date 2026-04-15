@@ -954,6 +954,11 @@ class FoleyTuneLoRATrainer:
             "n_clips": n_clips, "precision": precision, "seed": seed,
         }
 
+        # Embed training prompts (unique, sorted by frequency)
+        from collections import Counter
+        prompt_counts = Counter(d["prompt"] for d in dataset)
+        meta["prompts"] = [p for p, _ in prompt_counts.most_common()]
+
         losses = []
         metrics_history = []  # list of {step, loss, ...spectral metrics}
         log_interval = 50
@@ -1157,7 +1162,8 @@ class FoleyTuneLoRALoader:
             }
         }
 
-    RETURN_TYPES = ("FOLEYTUNE_MODEL",)
+    RETURN_TYPES = ("FOLEYTUNE_MODEL", "STRING")
+    RETURN_NAMES = ("model", "prompts")
     FUNCTION = "load_adapter"
     CATEGORY = "FoleyTune"
 
@@ -1217,7 +1223,8 @@ class FoleyTuneLoRALoader:
         model.eval()
         logger.info(f"Loaded LoRA adapter: {n_wrapped} layers, rank={rank}, strength={strength}")
 
-        return (model,)
+        prompts = "\n".join(meta.get("prompts", []))
+        return (model, prompts)
 
 
 # --- Node 4: LoRA Scheduler -------------------------------------------------

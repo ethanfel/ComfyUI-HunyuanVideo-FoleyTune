@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add a `FoleyTuneDatasetDenoiser` ComfyUI node that removes stationary background noise (AC hum, fans) from training audio clips using spectral gating.
+**Goal:** Add spectral gating noise reduction as an optional feature of the quality filter. A small `FoleyTuneDenoiserSettings` node provides the config; the quality filter accepts it as an optional input, denoises before scoring, and passes denoised audio downstream.
 
-**Architecture:** Single node using `noisereduce` library. Processes each clip's waveform through spectral gating, preserves RMS level, returns denoised dataset. Follows the same `dict(item)` shallow-copy pattern as all other dataset processing nodes.
+**Architecture:** Settings node outputs a typed `FOLEYTUNE_DENOISE_SETTINGS` dict. Quality filter gets a new optional `denoise_settings` input. When connected, it groups clips by source, finds quietest segment per source as noise reference, denoises via `noisereduce`, then scores on clean audio. Follows existing patterns in `nodes_dataset.py`.
 
 **Tech Stack:** noisereduce (spectral gating), numpy, torch, ComfyUI node API.
 
@@ -41,38 +41,44 @@ git commit -m "chore: add noisereduce dependency for spectral gating"
 
 ---
 
-### Task 2: Add FoleyTuneDatasetDenoiser node
+### Task 2: Add FoleyTuneDenoiserSettings node
 
 **Files:**
-- Modify: `nodes_dataset.py` (insert before `FoleyTuneDatasetAugmenter` at line ~1317)
+- Modify: `nodes_dataset.py`
 
-**Step 1: Add the Denoiser class**
+**Step 1: Add the type constant and settings class**
 
-Insert before `# --- Node 7: Dataset Augmenter ---` (line ~1317) in `nodes_dataset.py`:
+Add the type constant near the top of `nodes_dataset.py`, after the existing type constants (around line 35):
 
 ```python
-# --- Node: Dataset Denoiser ------------------------------------------------
+FOLEYTUNE_DENOISE_SETTINGS = "FOLEYTUNE_DENOISE_SETTINGS"
+```
+
+Add the settings node class before `FoleyTuneDatasetQualityFilter` (around line 518):
+
+```python
+# ─── Node: Denoiser Settings ────────────────────────────────────────────────
 
 
-class FoleyTuneDatasetDenoiser:
-    """Remove stationary background noise (AC hum, fans) via spectral gating.
+class FoleyTuneDenoiserSettings:
+    """Configuration node for spectral gating noise reduction.
 
-    Uses noisereduce to auto-estimate a noise profile from each clip and
-    gate it out. Best for stationary noise. Preserves RMS level.
+    Connect to a Quality Filter's denoise_settings input to enable
+    denoising before quality scoring. Removes stationary noise like
+    AC hum, fans, and room tone.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
-            },
-            "optional": {
                 "strength": ("FLOAT", {
                     "default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "Noise reduction strength. 0 = off, 1 = full removal. "
                                "0.6-0.8 is good for AC noise without artifacts.",
                 }),
+            },
+            "optional": {
                 "stationary": ("BOOLEAN", {
                     "default": True,
                     "tooltip": "Assume noise is stationary (AC, fans). "
@@ -85,145 +91,155 @@ class FoleyTuneDatasetDenoiser:
             },
         }
 
-    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET, "STRING")
-    RETURN_NAMES = ("dataset", "report")
-    FUNCTION = "denoise"
+    RETURN_TYPES = (FOLEYTUNE_DENOISE_SETTINGS,)
+    RETURN_NAMES = ("denoise_settings",)
+    FUNCTION = "get_settings"
     CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
-        "Remove stationary background noise (AC hum, fans) from clips "
-        "using spectral gating. Adjustable strength to avoid artifacts."
+        "Configure spectral gating noise reduction. Connect to a "
+        "Quality Filter to denoise clips before scoring."
     )
 
-    def denoise(self, dataset, strength=0.7, stationary=True, n_fft=2048):
-        import re
-        import noisereduce as nr
-
-        out = []
-        lines = ["=== Denoiser Report ===", ""]
-        lines.append(f"Clips: {len(dataset)}, Strength: {strength}, "
-                      f"Stationary: {stationary}, n_fft: {n_fft}")
-        lines.append("")
-
-        # --- Group by source and find quietest segment per source ---
-        # Individual segments may lack silence for noise profile estimation,
-        # but the quietest segment from the same source video is a good proxy.
-        from voice_analysis import group_by_source
-        names = [item["name"] for item in dataset]
-        groups = group_by_source(names)
-
-        # For each source, find the segment with lowest RMS (most noise-like)
-        noise_profiles = {}  # prefix -> mono numpy array of quietest segment
-        for prefix, indices in groups.items():
-            best_idx, best_rms = indices[0], float("inf")
-            for idx in indices:
-                wav = dataset[idx]["waveform"][0].float().cpu()
-                rms = wav.pow(2).mean().sqrt().item()
-                if rms < best_rms:
-                    best_rms = rms
-                    best_idx = idx
-            quiet_wav = dataset[best_idx]["waveform"][0].float().cpu().numpy()
-            # Use mono for noise profile
-            noise_profiles[prefix] = quiet_wav.mean(axis=0) if quiet_wav.ndim > 1 else quiet_wav
-            lines.append(f"  {prefix}: noise ref = {dataset[best_idx]['name']} "
-                          f"(RMS={best_rms:.4f})")
-
-        lines.append("")
-
-        # --- Denoise each clip using its source's noise profile ---
-        for item in dataset:
-            throw_exception_if_processing_interrupted()
-            wav = item["waveform"][0].float()  # [C, L]
-            sr = item["sample_rate"]
-
-            wav_np = wav.cpu().numpy()  # [C, L]
-            rms_in = np.sqrt(np.mean(wav_np ** 2)).clip(1e-8)
-
-            # Look up noise profile for this source
-            prefix = re.sub(r"_\d+$", "", item["name"])
-            y_noise = noise_profiles.get(prefix)
-
-            # Process each channel
-            denoised = np.stack([
-                nr.reduce_noise(
-                    y=wav_np[c], sr=sr,
-                    y_noise=y_noise,
-                    prop_decrease=strength,
-                    stationary=stationary,
-                    n_fft=n_fft,
-                )
-                for c in range(wav_np.shape[0])
-            ])  # [C, L]
-
-            # Preserve RMS level
-            rms_out = np.sqrt(np.mean(denoised ** 2)).clip(1e-8)
-            denoised = denoised * (rms_in / rms_out)
-
-            # Peak limit
-            peak = np.abs(denoised).max()
-            if peak > 1.0:
-                denoised = denoised / peak
-
-            wav_out = torch.from_numpy(denoised).unsqueeze(0)  # [1, C, L]
-            new_item = dict(item)
-            new_item["waveform"] = wav_out
-            out.append(new_item)
-
-            reduction_db = 20 * np.log10(rms_out / rms_in + 1e-8)
-            lines.append(f"  {item['name']}: noise {reduction_db:+.1f}dB")
-
-        lines.append("")
-        lines.append(f"Denoised {len(out)} clips")
-        report = "\n".join(lines)
-
-        print(f"[FoleyTuneDatasetDenoiser] {len(out)} clips denoised  "
-              f"strength={strength}  stationary={stationary}", flush=True)
-        return (out, report)
+    def get_settings(self, strength=0.7, stationary=True, n_fft=2048):
+        return ({"strength": strength, "stationary": stationary, "n_fft": n_fft},)
 ```
 
-**Step 2: Register the node in NODE_CLASS_MAPPINGS and NODE_DISPLAY_NAME_MAPPINGS**
+**Step 2: Register the node**
 
 In `NODE_CLASS_MAPPINGS` dict add:
 ```python
-    "FoleyTuneDatasetDenoiser": FoleyTuneDatasetDenoiser,
+    "FoleyTuneDenoiserSettings": FoleyTuneDenoiserSettings,
 ```
 
 In `NODE_DISPLAY_NAME_MAPPINGS` dict add:
 ```python
-    "FoleyTuneDatasetDenoiser": "FoleyTune Dataset Denoiser",
+    "FoleyTuneDenoiserSettings": "FoleyTune Denoiser Settings",
 ```
 
-**Step 3: Verify node loads**
+**Step 3: Commit**
 
-Run (with comfy mock if needed):
 ```bash
-python3 -c "
-import sys, types
-comfy_mod = types.ModuleType('comfy')
-mm_mod = types.ModuleType('comfy.model_management')
-mm_mod.throw_exception_if_processing_interrupted = lambda: None
-comfy_mod.model_management = mm_mod
-sys.modules['comfy'] = comfy_mod
-sys.modules['comfy.model_management'] = mm_mod
-
-from nodes_dataset import FoleyTuneDatasetDenoiser
-print('INPUT_TYPES:', list(FoleyTuneDatasetDenoiser.INPUT_TYPES()['required'].keys()))
-print('OK')
-"
+git add nodes_dataset.py
+git commit -m "feat: add FoleyTuneDenoiserSettings config node"
 ```
-Expected: `INPUT_TYPES: ['dataset']` then `OK`
+
+---
+
+### Task 3: Add denoising to QualityFilter
+
+**Files:**
+- Modify: `nodes_dataset.py` (FoleyTuneDatasetQualityFilter class, around line 520)
+
+**Step 1: Add optional denoise_settings input**
+
+In `FoleyTuneDatasetQualityFilter.INPUT_TYPES`, add to the `"optional"` dict:
+
+```python
+                "denoise_settings": (FOLEYTUNE_DENOISE_SETTINGS, {
+                    "tooltip": "Connect a Denoiser Settings node to denoise clips "
+                               "before scoring. Denoised audio flows downstream.",
+                }),
+```
+
+**Step 2: Add denoise_settings parameter to filter_quality method**
+
+Update the method signature to accept the new optional parameter:
+
+```python
+    def filter_quality(self, dataset, min_quality_score: float,
+                       skip_rejected: bool, clap_prompt: str = "",
+                       min_bandwidth_score: float = 0.0,
+                       min_spectral_score: float = 0.2,
+                       min_clap_score: float = 0.0,
+                       weight_bandwidth: float = 0.4,
+                       weight_spectral: float = 0.4,
+                       weight_clap: float = 0.2,
+                       denoise_settings=None):
+```
+
+**Step 3: Add denoising logic before the scoring loop**
+
+After the CLAP setup and weight normalization, before the `passed = []` line,
+add the denoising pass. This replaces each item's waveform with the denoised
+version so all downstream scoring and output uses clean audio:
+
+```python
+        # --- Optional denoising pass ---
+        if denoise_settings is not None and denoise_settings["strength"] > 0:
+            import re
+            import noisereduce as nr
+            from voice_analysis import group_by_source
+
+            strength = denoise_settings["strength"]
+            stationary = denoise_settings["stationary"]
+            n_fft = denoise_settings["n_fft"]
+
+            names = [item["name"] for item in dataset]
+            groups = group_by_source(names)
+
+            # Find quietest segment per source as noise reference
+            noise_profiles = {}
+            for prefix, indices in groups.items():
+                best_idx, best_rms = indices[0], float("inf")
+                for idx in indices:
+                    wav = dataset[idx]["waveform"][0].float().cpu()
+                    rms = wav.pow(2).mean().sqrt().item()
+                    if rms < best_rms:
+                        best_rms = rms
+                        best_idx = idx
+                quiet_wav = dataset[best_idx]["waveform"][0].float().cpu().numpy()
+                noise_profiles[prefix] = (
+                    quiet_wav.mean(axis=0) if quiet_wav.ndim > 1 else quiet_wav
+                )
+
+            # Denoise each clip
+            denoised_dataset = []
+            for item in dataset:
+                throw_exception_if_processing_interrupted()
+                wav = item["waveform"][0].float()
+                sr = item["sample_rate"]
+                wav_np = wav.cpu().numpy()
+                rms_in = np.sqrt(np.mean(wav_np ** 2)).clip(1e-8)
+
+                prefix = re.sub(r"_\d+$", "", item["name"])
+                y_noise = noise_profiles.get(prefix)
+
+                denoised = np.stack([
+                    nr.reduce_noise(
+                        y=wav_np[c], sr=sr, y_noise=y_noise,
+                        prop_decrease=strength, stationary=stationary,
+                        n_fft=n_fft,
+                    )
+                    for c in range(wav_np.shape[0])
+                ])
+
+                rms_out = np.sqrt(np.mean(denoised ** 2)).clip(1e-8)
+                denoised = denoised * (rms_in / rms_out)
+                peak = np.abs(denoised).max()
+                if peak > 1.0:
+                    denoised = denoised / peak
+
+                new_item = dict(item)
+                new_item["waveform"] = torch.from_numpy(denoised).unsqueeze(0)
+                denoised_dataset.append(new_item)
+
+            dataset = denoised_dataset
+            print(f"[QualityFilter] Denoised {len(dataset)} clips  "
+                  f"strength={strength}  stationary={stationary}", flush=True)
+```
 
 **Step 4: Commit**
 
 ```bash
 git add nodes_dataset.py
-git commit -m "feat: add FoleyTuneDatasetDenoiser node (spectral gating for AC/fan noise)"
+git commit -m "feat: quality filter accepts optional denoise settings"
 ```
 
 ---
 
-### Task 3: Smoke test with synthetic data
+### Task 4: Smoke test
 
-**Step 1: Test denoiser on a sine wave with added noise**
+**Step 1: Test that denoiser settings flow through quality filter**
 
 ```bash
 python3 -c "
@@ -235,35 +251,43 @@ comfy_mod.model_management = mm_mod
 sys.modules['comfy'] = comfy_mod
 sys.modules['comfy.model_management'] = mm_mod
 
-import torch
-import numpy as np
-from nodes_dataset import FoleyTuneDatasetDenoiser
+from nodes_dataset import FoleyTuneDenoiserSettings, FoleyTuneDatasetQualityFilter
 
+# Test settings node
+settings_node = FoleyTuneDenoiserSettings()
+(settings,) = settings_node.get_settings(strength=0.8, stationary=True, n_fft=2048)
+print(f'Settings: {settings}')
+assert settings['strength'] == 0.8
+assert settings['stationary'] == True
+assert settings['n_fft'] == 2048
+
+# Test quality filter accepts it without crashing
+import torch, numpy as np
 sr = 48000
 dur = 2.0
 t = np.linspace(0, dur, int(sr * dur))
-
-# Clean signal: 300Hz tone
 clean = np.sin(2 * np.pi * 300 * t).astype(np.float32)
-# Add noise: low-level broadband hiss
 noise = 0.05 * np.random.randn(len(t)).astype(np.float32)
 noisy = clean + noise
+wav = torch.from_numpy(noisy).unsqueeze(0).unsqueeze(0)  # [1, 1, L]
 
-wav_tensor = torch.from_numpy(noisy).unsqueeze(0).unsqueeze(0)  # [1, 1, L]
-dataset = [{'waveform': wav_tensor, 'sample_rate': sr, 'name': 'test_clip_0'}]
+dataset = [
+    {'waveform': wav, 'sample_rate': sr, 'name': 'clip_000_0'},
+    {'waveform': wav.clone(), 'sample_rate': sr, 'name': 'clip_000_1'},
+]
 
-denoiser = FoleyTuneDatasetDenoiser()
-result, report = denoiser.denoise(dataset, strength=0.7, stationary=True)
-
-print(report)
-
-# Check output shape matches input
-assert result[0]['waveform'].shape == wav_tensor.shape, 'Shape mismatch!'
-# Check original not mutated
-assert dataset[0]['waveform'] is wav_tensor, 'Input was mutated!'
+qf = FoleyTuneDatasetQualityFilter()
+result, report = qf.filter_quality(
+    dataset, min_quality_score=0.0, skip_rejected=False,
+    denoise_settings=settings,
+)
+print(report[:500])
 print()
+
+# Original should not be mutated
+assert dataset[0]['waveform'] is wav, 'Input mutated!'
 print('All checks passed')
 "
 ```
 
-Expected: report with noise reduction stats, shape check passes, no mutation.
+Expected: settings dict created, quality filter runs with denoising, original not mutated.

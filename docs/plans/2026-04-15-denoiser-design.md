@@ -6,64 +6,74 @@
 ## Goal
 
 Remove stationary background noise (AC hum, fans) from training audio clips
-before feature extraction, so the LoRA doesn't learn to reproduce it.
+before quality scoring and feature extraction, so the LoRA doesn't learn to
+reproduce it and noisy clips aren't incorrectly rejected by the quality filter.
 
 ## Problem
 
 Many training clips have varying levels of AC/room noise. The model learns
 this noise as part of the target audio, baking it into generated output.
-Spectral gating can remove stationary noise while preserving vocal
-characteristics.
+Additionally, noise lowers spectral quality scores in the quality filter,
+causing otherwise good clips to be rejected. Spectral gating can remove
+stationary noise while preserving vocal characteristics.
 
 ## Approach
 
-Use `noisereduce` library (spectral gating). It auto-estimates the noise
-profile from each clip and gates it out. Works well on stationary noise.
-Lightweight, no ML models needed, adjustable strength.
+Use `noisereduce` library (spectral gating). A small settings node provides
+the denoiser config; the quality filter accepts it as an optional input.
+When connected, the filter denoises before scoring and passes denoised audio
+downstream. When not connected, the filter works exactly as before.
 
-## Node: FoleyTuneDatasetDenoiser
+## Architecture
+
+Two components:
+
+### Node 1: FoleyTuneDenoiserSettings
+
+Small config node — just exposes the 3 knobs and outputs a typed settings
+object. No audio processing here.
 
 **Category:** `FoleyTune`
-**Function:** `denoise`
-**Return types:** `FOLEYTUNE_AUDIO_DATASET`, `STRING`
+**Function:** `get_settings`
+**Return types:** `FOLEYTUNE_DENOISE_SETTINGS`
 
-### Inputs
+#### Inputs
 
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
-| dataset | FOLEYTUNE_AUDIO_DATASET | required | Audio clips to denoise |
 | strength | FLOAT | 0.7 | Noise reduction strength (0.0-1.0). Maps to `prop_decrease` |
 | stationary | BOOLEAN | True | Assume noise is stationary (AC, fans) |
 | n_fft | INT | 2048 | FFT window size. Larger = better freq resolution, slower |
 
-### Outputs
+#### Output
 
-| Output | Type | Description |
-|--------|------|-------------|
-| dataset | FOLEYTUNE_AUDIO_DATASET | Denoised dataset |
-| report | STRING | Per-clip noise reduction stats |
+Returns a dict: `{"strength": float, "stationary": bool, "n_fft": int}`
 
-### Algorithm
+### Node 2: FoleyTuneDatasetQualityFilter (modified)
+
+Add optional input `denoise_settings` of type `FOLEYTUNE_DENOISE_SETTINGS`.
+
+When connected, before scoring each clip:
 
 1. Group clips by source prefix (reuse `group_by_source` from voice_analysis).
-2. Per source group, find the segment with lowest RMS — this is the quietest
-   segment and best proxy for "pure noise". Use it as `y_noise` for all
-   segments of the same source. This handles the case where individual
-   segments have no silence but other segments from the same source do.
-3. For each clip, call `noisereduce.reduce_noise(y=wav, sr=sr,
-   y_noise=noise_profile, prop_decrease=strength, stationary=stationary,
-   n_fft=n_fft)`.
+2. Per source group, find the segment with lowest RMS — the quietest segment
+   is the best proxy for "pure noise". Use it as `y_noise` for all segments
+   of the same source.
+3. Denoise each clip using `noisereduce.reduce_noise(y=wav, sr=sr,
+   y_noise=noise_profile, ...)`.
 4. Preserve RMS level — match output RMS to input RMS, clip peaks > 1.0.
-5. Shallow-copy item dict, update waveform key.
-6. Report: per-source noise reference segment, per-clip noise reduction in dB.
+5. Score on denoised audio.
+6. Output denoised waveforms in the passed dataset.
 
-### Pipeline Position
-
-After Resampler/LUFS/Compressor, before VoiceTagger or BatchFeatureExtractor:
+### Pipeline Integration
 
 ```
-DatasetLoader -> Denoiser -> VoiceTagger -> BatchFeatureExtractor -> DatasetSaver
+FoleyTuneDenoiserSettings ──────┐
+                                ↓ (optional)
+DatasetLoader ──→ QualityFilter ──→ VoiceTagger ──→ BatchFeatureExtractor
 ```
+
+When not connected, quality filter behaves identically to current behavior.
 
 ### Dependencies
 

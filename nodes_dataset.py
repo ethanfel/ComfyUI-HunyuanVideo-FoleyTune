@@ -2525,21 +2525,33 @@ class FoleyTuneVoiceTagger:
             sampled_indices = [indices[i] for i in pick]
             sampled_names = [names[i] for i in sampled_indices]
 
-            f0s, hnrs = [], []
+            f0s, hnrs, jitters, shimmers, centroids = [], [], [], [], []
             for idx in sampled_indices:
                 item = dataset[idx]
                 wav_np = waveform_to_mono_numpy(item["waveform"])
                 feats = extract_voice_features(wav_np, item["sample_rate"])
                 f0s.append(feats["median_f0"])
                 hnrs.append(feats["mean_hnr"])
+                jitters.append(feats["jitter"])
+                shimmers.append(feats["shimmer"])
+                centroids.append(feats["spectral_centroid"])
 
             avg_f0 = float(np.mean([f for f in f0s if f > 0])) if any(f > 0 for f in f0s) else 0.0
             avg_hnr = float(np.mean(hnrs)) if hnrs else 0.0
-            source_features[prefix] = {"median_f0": avg_f0, "mean_hnr": avg_hnr}
+            avg_jitter = float(np.mean(jitters)) if jitters else 0.0
+            avg_shimmer = float(np.mean(shimmers)) if shimmers else 0.0
+            avg_centroid = float(np.mean([c for c in centroids if c > 0])) if any(c > 0 for c in centroids) else 0.0
+            source_features[prefix] = {
+                "median_f0": avg_f0, "mean_hnr": avg_hnr,
+                "jitter": avg_jitter, "shimmer": avg_shimmer,
+                "spectral_centroid": avg_centroid,
+            }
 
             lines.append(f"  {prefix} ({len(indices)} segs) — "
                           f"sampled {sampled_names} — "
-                          f"F0={avg_f0:.0f}Hz HNR={avg_hnr:.1f}dB")
+                          f"F0={avg_f0:.0f}Hz HNR={avg_hnr:.1f}dB "
+                          f"jit={avg_jitter:.4f} shim={avg_shimmer:.4f} "
+                          f"centroid={avg_centroid:.0f}Hz")
 
         lines.append("")
 
@@ -2556,6 +2568,8 @@ class FoleyTuneVoiceTagger:
                 source_descriptors[prefix] = generate_descriptor(
                     feats["median_f0"], feats["mean_hnr"],
                     min_f0_female=min_f0_female, mode=descriptor_mode,
+                    jitter=feats["jitter"], shimmer=feats["shimmer"],
+                    spectral_centroid=feats["spectral_centroid"],
                 )
         else:
             # Multi-speaker: use Resemblyzer clustering
@@ -2590,6 +2604,8 @@ class FoleyTuneVoiceTagger:
                 desc = generate_descriptor(
                     feats["median_f0"], feats["mean_hnr"],
                     min_f0_female=min_f0_female, mode=descriptor_mode,
+                    jitter=feats["jitter"], shimmer=feats["shimmer"],
+                    spectral_centroid=feats["spectral_centroid"],
                 )
                 source_descriptors[prefix] = desc
 

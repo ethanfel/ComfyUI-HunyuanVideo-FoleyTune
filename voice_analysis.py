@@ -5,16 +5,17 @@ import numpy as np
 
 
 def extract_voice_features(waveform: np.ndarray, sr: int) -> dict:
-    """Extract F0 and HNR from a mono waveform using Parselmouth.
+    """Extract vocal features from a mono waveform using Parselmouth.
 
     Args:
         waveform: 1D numpy array of audio samples
         sr: sample rate
 
     Returns:
-        dict with keys: median_f0, mean_hnr
+        dict with keys: median_f0, mean_hnr, jitter, shimmer, spectral_centroid
     """
     import parselmouth
+    from parselmouth.praat import call
 
     snd = parselmouth.Sound(waveform, sampling_frequency=sr)
 
@@ -24,13 +25,43 @@ def extract_voice_features(waveform: np.ndarray, sr: int) -> dict:
     voiced = f0_values[f0_values > 0]
     median_f0 = float(np.median(voiced)) if len(voiced) > 0 else 0.0
 
-    # Harmonics-to-Noise Ratio
+    # Harmonics-to-Noise Ratio — breathiness vs clarity
     hnr = snd.to_harmonicity()
     hnr_values = hnr.values[0]
     valid_hnr = hnr_values[hnr_values != -200]  # Praat uses -200 for unvoiced
     mean_hnr = float(np.mean(valid_hnr)) if len(valid_hnr) > 0 else 0.0
 
-    return {"median_f0": median_f0, "mean_hnr": mean_hnr}
+    # Jitter — pitch perturbation (smooth vs rough/raspy)
+    point_process = call(snd, "To PointProcess (periodic, cc)...", 75, 600)
+    try:
+        jitter = call(point_process, "Get jitter (local)...", 0, 0, 0.0001, 0.02, 1.3)
+    except Exception:
+        jitter = 0.0
+    if np.isnan(jitter):
+        jitter = 0.0
+
+    # Shimmer — amplitude perturbation (steady vs unstable)
+    try:
+        shimmer = call([snd, point_process], "Get shimmer (local)...",
+                       0, 0, 0.0001, 0.02, 1.3, 1.6)
+    except Exception:
+        shimmer = 0.0
+    if np.isnan(shimmer):
+        shimmer = 0.0
+
+    # Spectral centroid — brightness vs warmth
+    spectrum = snd.to_spectrum()
+    centroid = call(spectrum, "Get centre of gravity...", 2)
+    if np.isnan(centroid):
+        centroid = 0.0
+
+    return {
+        "median_f0": median_f0,
+        "mean_hnr": mean_hnr,
+        "jitter": jitter,
+        "shimmer": shimmer,
+        "spectral_centroid": centroid,
+    }
 
 
 def group_by_source(names: list[str]) -> dict[str, list[int]]:
@@ -67,37 +98,75 @@ def sample_indices(group_size: int, samples_per_source: int) -> list[int]:
 
 def generate_descriptor(median_f0: float, mean_hnr: float,
                         min_f0_female: float = 165.0,
-                        mode: str = "auto") -> str:
+                        mode: str = "auto",
+                        jitter: float = 0.0,
+                        shimmer: float = 0.0,
+                        spectral_centroid: float = 0.0) -> str:
     """Generate a CLAP-compatible voice descriptor string.
+
+    Uses vocal pedagogy terminology for richer, more distinctive descriptors:
+    - Register: soprano (>250Hz), mezzo-soprano (190-250Hz), contralto (165-190Hz)
+    - Breathiness: breathy vs clear (HNR)
+    - Texture: raspy vs smooth (jitter)
+    - Brightness: bright vs warm (spectral centroid)
 
     Args:
         median_f0: median fundamental frequency in Hz
         mean_hnr: mean harmonics-to-noise ratio in dB
         min_f0_female: F0 threshold for male/female split
         mode: "auto" for full descriptors, "label_only" for gender only
+        jitter: pitch perturbation (0-1 scale, >0.02 = raspy)
+        shimmer: amplitude perturbation (0-1 scale)
+        spectral_centroid: center of spectral gravity in Hz
 
     Returns:
-        descriptor string, e.g. "breathy high-pitched female"
+        descriptor string, e.g. "breathy bright soprano voice"
     """
     is_female = median_f0 >= min_f0_female
 
     if mode == "label_only":
         return "female voice" if is_female else "male voice"
 
-    # Pitch label
-    if median_f0 > 250:
-        pitch = "high-pitched"
-    elif median_f0 >= min_f0_female:
-        pitch = "mid-pitched"
+    # Vocal register (female classification)
+    if is_female:
+        if median_f0 > 250:
+            register = "soprano"
+        elif median_f0 >= 190:
+            register = "mezzo-soprano"
+        else:
+            register = "contralto"
     else:
-        pitch = "deep"
+        if median_f0 > 140:
+            register = "tenor"
+        elif median_f0 >= 100:
+            register = "baritone"
+        else:
+            register = "bass"
 
-    # Breathiness label
+    # Breathiness (HNR) — most distinctive axis
     breath = "breathy" if mean_hnr < 10 else "clear"
 
-    gender = "female" if is_female else "male"
+    # Texture (jitter) — smooth vs raspy
+    texture = "raspy" if jitter > 0.02 else "smooth"
 
-    return f"{breath} {pitch} {gender}"
+    # Brightness (spectral centroid) — bright vs warm
+    # Typical female speech centroid: 1500-3000 Hz
+    if spectral_centroid > 0:
+        brightness = "bright" if spectral_centroid > 2000 else "warm"
+    else:
+        brightness = ""
+
+    # Build descriptor — pick the 2 most distinctive qualities + register + "voice"
+    parts = []
+    parts.append(breath)
+    if brightness:
+        parts.append(brightness)
+    if texture == "raspy":
+        parts.append(texture)
+    parts.append(register)
+    parts.append("voice")
+
+    return " ".join(parts)
 
 
 def waveform_to_mono_numpy(wav) -> "np.ndarray":

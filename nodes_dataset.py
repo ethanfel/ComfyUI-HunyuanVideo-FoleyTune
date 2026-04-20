@@ -442,41 +442,6 @@ class FoleyTuneDatasetInspector:
         return (clean, report)
 
 
-# ─── Denoise worker (used by both quality filters) ─────────────────────────
-
-
-def _denoise_clip(args):
-    """Denoise a single clip (designed for ProcessPoolExecutor).
-
-    Args:
-        args: tuple of (wav_np, sr, y_noise, strength, stationary, n_fft)
-
-    Returns:
-        denoised numpy array [C, L], float32
-    """
-    import noisereduce as nr
-    wav_np, sr, y_noise, strength, stationary, n_fft = args
-
-    rms_in = np.sqrt(np.mean(wav_np ** 2)).clip(1e-8)
-
-    denoised = np.stack([
-        nr.reduce_noise(
-            y=wav_np[c], sr=sr, y_noise=y_noise,
-            prop_decrease=strength, stationary=stationary,
-            n_fft=n_fft,
-        )
-        for c in range(wav_np.shape[0])
-    ])
-
-    rms_out = np.sqrt(np.mean(denoised ** 2)).clip(1e-8)
-    denoised = denoised * (rms_in / rms_out)
-    peak = np.abs(denoised).max()
-    if peak > 1.0:
-        denoised = denoised / peak
-
-    return denoised.astype(np.float32)
-
-
 # ─── Node 5b: Dataset Quality Filter ────────────────────────────────────────
 
 
@@ -717,6 +682,7 @@ class FoleyTuneDatasetQualityFilter:
         # --- Optional denoising pass ---
         if denoise_settings is not None and denoise_settings["strength"] > 0:
             import re
+            import noisereduce as nr
             from voice_analysis import group_by_source
 
             strength = denoise_settings["strength"]
@@ -747,52 +713,35 @@ class FoleyTuneDatasetQualityFilter:
                     quiet_wav.mean(axis=0) if quiet_wav.ndim > 1 else quiet_wav
                 )
 
-            # Denoise each clip (parallel)
-            import sys, time
-            from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-
-            n_workers = max(1, min(os.cpu_count() or 4, len(dataset)))
-            use_threads = sys.platform == "win32"
-            PoolClass = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
-            pool_type = "threads" if use_threads else "processes"
-
-            print(f"[QualityFilter] Denoising {len(dataset)} clips "
-                  f"with {n_workers} {pool_type}...", flush=True)
-            t_dn = time.time()
-
-            # Build args for each clip
-            denoise_args = []
+            # Denoise each clip
+            denoised_dataset = []
             for item in dataset:
-                wav_np = item["waveform"][0].float().cpu().numpy()
+                throw_exception_if_processing_interrupted()
+                wav = item["waveform"][0].float()
+                sr = item["sample_rate"]
+                wav_np = wav.cpu().numpy()
+                rms_in = np.sqrt(np.mean(wav_np ** 2)).clip(1e-8)
+
                 prefix = re.sub(r"_\d+$", "", item["name"])
                 y_noise = noise_profiles.get(prefix)
-                denoise_args.append((wav_np, item["sample_rate"], y_noise,
-                                     strength, stationary, n_fft))
 
-            # Submit all to pool
-            denoised_results = [None] * len(dataset)
-            with PoolClass(max_workers=n_workers) as pool:
-                futures = {pool.submit(_denoise_clip, a): i
-                           for i, a in enumerate(denoise_args)}
-                try:
-                    done = 0
-                    for future in as_completed(futures):
-                        throw_exception_if_processing_interrupted()
-                        idx = futures[future]
-                        denoised_results[idx] = future.result()
-                        done += 1
-                        if done % 10 == 0 or done == len(futures):
-                            print(f"  [{done}/{len(futures)}] denoised "
-                                  f"({time.time()-t_dn:.1f}s)", flush=True)
-                except:
-                    for f in futures:
-                        f.cancel()
-                    raise
+                denoised = np.stack([
+                    nr.reduce_noise(
+                        y=wav_np[c], sr=sr, y_noise=y_noise,
+                        prop_decrease=strength, stationary=stationary,
+                        n_fft=n_fft,
+                    )
+                    for c in range(wav_np.shape[0])
+                ])
 
-            denoised_dataset = []
-            for item, dn in zip(dataset, denoised_results):
+                rms_out = np.sqrt(np.mean(denoised ** 2)).clip(1e-8)
+                denoised = denoised * (rms_in / rms_out)
+                peak = np.abs(denoised).max()
+                if peak > 1.0:
+                    denoised = denoised / peak
+
                 new_item = dict(item)
-                new_item["waveform"] = torch.from_numpy(dn).unsqueeze(0)
+                new_item["waveform"] = torch.from_numpy(denoised).float().unsqueeze(0)
                 denoised_dataset.append(new_item)
 
             dataset = denoised_dataset
@@ -1061,6 +1010,10 @@ class FoleyTuneVideoQualityFilter:
                     "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.1,
                     "tooltip": "Soft influence: how much CLAP text similarity contributes to the composite score (composite = w_bw*BW + w_sq*SQ + w_cl*CL). Higher = prioritize prompt-matching content.",
                 }),
+                "skip_first": ("INT", {
+                    "default": 0, "min": 0, "max": 999999, "step": 1,
+                    "tooltip": "Skip the first N clips (sorted order). Use to process only new clips when extending a dataset.",
+                }),
                 "seed": ("INT", {
                     "default": 42,
                     "tooltip": "Seed for random val clip selection from rejected clips.",
@@ -1095,6 +1048,7 @@ class FoleyTuneVideoQualityFilter:
                       weight_bandwidth: float = 0.4,
                       weight_spectral: float = 0.4,
                       weight_clap: float = 0.2,
+                      skip_first: int = 0,
                       seed: int = 42,
                       denoise_settings=None):
         import shutil
@@ -1106,6 +1060,14 @@ class FoleyTuneVideoQualityFilter:
         files = _scan_video_folder(folder)
         if not files:
             raise RuntimeError(f"[VideoQualityFilter] No video files found in {folder}")
+
+        if skip_first > 0:
+            total_before = len(files)
+            files = files[skip_first:]
+            print(f"[VideoQualityFilter] Skipped first {skip_first} clips, "
+                  f"processing {len(files)}/{total_before}", flush=True)
+            if not files:
+                raise RuntimeError(f"[VideoQualityFilter] No clips left after skipping {skip_first}")
 
         do_copy = bool(output_folder.strip())
         out_dir = Path(output_folder.strip()) if do_copy else None
@@ -1176,6 +1138,7 @@ class FoleyTuneVideoQualityFilter:
         # --- Optional denoising pass (between extraction and CLAP/decisions) ---
         if denoise_settings is not None and denoise_settings["strength"] > 0:
             import re as _re
+            import noisereduce as nr
             from voice_analysis import group_by_source
 
             strength = denoise_settings["strength"]
@@ -1203,53 +1166,40 @@ class FoleyTuneVideoQualityFilter:
                     quiet_wav.mean(axis=0) if quiet_wav.ndim > 1 else quiet_wav
                 )
 
-            # Denoise each clip (parallel), then recompute scores
-            use_threads = sys.platform == "win32"
-            PoolClass = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
-            n_dn_workers = max(1, min(num_workers, len(valid)))
-            pool_type = "threads" if use_threads else "processes"
-
-            print(f"[VideoQualityFilter] Denoising {len(valid)} clips "
-                  f"with {n_dn_workers} {pool_type}...", flush=True)
-            t_dn = time.time()
-
-            # Build args for parallel denoise
-            denoise_args = []
+            # Denoise each clip, recompute scores and CLAP mono
             for i, r in enumerate(valid):
-                wav_np = r["wav"][0].float().cpu().numpy()
+                throw_exception_if_processing_interrupted()
+                wav = r["wav"][0].float()  # [C, L]
+                sr = r["sr"]
+                wav_np = wav.cpu().numpy()
+                rms_in = np.sqrt(np.mean(wav_np ** 2)).clip(1e-8)
+
                 prefix = _re.sub(r"_\d+$", "", names[i])
                 y_noise = noise_profiles.get(prefix)
-                denoise_args.append((wav_np, r["sr"], y_noise,
-                                     strength, stationary, n_fft))
 
-            denoised_results = [None] * len(valid)
-            with PoolClass(max_workers=n_dn_workers) as pool:
-                futures = {pool.submit(_denoise_clip, a): i
-                           for i, a in enumerate(denoise_args)}
-                try:
-                    done = 0
-                    for future in as_completed(futures):
-                        throw_exception_if_processing_interrupted()
-                        idx = futures[future]
-                        denoised_results[idx] = future.result()
-                        done += 1
-                        if done % 10 == 0 or done == len(futures):
-                            print(f"  [{done}/{len(futures)}] denoised "
-                                  f"({time.time()-t_dn:.1f}s)", flush=True)
-                except:
-                    for f in futures:
-                        f.cancel()
-                    raise
+                denoised = np.stack([
+                    nr.reduce_noise(
+                        y=wav_np[c], sr=sr, y_noise=y_noise,
+                        prop_decrease=strength, stationary=stationary,
+                        n_fft=n_fft,
+                    )
+                    for c in range(wav_np.shape[0])
+                ])
 
-            # Apply denoised audio and recompute scores (main thread — uses torch)
-            for i, r in enumerate(valid):
-                new_wav = torch.from_numpy(denoised_results[i]).unsqueeze(0)
+                rms_out = np.sqrt(np.mean(denoised ** 2)).clip(1e-8)
+                denoised = denoised * (rms_in / rms_out)
+                peak = np.abs(denoised).max()
+                if peak > 1.0:
+                    denoised = denoised / peak
+
+                new_wav = torch.from_numpy(denoised).float().unsqueeze(0)  # [1, C, L]
                 r["wav"] = new_wav
-                sr = r["sr"]
 
+                # Recompute quality scores on denoised audio
                 r["bw"] = _bandwidth_score(new_wav, sr)
                 r["sq"] = _spectral_quality_score(new_wav, sr)
 
+                # Recompute CLAP mono if needed
                 if need_clap:
                     mono = new_wav[0].mean(0, keepdim=True)
                     if sr != 48000:
@@ -1258,7 +1208,6 @@ class FoleyTuneVideoQualityFilter:
                         mono_48k = mono
                     r["mono_48k_np"] = mono_48k.numpy()
 
-            denoised_results = None  # free memory
             print(f"[VideoQualityFilter] Denoised {len(valid)} clips  "
                   f"strength={strength}  stationary={stationary}", flush=True)
 
@@ -1302,23 +1251,21 @@ class FoleyTuneVideoQualityFilter:
         if need_clap and valid_results:
             # Collect mono arrays from workers
             batch_indices = [i for i, r in enumerate(valid_results) if "mono_48k_np" in r]
+            batch_monos = [valid_results[i]["mono_48k_np"].squeeze(0) for i in batch_indices]
 
             # Step 1: parallel mel spectrogram computation across workers
             # Save mono arrays to temp .npy files to avoid pipe serialization bottleneck
             # (710 clips × ~2MB each = ~1.4GB through pipes causes hangs)
             import tempfile
-            print(f"[VideoQualityFilter] Phase 2a: CLAP preprocessing {len(batch_indices)} clips "
+            print(f"[VideoQualityFilter] Phase 2a: CLAP preprocessing {len(batch_monos)} clips "
                   f"with {num_workers} workers...", flush=True)
             t_pre = time.time()
             with tempfile.TemporaryDirectory() as tmpdir:
                 npy_paths = []
-                for j, bi in enumerate(batch_indices):
-                    p = os.path.join(tmpdir, f"{j}.npy")
-                    np.save(p, valid_results[bi]["mono_48k_np"].squeeze(0))
+                for i, mono in enumerate(batch_monos):
+                    p = os.path.join(tmpdir, f"{i}.npy")
+                    np.save(p, mono)
                     npy_paths.append(p)
-                # Free mono arrays from results to reduce memory
-                for bi in batch_indices:
-                    del valid_results[bi]["mono_48k_np"]
                 if sys.platform == "win32":
                     # Windows: threads avoid spawn-mode CUDA crashes
                     _init_clap_worker()  # init in main thread
@@ -1832,18 +1779,26 @@ class FoleyTuneDatasetSaver:
                 "blocks_to_swap": 0,
                 "resume_from": "",
             },
-            "experiments": [
-                {"id": f"{sweep_name}_{len(train_names)}clip"},
-            ],
+            "experiments": [],  # filled after merge
         }
-        # Also write the dataset.json it references (train/val split)
-        ds_json = {"train": train_names}
+        # Merge into existing dataset.json if present (extend mode)
+        ds_json_path = out_path / "dataset.json"
+        if ds_json_path.exists():
+            with open(ds_json_path) as f:
+                ds_json = json.load(f)
+            existing = set(ds_json.get("train", []))
+            for name in train_names:
+                if name not in existing:
+                    ds_json.setdefault("train", []).append(name)
+        else:
+            ds_json = {"train": train_names}
         if prompt:
             ds_json["prompt"] = prompt
         if val_name:
             ds_json["val"] = val_name
             sweep_json["eval_npz"] = str(out_path / f"{val_name}.npz")
-        ds_json_path = out_path / "dataset.json"
+        total_train = len(ds_json.get("train", []))
+        sweep_json["experiments"] = [{"id": f"{sweep_name}_{total_train}clip"}]
         with open(ds_json_path, "w") as f:
             json.dump(ds_json, f, indent=2)
 
@@ -1851,17 +1806,19 @@ class FoleyTuneDatasetSaver:
         with open(sweep_path, "w") as f:
             json.dump(sweep_json, f, indent=2)
 
-        # Write scores.json — per-clip quality scores for later filtering/reuse
+        # Merge scores.json — per-clip quality scores for later filtering/reuse
         scores_data = {}
+        scores_path = out_path / "scores.json"
+        if scores_path.exists():
+            with open(scores_path) as f:
+                scores_data = json.load(f)
         for item in dataset:
             if item.get("scores"):
                 scores_data[item["name"]] = item["scores"]
         if scores_data:
-            # Sort by composite score descending for easy top-N selection
             scores_sorted = dict(sorted(scores_data.items(),
                                         key=lambda x: x[1].get("composite", 0),
                                         reverse=True))
-            scores_path = out_path / "scores.json"
             with open(scores_path, "w") as f:
                 json.dump(scores_sorted, f, indent=2)
 
@@ -2553,14 +2510,6 @@ class FoleyTuneVoiceTagger:
                 "tag_position": (["prepend", "append"], {
                     "default": "prepend",
                 }),
-                "detect_slapping": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "Detect rhythmic percussive slapping per clip and tag prompt.",
-                }),
-                "min_onset_rate": ("FLOAT", {
-                    "default": 2.0, "min": 0.5, "max": 10.0, "step": 0.5,
-                    "tooltip": "Minimum percussive onsets/sec to tag as slapping.",
-                }),
             },
         }
 
@@ -2570,20 +2519,17 @@ class FoleyTuneVoiceTagger:
     CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
         "Analyze vocal characteristics per source video, cluster by speaker, "
-        "and tag prompts with voice descriptors. Optionally detects rhythmic "
-        "percussive content (slapping) per clip."
+        "and tag prompts with voice descriptors (pitch, breathiness, gender)."
     )
 
     def tag_voices(self, dataset, num_speakers, samples_per_source,
                    min_f0_female=165.0, descriptor_mode="auto",
-                   custom_descriptors="", tag_position="prepend",
-                   detect_slapping=True, min_onset_rate=2.0):
+                   custom_descriptors="", tag_position="prepend"):
         import json
         import re
         from voice_analysis import (
             extract_voice_features, group_by_source, sample_indices,
             generate_descriptor, tag_prompt, waveform_to_mono_numpy,
-            detect_slapping as _detect_slapping,
         )
 
         names = [item["name"] for item in dataset]
@@ -2701,44 +2647,19 @@ class FoleyTuneVoiceTagger:
         # --- Apply tags to dataset (shallow copy, don't mutate input) ---
         out = []
         tagged_count = 0
-        slap_count = 0
-        slap_lines = []
         for item in dataset:
-            throw_exception_if_processing_interrupted()
             name = item["name"]
             prefix = re.sub(r"_\d+$", "", name)
             descriptor = source_descriptors.get(prefix, "")
-
-            new_item = dict(item)
-            prompt = item.get("prompt", "")
-
-            # Voice descriptor
             if descriptor:
-                prompt = tag_prompt(prompt, descriptor, tag_position)
+                new_item = dict(item)
+                new_item["prompt"] = tag_prompt(item.get("prompt", ""), descriptor, tag_position)
+                out.append(new_item)
                 tagged_count += 1
+            else:
+                out.append(item)
 
-            # Per-clip slapping detection
-            if detect_slapping:
-                wav_np = waveform_to_mono_numpy(item["waveform"])
-                slap = _detect_slapping(wav_np, item["sample_rate"], min_onset_rate)
-                if slap["detected"]:
-                    prompt = f"{prompt}, with rhythmic slapping"
-                    slap_count += 1
-                slap_lines.append(
-                    f"  {name}: rate={slap['onset_rate']:.1f}/s "
-                    f"reg={slap['regularity']:.2f} "
-                    f"{'SLAP' if slap['detected'] else '-'}"
-                )
-
-            new_item["prompt"] = prompt
-            out.append(new_item)
-
-        lines.append(f"Tagged {tagged_count}/{len(dataset)} clips (voice)")
-        if detect_slapping:
-            lines.append(f"Slapping detected: {slap_count}/{len(dataset)} clips")
-            lines.append("")
-            lines.append("Percussive detection:")
-            lines.extend(slap_lines)
+        lines.append(f"Tagged {tagged_count}/{len(dataset)} clips")
 
         # Show a few examples
         lines.append("")

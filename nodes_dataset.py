@@ -35,6 +35,7 @@ from comfy.model_management import throw_exception_if_processing_interrupted
 
 FOLEYTUNE_AUDIO_DATASET = "FOLEYTUNE_AUDIO_DATASET"
 FOLEYTUNE_DENOISE_SETTINGS = "FOLEYTUNE_DENOISE_SETTINGS"
+FOLEYTUNE_FILTER_OPTIONS = "FOLEYTUNE_FILTER_OPTIONS"
 FOLEYTUNE_DS_CATEGORY = "FoleyTune"
 FOLEYTUNE_AUDIO_CATEGORY = "FoleyTune"
 
@@ -901,6 +902,32 @@ def _extract_and_score(args):
     return result
 
 
+def _extract_audio_only(args):
+    """Extract audio from video without scoring. For cached clips needing waveforms."""
+    f, folder_str, need_clap = args
+    folder = Path(folder_str)
+    try:
+        rel = f.relative_to(folder)
+    except ValueError:
+        rel = Path(f.name)
+    try:
+        wav, sr = _extract_audio_from_video(f)
+    except Exception as e:
+        return {"path": str(f), "rel": str(rel), "error": str(e)}
+    result = {
+        "path": str(f), "rel": str(rel),
+        "wav_np": wav.numpy(), "sr": sr,
+    }
+    if need_clap:
+        mono = wav[0].mean(0, keepdim=True)
+        if sr != 48000:
+            mono_48k = torchaudio.functional.resample(mono, sr, 48000)
+        else:
+            mono_48k = mono
+        result["mono_48k_np"] = mono_48k.numpy()
+    return result
+
+
 def _extract_audio_from_video(path: Path):
     """Extract audio from a video file via FFmpeg subprocess.
 
@@ -940,6 +967,74 @@ def _scan_video_folder(folder: Path):
     return files
 
 
+class FoleyTuneFilterOptions:
+    """Advanced scoring options for VideoQualityFilter.
+
+    Connect to the filter_options input and set profile=custom to use
+    manual weights and per-metric hard floors.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "weight_bandwidth": ("FLOAT", {
+                    "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1,
+                    "tooltip": "Bandwidth contribution to composite score.",
+                }),
+                "weight_spectral": ("FLOAT", {
+                    "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1,
+                    "tooltip": "Spectral quality contribution to composite score.",
+                }),
+                "weight_clap": ("FLOAT", {
+                    "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.1,
+                    "tooltip": "CLAP text similarity contribution to composite score.",
+                }),
+            },
+            "optional": {
+                "max_negative_clap_score": ("FLOAT", {
+                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Reject clips scoring above this against the negative prompt.",
+                }),
+                "min_bandwidth_score": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Hard floor for bandwidth. 0=disabled.",
+                }),
+                "min_spectral_score": ("FLOAT", {
+                    "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Hard floor for spectral quality. Catches silence/clipping. 0=disabled.",
+                }),
+                "min_clap_score": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Hard floor for CLAP similarity. 0=disabled.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = (FOLEYTUNE_FILTER_OPTIONS,)
+    RETURN_NAMES = ("filter_options",)
+    FUNCTION = "get_options"
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
+    DESCRIPTION = (
+        "Advanced scoring weights and hard floors for VideoQualityFilter. "
+        "Connect and set profile=custom to override profile presets."
+    )
+
+    def get_options(self, weight_bandwidth=0.4, weight_spectral=0.4,
+                    weight_clap=0.2, max_negative_clap_score=0.3,
+                    min_bandwidth_score=0.0, min_spectral_score=0.2,
+                    min_clap_score=0.0):
+        return ({
+            "weight_bandwidth": weight_bandwidth,
+            "weight_spectral": weight_spectral,
+            "weight_clap": weight_clap,
+            "max_negative_clap_score": max_negative_clap_score,
+            "min_bandwidth_score": min_bandwidth_score,
+            "min_spectral_score": min_spectral_score,
+            "min_clap_score": min_clap_score,
+        },)
+
+
 class FoleyTuneVideoQualityFilter:
     """Quality-filter video clips by analyzing their audio track only.
 
@@ -948,6 +1043,15 @@ class FoleyTuneVideoQualityFilter:
     passing videos to an output folder.
     """
 
+    # Scoring profiles: (weight_bandwidth, weight_spectral, weight_clap, min_spectral)
+    PROFILES = {
+        "general_foley": (0.4, 0.4, 0.2, 0.2),
+        "voice_dominated": (0.0, 0.6, 0.4, 0.15),
+        "music": (0.3, 0.3, 0.4, 0.15),
+        "ambience": (0.5, 0.3, 0.2, 0.1),
+        "custom": None,  # use manual weight inputs
+    }
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -955,6 +1059,14 @@ class FoleyTuneVideoQualityFilter:
                 "video_folder": ("STRING", {
                     "default": "",
                     "tooltip": "Folder containing video files. Scans 1 level of subfolders.",
+                }),
+                "profile": (list(cls.PROFILES.keys()), {
+                    "default": "general_foley",
+                    "tooltip": "Scoring profile. general_foley: balanced for impacts/footsteps. "
+                               "voice_dominated: no bandwidth penalty, SQ+CLAP only. "
+                               "music: CLAP-heavy for genre matching, moderate BW. "
+                               "ambience: BW-heavy (rich spectral spread), low SQ floor. "
+                               "custom: use the manual weight sliders below.",
                 }),
                 "min_quality_score": ("FLOAT", {
                     "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01,
@@ -982,34 +1094,6 @@ class FoleyTuneVideoQualityFilter:
                     "default": "",
                     "tooltip": "Reject clips matching this description (e.g. 'voice, speech, talking'). Empty = skip.",
                 }),
-                "max_negative_clap_score": ("FLOAT", {
-                    "default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Reject clips scoring above this against the negative prompt.",
-                }),
-                "min_bandwidth_score": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Hard floor: rejects any clip below this bandwidth score, regardless of composite. 0=disabled. Set >0 only if you need a strict per-metric cutoff (e.g. 0.3 = require 6.2 kHz effective bandwidth).",
-                }),
-                "min_spectral_score": ("FLOAT", {
-                    "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Hard floor: rejects any clip below this spectral quality score, regardless of composite. Catches genuinely bad audio (silence, heavy clipping). 0=disabled.",
-                }),
-                "min_clap_score": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Hard floor: rejects any clip below this CLAP similarity score, regardless of composite. 0=disabled. Usually not needed since weight_clap already controls CLAP's influence on the composite.",
-                }),
-                "weight_bandwidth": ("FLOAT", {
-                    "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1,
-                    "tooltip": "Soft influence: how much bandwidth contributes to the composite score (composite = w_bw*BW + w_sq*SQ + w_cl*CL). Set 0 for content with naturally low bandwidth (e.g. speech, vocals).",
-                }),
-                "weight_spectral": ("FLOAT", {
-                    "default": 0.4, "min": 0.0, "max": 1.0, "step": 0.1,
-                    "tooltip": "Soft influence: how much spectral quality contributes to the composite score (composite = w_bw*BW + w_sq*SQ + w_cl*CL). Higher = prioritize clean, natural-sounding audio.",
-                }),
-                "weight_clap": ("FLOAT", {
-                    "default": 0.2, "min": 0.0, "max": 1.0, "step": 0.1,
-                    "tooltip": "Soft influence: how much CLAP text similarity contributes to the composite score (composite = w_bw*BW + w_sq*SQ + w_cl*CL). Higher = prioritize prompt-matching content.",
-                }),
                 "skip_first": ("INT", {
                     "default": 0, "min": 0, "max": 999999, "step": 1,
                     "tooltip": "Skip the first N clips (sorted order). Use to process only new clips when extending a dataset.",
@@ -1017,6 +1101,10 @@ class FoleyTuneVideoQualityFilter:
                 "seed": ("INT", {
                     "default": 42,
                     "tooltip": "Seed for random val clip selection from rejected clips.",
+                }),
+                "filter_options": (FOLEYTUNE_FILTER_OPTIONS, {
+                    "tooltip": "Connect a Filter Options node for manual weights/floors. "
+                               "Only active when profile=custom.",
                 }),
                 "denoise_settings": (FOLEYTUNE_DENOISE_SETTINGS, {
                     "tooltip": "Connect a Denoiser Settings node to denoise clips "
@@ -1038,20 +1126,49 @@ class FoleyTuneVideoQualityFilter:
 
     def filter_videos(self, video_folder: str, min_quality_score: float,
                       skip_rejected: bool, num_workers: int = 4,
+                      profile: str = "general_foley",
                       output_folder: str = "",
                       clap_prompt: str = "",
                       clap_negative_prompt: str = "",
-                      max_negative_clap_score: float = 0.3,
-                      min_bandwidth_score: float = 0.0,
-                      min_spectral_score: float = 0.2,
-                      min_clap_score: float = 0.0,
-                      weight_bandwidth: float = 0.4,
-                      weight_spectral: float = 0.4,
-                      weight_clap: float = 0.2,
                       skip_first: int = 0,
                       seed: int = 42,
+                      filter_options=None,
                       denoise_settings=None):
         import shutil
+
+        # Resolve scoring parameters from profile or filter_options
+        preset = self.PROFILES.get(profile)
+        if preset is not None:
+            weight_bandwidth, weight_spectral, weight_clap, min_spectral_score = preset
+            # Hard floors use sensible defaults for non-custom profiles
+            max_negative_clap_score = 0.3
+            min_bandwidth_score = 0.0
+            min_clap_score = 0.0
+            print(f"[VideoQualityFilter] Profile '{profile}': "
+                  f"BW={weight_bandwidth} SQ={weight_spectral} CLAP={weight_clap} "
+                  f"min_spectral={min_spectral_score}", flush=True)
+        elif filter_options is not None:
+            # custom profile with connected options node
+            weight_bandwidth = filter_options["weight_bandwidth"]
+            weight_spectral = filter_options["weight_spectral"]
+            weight_clap = filter_options["weight_clap"]
+            max_negative_clap_score = filter_options["max_negative_clap_score"]
+            min_bandwidth_score = filter_options["min_bandwidth_score"]
+            min_spectral_score = filter_options["min_spectral_score"]
+            min_clap_score = filter_options["min_clap_score"]
+            print(f"[VideoQualityFilter] Custom options: "
+                  f"BW={weight_bandwidth} SQ={weight_spectral} CLAP={weight_clap} "
+                  f"min_bw={min_bandwidth_score} min_sq={min_spectral_score} "
+                  f"min_clap={min_clap_score}", flush=True)
+        else:
+            # custom profile without options node — use general_foley defaults
+            weight_bandwidth, weight_spectral, weight_clap, min_spectral_score = \
+                self.PROFILES["general_foley"]
+            max_negative_clap_score = 0.3
+            min_bandwidth_score = 0.0
+            min_clap_score = 0.0
+            print("[VideoQualityFilter] Profile 'custom' without options node, "
+                  "falling back to general_foley defaults", flush=True)
 
         folder = Path(video_folder.strip())
         if not folder.exists():
@@ -1090,50 +1207,142 @@ class FoleyTuneVideoQualityFilter:
         w_sq = weight_spectral / w_total
         w_cl = (weight_clap / w_total) if use_clap else 0.0
 
-        # --- Phase 1: parallel extraction + scoring ---
-        # Try ProcessPoolExecutor first (bypasses GIL for CPU-bound scoring).
-        # Falls back to ThreadPoolExecutor on Windows where spawn-mode processes
-        # crash when the parent has CUDA initialized.
+        # --- Phase 1: parallel extraction + scoring (with cache) ---
+        import json as _json
         import time
         import sys
         from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
         t0 = time.time()
         folder_str = str(folder)
-        results = []
 
         use_threads = sys.platform == "win32"
         pool_type = "threads" if use_threads else "processes"
         PoolClass = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
-        print(f"[VideoQualityFilter] Phase 1: extracting + scoring + resample "
-              f"{len(files)} clips with {num_workers} {pool_type}...", flush=True)
 
-        with PoolClass(max_workers=num_workers) as pool:
-            futures = [pool.submit(_extract_and_score, (f, folder_str, need_clap)) for f in files]
+        # Load scores cache
+        cache_path = folder / ".quality_cache.json"
+        cache = {}
+        if cache_path.exists():
             try:
-              for i, future in enumerate(as_completed(futures)):
-                throw_exception_if_processing_interrupted()
-                r = future.result()
-                if "error" not in r:
-                    r["wav"] = torch.from_numpy(r["wav_np"])
-                    del r["wav_np"]
-                    r["path"] = Path(r["path"])
-                    r["rel"] = Path(r["rel"])
-                else:
-                    r["path"] = Path(r["path"])
-                    r["rel"] = Path(r["rel"])
-                results.append(r)
-                if (i + 1) % 10 == 0 or (i + 1) == len(futures):
-                    print(f"  [{i+1}/{len(futures)}] done ({time.time()-t0:.1f}s)", flush=True)
-            except:
-                for f in futures:
-                    f.cancel()
-                raise
+                with open(cache_path) as _cf:
+                    cache = _json.load(_cf)
+            except Exception:
+                cache = {}
+
+        # Classify files as cached (valid hit) or uncached
+        cached_hits = []    # [(file, rel, cache_entry), ...]
+        uncached_files = []
+        for f in files:
+            try:
+                rel = f.relative_to(folder)
+            except ValueError:
+                rel = Path(f.name)
+            entry = cache.get(str(rel))
+            if entry:
+                stat = f.stat()
+                if (abs(entry.get("mtime", 0) - stat.st_mtime) < 0.01
+                        and entry.get("size") == stat.st_size):
+                    cached_hits.append((f, rel, entry))
+                    continue
+            uncached_files.append(f)
+
+        n_cached = len(cached_hits)
+        n_uncached = len(uncached_files)
+
+        # Extract + score uncached files only
+        results = []
+        if uncached_files:
+            print(f"[VideoQualityFilter] Phase 1: extracting + scoring "
+                  f"{n_uncached} new clips with {num_workers} {pool_type} "
+                  f"({n_cached} cached)...", flush=True)
+            with PoolClass(max_workers=num_workers) as pool:
+                futures = [pool.submit(_extract_and_score, (f, folder_str, need_clap))
+                           for f in uncached_files]
+                try:
+                    for i, future in enumerate(as_completed(futures)):
+                        throw_exception_if_processing_interrupted()
+                        r = future.result()
+                        if "error" not in r:
+                            r["wav"] = torch.from_numpy(r["wav_np"])
+                            del r["wav_np"]
+                            r["path"] = Path(r["path"])
+                            r["rel"] = Path(r["rel"])
+                        else:
+                            r["path"] = Path(r["path"])
+                            r["rel"] = Path(r["rel"])
+                        results.append(r)
+                        if (i + 1) % 10 == 0 or (i + 1) == n_uncached:
+                            print(f"  [{i+1}/{n_uncached}] done ({time.time()-t0:.1f}s)",
+                                  flush=True)
+                except:
+                    for f in futures:
+                        f.cancel()
+                    raise
+        else:
+            print(f"[VideoQualityFilter] Phase 1: all {n_cached} clips cached, "
+                  f"skipping extraction", flush=True)
+
+        # Merge cached results (no waveform loaded)
+        for f, rel, entry in cached_hits:
+            results.append({
+                "path": f, "rel": rel,
+                "bw": entry["bw"], "sq": entry["sq"],
+                "duration": entry["duration"], "sr": entry["sr"],
+                "cached": True,
+            })
+
+        # Update cache with newly scored clips
+        for r in results:
+            if "error" not in r and not r.get("cached"):
+                rel_str = str(r["rel"])
+                stat = r["path"].stat()
+                cache[rel_str] = {
+                    "bw": round(r["bw"], 6), "sq": round(r["sq"], 6),
+                    "duration": round(r["duration"], 4), "sr": r["sr"],
+                    "mtime": stat.st_mtime, "size": stat.st_size,
+                }
+        try:
+            with open(cache_path, "w") as _cf:
+                _json.dump(cache, _cf)
+        except Exception as e:
+            print(f"[VideoQualityFilter] Warning: could not save cache: {e}", flush=True)
 
         t1 = time.time()
         print(f"[VideoQualityFilter] Phase 1 done in {t1-t0:.1f}s", flush=True)
 
         # Sort by relative path to keep report deterministic
         results.sort(key=lambda r: str(r["rel"]))
+
+        # If denoise or CLAP needed, extract audio for cached clips (no scoring)
+        _need_full_audio = (denoise_settings is not None
+                            and denoise_settings.get("strength", 0) > 0) or need_clap
+        if _need_full_audio:
+            cached_no_wav = [r for r in results if r.get("cached") and "error" not in r]
+            if cached_no_wav:
+                print(f"[VideoQualityFilter] Extracting audio for {len(cached_no_wav)} "
+                      f"cached clips (needed for denoise/CLAP)...", flush=True)
+                t_ext = time.time()
+                with PoolClass(max_workers=num_workers) as pool:
+                    future_map = {
+                        pool.submit(_extract_audio_only,
+                                    (r["path"], folder_str, need_clap)): r
+                        for r in cached_no_wav
+                    }
+                    for future in as_completed(future_map):
+                        throw_exception_if_processing_interrupted()
+                        r_orig = future_map[future]
+                        ext = future.result()
+                        if "error" not in ext:
+                            r_orig["wav"] = torch.from_numpy(ext["wav_np"])
+                            r_orig["sr"] = ext["sr"]
+                            if "mono_48k_np" in ext:
+                                r_orig["mono_48k_np"] = ext["mono_48k_np"]
+                            r_orig.pop("cached", None)
+                        else:
+                            r_orig["error"] = ext["error"]
+                            r_orig.pop("cached", None)
+                print(f"[VideoQualityFilter] Audio extraction done in "
+                      f"{time.time()-t_ext:.1f}s", flush=True)
 
         # --- Optional denoising pass (between extraction and CLAP/decisions) ---
         if denoise_settings is not None and denoise_settings["strength"] > 0:
@@ -1316,6 +1525,7 @@ class FoleyTuneVideoQualityFilter:
             print(f"[VideoQualityFilter] Phase 2b done in {time.time()-t_gpu:.1f}s", flush=True)
 
         # --- Phase 3: decisions ---
+        t_p3 = time.time()
         print(f"[VideoQualityFilter] Phase 3: filtering...", flush=True)
         accepted_items = []
         rejected_items = []
@@ -1375,8 +1585,7 @@ class FoleyTuneVideoQualityFilter:
                     dst = out_dir / rel
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(r["path"], dst)
-                accepted_items.append({
-                    "waveform": r["wav"],
+                item = {
                     "sample_rate": r["sr"],
                     "name": r["rel"].stem,
                     "video_path": str(r["path"]),
@@ -1388,7 +1597,12 @@ class FoleyTuneVideoQualityFilter:
                         "composite": round(composite, 4),
                         "duration": round(duration, 2),
                     },
-                })
+                }
+                if r.get("cached"):
+                    item["_needs_audio"] = True
+                else:
+                    item["waveform"] = r["wav"]
+                accepted_items.append(item)
             else:
                 n_rejected += 1
                 for reason in reasons:
@@ -1402,15 +1616,19 @@ class FoleyTuneVideoQualityFilter:
                     dst = out_dir / rel
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(r["path"], dst)
-                rejected_items.append({
-                    "waveform": r["wav"],
+                item = {
                     "sample_rate": r["sr"],
                     "name": r["rel"].stem,
                     "video_path": str(r["path"]),
-                })
+                }
+                if r.get("cached"):
+                    item["_needs_audio"] = True
+                else:
+                    item["waveform"] = r["wav"]
+                rejected_items.append(item)
 
         t2 = time.time()
-        print(f"[VideoQualityFilter] Phase 3 done in {t2-t1:.1f}s", flush=True)
+        print(f"[VideoQualityFilter] Phase 3 done in {t2-t_p3:.1f}s", flush=True)
 
         # --- Build dataset with optional val clip from rejected ---
         import random
@@ -1423,6 +1641,34 @@ class FoleyTuneVideoQualityFilter:
             dataset.append(val_pick)
             rejected_items.clear()  # free waveforms of non-selected rejects
         results.clear()  # free Phase 1 result dicts
+
+        # Extract audio for passing/val clips that were cached (deferred loading)
+        items_needing_audio = [item for item in dataset if item.get("_needs_audio")]
+        if items_needing_audio:
+            print(f"[VideoQualityFilter] Extracting audio for {len(items_needing_audio)} "
+                  f"passing clips (from cache)...", flush=True)
+            t_audio = time.time()
+            with PoolClass(max_workers=num_workers) as pool:
+                future_map = {
+                    pool.submit(_extract_audio_only,
+                                (Path(item["video_path"]), folder_str, False)): item
+                    for item in items_needing_audio
+                }
+                for i, future in enumerate(as_completed(future_map)):
+                    throw_exception_if_processing_interrupted()
+                    item = future_map[future]
+                    ext = future.result()
+                    if "error" not in ext:
+                        item["waveform"] = torch.from_numpy(ext["wav_np"])
+                        item["sample_rate"] = ext["sr"]
+                    item.pop("_needs_audio", None)
+                    if (i + 1) % 10 == 0 or (i + 1) == len(items_needing_audio):
+                        print(f"  [{i+1}/{len(items_needing_audio)}] done "
+                              f"({time.time()-t_audio:.1f}s)", flush=True)
+            # Remove items that failed audio extraction
+            dataset = [item for item in dataset if "waveform" in item]
+            print(f"[VideoQualityFilter] Deferred extraction done in "
+                  f"{time.time()-t_audio:.1f}s", flush=True)
 
         avg_score = sum(scores_all) / len(scores_all) if scores_all else 0.0
         lines.append("---")
@@ -1457,7 +1703,8 @@ class FoleyTuneVideoQualityFilter:
 
         t3 = time.time()
         print(f"[VideoQualityFilter] Total: {t3-t0:.1f}s "
-              f"(extract+score: {t1-t0:.1f}s, filter: {t2-t1:.1f}s, finalize: {t3-t2:.1f}s)",
+              f"(extract+score: {t1-t0:.1f}s, denoise+clap: {t_p3-t1:.1f}s, "
+              f"filter: {t2-t_p3:.1f}s, finalize: {t3-t2:.1f}s)",
               flush=True)
 
         report = "\n".join(lines)
@@ -2805,6 +3052,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneDatasetCompressor": FoleyTuneDatasetCompressor,
     "FoleyTuneDatasetInspector": FoleyTuneDatasetInspector,
     "FoleyTuneDenoiserSettings": FoleyTuneDenoiserSettings,
+    "FoleyTuneFilterOptions": FoleyTuneFilterOptions,
     "FoleyTuneDatasetQualityFilter": FoleyTuneDatasetQualityFilter,
     "FoleyTuneVideoQualityFilter": FoleyTuneVideoQualityFilter,
     "FoleyTuneDatasetHfSmoother": FoleyTuneDatasetHfSmoother,
@@ -2827,6 +3075,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneDatasetCompressor": "FoleyTune Dataset Compressor",
     "FoleyTuneDatasetInspector": "FoleyTune Dataset Inspector",
     "FoleyTuneDenoiserSettings": "FoleyTune Denoiser Settings",
+    "FoleyTuneFilterOptions": "FoleyTune Filter Options",
     "FoleyTuneDatasetQualityFilter": "FoleyTune Dataset Quality Filter",
     "FoleyTuneVideoQualityFilter": "FoleyTune Video Quality Filter",
     "FoleyTuneDatasetHfSmoother": "FoleyTune Dataset HF Smoother",

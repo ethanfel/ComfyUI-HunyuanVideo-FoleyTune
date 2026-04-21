@@ -43,7 +43,7 @@ WOOSH_AE_EXPECTED_SIZE = 822991075  # bytes
 
 # Serializes concurrent ensure_woosh_ae() calls (e.g. two ComfyUI worker threads
 # hitting a cold cache at once) so only one thread downloads and extracts.
-_LOCK = threading.Lock()
+_DOWNLOAD_LOCK = threading.Lock()
 
 
 def _woosh_ae_dir() -> str:
@@ -135,7 +135,7 @@ def _make_download_reporthook(total_hint: int):
 
 def ensure_woosh_ae() -> str:
     """Download + extract Woosh-AE weights if missing. Returns absolute path to the checkpoint folder."""
-    with _LOCK:
+    with _DOWNLOAD_LOCK:
         # Re-check inside the lock (standard double-check): another thread may
         # have finished the download while we waited on the lock.
         target = _woosh_ae_dir()
@@ -213,21 +213,24 @@ def ensure_woosh_ae() -> str:
 
 TARGET_SR = 48000
 
-def _prep_audio(audio: dict) -> tuple[torch.Tensor, int, int]:
-    """Normalize ComfyUI AUDIO to [B, 1, L] mono @ 48 kHz. Returns (wave, orig_sr, orig_len)."""
-    wave = audio["waveform"]  # [B, C, L]
+def _prep_audio(audio: dict) -> torch.Tensor:
+    """Normalize ComfyUI AUDIO to [B, 1, L] mono @ 48 kHz."""
+    wave = audio["waveform"]
+    if wave.ndim != 3:
+        raise ValueError(
+            f"Expected 3D waveform [B, C, L], got shape {tuple(wave.shape)}"
+        )
     sr = int(audio["sample_rate"])
-    orig_len = wave.shape[-1]
 
     if wave.shape[1] > 1:
-        logger.warning(f"Stereo input, downmixing to mono")
+        logger.warning("Stereo input, downmixing to mono")
         wave = wave.mean(dim=1, keepdim=True)
 
     if sr != TARGET_SR:
         logger.warning(f"Resampling {sr} Hz -> {TARGET_SR} Hz")
         wave = torchaudio.functional.resample(wave, sr, TARGET_SR)
 
-    return wave, sr, orig_len
+    return wave
 
 
 def _pad_to_min(wave: torch.Tensor, min_len: int) -> tuple[torch.Tensor, int]:
@@ -241,12 +244,13 @@ def _pad_to_min(wave: torch.Tensor, min_len: int) -> tuple[torch.Tensor, int]:
 def _finalize(wave: torch.Tensor, orig_len_at_target_sr: int) -> dict:
     """Trim to original duration (at target SR) and package as ComfyUI AUDIO."""
     wave = wave[..., :orig_len_at_target_sr]
-    return {"waveform": wave.contiguous().cpu(), "sample_rate": TARGET_SR}
+    return {"waveform": wave.cpu().contiguous(), "sample_rate": TARGET_SR}
 
 
 # --- Woosh node --------------------------------------------------------------
 
 _WOOSH_AE_SINGLETON = {"model": None, "device": None, "dtype": None}
+_WOOSH_LOAD_LOCK = threading.Lock()
 _WOOSH_ALIASED = False
 
 
@@ -287,10 +291,11 @@ def _alias_woosh_modules() -> None:
 
 
 def _get_woosh_ae(device: str, dtype_str: str):
-    """Lazy-load + cache the Woosh-AE. Reloads if device or dtype changed."""
-    _alias_woosh_modules()
-    from woosh_ae import AudioAutoEncoder, LoadConfig
+    """Lazy-load + cache the Woosh-AE. Reloads if device or dtype changed.
 
+    Thread-safe: concurrent ComfyUI workers hitting a cold cache serialize
+    on _WOOSH_LOAD_LOCK so only one thread constructs the model.
+    """
     dtype = {"fp32": torch.float32, "fp16": torch.float16}[dtype_str]
     target_device = torch.device(device)
 
@@ -300,30 +305,40 @@ def _get_woosh_ae(device: str, dtype_str: str):
             and cached["dtype"] == dtype):
         return cached["model"]
 
-    # Free old model before loading a new one on device/dtype change so we
-    # don't hold 2x memory transiently. A local torch.cuda.empty_cache() on
-    # explicit reload is fine (unlike mm.soft_empty_cache(), which touches
-    # ComfyUI's global manager and is disallowed here).
-    if cached["model"] is not None:
-        cached["model"] = None
-        cached["device"] = None
-        cached["dtype"] = None
-        import gc
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    with _WOOSH_LOAD_LOCK:
+        # Re-check: another thread may have filled the cache while we waited.
+        if (cached["model"] is not None
+                and cached["device"] == target_device
+                and cached["dtype"] == dtype):
+            return cached["model"]
 
-    ckpt_dir = ensure_woosh_ae()
-    logger.info(f"Loading Woosh-AE from {ckpt_dir} on {target_device} ({dtype})")
-    ae = AudioAutoEncoder(LoadConfig(path=ckpt_dir))
-    # The constructor only sets up the graph; weights are pulled from disk
-    # by this explicit call (mirrors upstream test_Woosh-AE.py).
-    ae.load_from_config()
-    ae = ae.to(target_device).to(dtype).eval()
-    ae.requires_grad_(False)
+        _alias_woosh_modules()
+        from woosh_ae import AudioAutoEncoder, LoadConfig
 
-    cached.update(model=ae, device=target_device, dtype=dtype)
-    return ae
+        # Free old model before loading a new one on device/dtype change so we
+        # don't hold 2x memory transiently. A local torch.cuda.empty_cache() on
+        # explicit reload is fine (unlike mm.soft_empty_cache(), which touches
+        # ComfyUI's global manager and is disallowed here).
+        if cached["model"] is not None:
+            cached["model"] = None
+            cached["device"] = None
+            cached["dtype"] = None
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        ckpt_dir = ensure_woosh_ae()
+        logger.info(f"Loading Woosh-AE from {ckpt_dir} on {target_device} ({dtype})")
+        ae = AudioAutoEncoder(LoadConfig(path=ckpt_dir))
+        # The constructor only sets up the graph; weights are pulled from disk
+        # by this explicit call (mirrors upstream test_Woosh-AE.py).
+        ae.load_from_config()
+        ae = ae.to(target_device).to(dtype).eval()
+        ae.requires_grad_(False)
+
+        cached.update(model=ae, device=target_device, dtype=dtype)
+        return ae
 
 
 class FoleyTuneWooshVAERoundTrip:
@@ -342,7 +357,13 @@ class FoleyTuneWooshVAERoundTrip:
     DESCRIPTION = "Encode->decode audio through Woosh-AE (VOCOS, 128-d, 48 kHz). For A/B comparison against DAC-VAE."
 
     def round_trip(self, audio, device, dtype):
-        wave, _, orig_len = _prep_audio(audio)
+        if dtype == "fp16" and device == "cpu":
+            raise RuntimeError(
+                "fp16 is not supported on cpu (half-precision conv ops are cuda-only). "
+                "Use fp32 on cpu, or switch device to cuda."
+            )
+
+        wave = _prep_audio(audio)
         orig_len_48k = wave.shape[-1]
 
         # Woosh VOCOS hop_length=480. Pad to 6x hop for safety margin over
@@ -351,7 +372,7 @@ class FoleyTuneWooshVAERoundTrip:
 
         ae = _get_woosh_ae(device, dtype)
         torch_dtype = {"fp32": torch.float32, "fp16": torch.float16}[dtype]
-        x = wave.to(ae.device_any() if hasattr(ae, 'device_any') else next(ae.parameters()).device).to(torch_dtype)
+        x = wave.to(next(ae.parameters()).device).to(torch_dtype)
 
         with torch.no_grad():
             z = ae.forward(x)
@@ -369,14 +390,15 @@ class FoleyTuneWooshVAERoundTrip:
 # --- DAC node ----------------------------------------------------------------
 
 # DAC-VAE stride at 48 kHz: product of encoder_rates [2, 3, 4, 5, 8] = 960.
-# preprocess() inside DAC auto-pads to hop_length, so strictly speaking the
-# external pre-pad is belt-and-suspenders; we keep it to mirror Woosh and
-# guarantee a usable minimum length (4 frames of latent) regardless of
-# _prep_audio output.
+# DAC.preprocess() auto-pads to hop_length, but it is only called by
+# DAC.forward() — we call DAC.encode() directly, which does NOT run
+# preprocess. So this external pad is load-bearing for inputs shorter
+# than the encoder's effective receptive field; do not remove it.
 _DAC_HOP_LENGTH = prod(_DAC_KWARGS["encoder_rates"])  # 2*3*4*5*8 = 960
 _DAC_MIN_LEN = _DAC_HOP_LENGTH * 4  # 3840 samples @ 48 kHz (~80 ms)
 
 _DAC_SINGLETON = {"model": None, "device": None}
+_DAC_LOAD_LOCK = threading.Lock()
 
 
 def _get_dac(device: str):
@@ -387,52 +409,59 @@ def _get_dac(device: str):
     ``audiotools.ml.BaseModel`` that does not implement ``load``, and the
     real DAC checkpoint ships with ``continuous=True`` + the specific
     encoder/decoder rates pinned in ``utils._DAC_KWARGS``.
-    """
-    # Deferred so standalone smoke tests (no diffusers) can still import
-    # this module; see the module-level try/except around _DAC_KWARGS.
-    try:
-        from .utils import load_dac_any
-    except ImportError:
-        from utils import load_dac_any
 
+    Thread-safe: concurrent ComfyUI workers hitting a cold cache serialize
+    on _DAC_LOAD_LOCK so only one thread constructs the model.
+    """
     target_device = torch.device(device)
     cached = _DAC_SINGLETON
     if cached["model"] is not None and cached["device"] == target_device:
         return cached["model"]
 
-    # Free old model before loading a new one on device change so we don't
-    # hold 2x memory transiently (mirrors _get_woosh_ae).
-    if cached["model"] is not None:
-        cached["model"] = None
-        cached["device"] = None
-        import gc
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    with _DAC_LOAD_LOCK:
+        if cached["model"] is not None and cached["device"] == target_device:
+            return cached["model"]
 
-    weights_path = os.path.join(folder_paths.models_dir, "foley", "vae_128d_48k.pth")
-    if not os.path.exists(weights_path):
+        # Deferred so standalone smoke tests (no diffusers) can still import
+        # this module; see the module-level try/except around _DAC_KWARGS.
         try:
-            from huggingface_hub import hf_hub_download
-        except ImportError as e:
-            raise RuntimeError(
-                f"huggingface_hub is required to auto-download DAC-VAE weights. "
-                f"Install it (`pip install huggingface_hub`) or place the weights manually at "
-                f"{weights_path}."
-            ) from e
-        logger.info("DAC-VAE weights not found. Downloading from Tencent/HunyuanVideo-Foley")
-        weights_path = hf_hub_download(
-            repo_id="Tencent/HunyuanVideo-Foley",
-            filename="vae_128d_48k.pth",
-            local_dir=os.path.join(folder_paths.models_dir, "foley"),
-        )
+            from .utils import load_dac_any
+        except ImportError:
+            from utils import load_dac_any
 
-    logger.info(f"Loading DAC-VAE from {weights_path} on {target_device} (fp32)")
-    dac = load_dac_any(weights_path, device=target_device)
-    dac.requires_grad_(False)
+        # Free old model before loading a new one on device change so we don't
+        # hold 2x memory transiently (mirrors _get_woosh_ae).
+        if cached["model"] is not None:
+            cached["model"] = None
+            cached["device"] = None
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-    cached.update(model=dac, device=target_device)
-    return dac
+        weights_path = os.path.join(folder_paths.models_dir, "foley", "vae_128d_48k.pth")
+        if not os.path.exists(weights_path):
+            try:
+                from huggingface_hub import hf_hub_download
+            except ImportError as e:
+                raise RuntimeError(
+                    f"huggingface_hub is required to auto-download DAC-VAE weights. "
+                    f"Install it (`pip install huggingface_hub`) or place the weights manually at "
+                    f"{weights_path}."
+                ) from e
+            logger.info("DAC-VAE weights not found. Downloading from Tencent/HunyuanVideo-Foley")
+            weights_path = hf_hub_download(
+                repo_id="Tencent/HunyuanVideo-Foley",
+                filename="vae_128d_48k.pth",
+                local_dir=os.path.join(folder_paths.models_dir, "foley"),
+            )
+
+        logger.info(f"Loading DAC-VAE from {weights_path} on {target_device} (fp32)")
+        dac = load_dac_any(weights_path, device=target_device)
+        dac.requires_grad_(False)
+
+        cached.update(model=dac, device=target_device)
+        return dac
 
 
 class FoleyTuneDACVAERoundTrip:
@@ -450,7 +479,7 @@ class FoleyTuneDACVAERoundTrip:
     DESCRIPTION = "Encode->decode audio through HunyuanVideo-Foley's DAC-VAE (128-d, 48 kHz). For A/B comparison against Woosh-AE."
 
     def round_trip(self, audio, device):
-        wave, _, _ = _prep_audio(audio)
+        wave = _prep_audio(audio)
         orig_len_48k = wave.shape[-1]
 
         # Guarantee at least 4 latent frames (see _DAC_MIN_LEN above).

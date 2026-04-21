@@ -224,3 +224,98 @@ def _finalize(wave: torch.Tensor, orig_len_at_target_sr: int) -> dict:
     """Trim to original duration (at target SR) and package as ComfyUI AUDIO."""
     wave = wave[..., :orig_len_at_target_sr]
     return {"waveform": wave.contiguous().cpu(), "sample_rate": TARGET_SR}
+
+
+# --- Woosh node --------------------------------------------------------------
+
+_WOOSH_AE_SINGLETON = {"model": None, "device": None, "dtype": None}
+_WOOSH_ALIASED = False
+
+
+def _alias_woosh_modules() -> None:
+    """Register ``sys.modules['woosh.*']`` -> ``woosh_ae.*`` so that hydra's
+    ``instantiate`` can resolve the upstream ``_target_`` paths embedded in the
+    vendored ``config.yaml`` (e.g. ``woosh.module.model.VocosAutoEncoder``).
+
+    Idempotent: guarded by a module-level flag so repeated node invocations do
+    not re-import or overwrite existing aliases.
+    """
+    global _WOOSH_ALIASED
+    if _WOOSH_ALIASED:
+        return
+
+    import woosh_ae
+    import woosh_ae.module
+    import woosh_ae.module.model
+    import woosh_ae.module.model.vocos
+
+    # Covers the _target_ paths observed in config.yaml:
+    #   woosh.module.model.VocosAutoEncoder
+    #   woosh.module.model.vocos.ISTFTCircleHead
+    #   woosh.module.model.vocos.ZeroDropoutTransform
+    sys.modules.setdefault("woosh", woosh_ae)
+    sys.modules.setdefault("woosh.module", woosh_ae.module)
+    sys.modules.setdefault("woosh.module.model", woosh_ae.module.model)
+    sys.modules.setdefault("woosh.module.model.vocos", woosh_ae.module.model.vocos)
+
+    _WOOSH_ALIASED = True
+
+
+def _get_woosh_ae(device: str, dtype_str: str):
+    """Lazy-load + cache the Woosh-AE. Reloads if device or dtype changed."""
+    import torch
+    _alias_woosh_modules()
+    from woosh_ae import AudioAutoEncoder, LoadConfig
+
+    dtype = {"fp32": torch.float32, "fp16": torch.float16}[dtype_str]
+    target_device = torch.device(device)
+
+    cached = _WOOSH_AE_SINGLETON
+    if (cached["model"] is not None
+            and cached["device"] == target_device
+            and cached["dtype"] == dtype):
+        return cached["model"]
+
+    ckpt_dir = ensure_woosh_ae()
+    logger.info(f"Loading Woosh-AE from {ckpt_dir} on {target_device} ({dtype})")
+    ae = AudioAutoEncoder(LoadConfig(path=ckpt_dir))
+    ae = ae.to(target_device).to(dtype).eval()
+    ae.requires_grad_(False)
+
+    cached.update(model=ae, device=target_device, dtype=dtype)
+    return ae
+
+
+class FoleyTuneWooshVAERoundTrip:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "device": (["cuda", "cpu"], {"default": "cuda"}),
+                "dtype": (["fp32", "fp16"], {"default": "fp32"}),
+            }
+        }
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "round_trip"
+    CATEGORY = "FoleyTune/Utils"
+    DESCRIPTION = "Encode->decode audio through Woosh-AE (VOCOS, 128-d, 48 kHz). For A/B comparison against DAC-VAE."
+
+    def round_trip(self, audio, device, dtype):
+        import torch
+        wave, _, orig_len = _prep_audio(audio)
+        orig_len_48k = wave.shape[-1]
+
+        # Woosh minimum frame is hop_length (480 samples); pad safely to 4x that.
+        wave, _ = _pad_to_min(wave, 1920)
+
+        ae = _get_woosh_ae(device, dtype)
+        torch_dtype = {"fp32": torch.float32, "fp16": torch.float16}[dtype]
+        x = wave.to(ae.device_any() if hasattr(ae, 'device_any') else next(ae.parameters()).device).to(torch_dtype)
+
+        with torch.no_grad():
+            z = ae.forward(x)
+            y = ae.inverse(z)
+
+        y = y.float()
+        return (_finalize(y, orig_len_48k),)

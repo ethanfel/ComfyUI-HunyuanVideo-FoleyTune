@@ -346,3 +346,109 @@ class FoleyTuneWooshVAERoundTrip:
                 "Try switching dtype to fp32 or check input audio for silence/extreme values."
             )
         return (_finalize(y, orig_len_48k),)
+
+
+# --- DAC node ----------------------------------------------------------------
+
+# DAC-VAE stride at 48 kHz: product of encoder_rates [2, 3, 4, 5, 8] = 960.
+# preprocess() inside DAC auto-pads to hop_length, so strictly speaking the
+# external pre-pad is belt-and-suspenders; we keep it to mirror Woosh and
+# guarantee a usable minimum length (4 frames of latent) regardless of
+# _prep_audio output.
+_DAC_HOP_LENGTH = 960
+_DAC_MIN_LEN = _DAC_HOP_LENGTH * 4  # 3840 samples @ 48 kHz (~80 ms)
+
+_DAC_SINGLETON = {"model": None, "device": None}
+
+
+def _get_dac(device: str):
+    """Lazy-load + cache DAC-VAE. Reloads if the device changed.
+
+    Uses the project's ``load_dac_any`` helper rather than the upstream
+    ``DAC.load`` classmethod: the vendored DAC inherits from a stubbed
+    ``audiotools.ml.BaseModel`` that does not implement ``load``, and the
+    real DAC checkpoint ships with ``continuous=True`` + the specific
+    encoder/decoder rates pinned in ``utils._DAC_KWARGS``.
+    """
+    # Try relative import first (production: loaded as part of the
+    # ComfyUI custom_nodes package). Fall back to absolute for standalone
+    # imports (smoke tests that just prepend the repo dir to sys.path).
+    try:
+        from .utils import load_dac_any
+    except ImportError:
+        from utils import load_dac_any
+
+    target_device = torch.device(device)
+    cached = _DAC_SINGLETON
+    if cached["model"] is not None and cached["device"] == target_device:
+        return cached["model"]
+
+    # Free old model before loading a new one on device change so we don't
+    # hold 2x memory transiently (mirrors _get_woosh_ae).
+    if cached["model"] is not None:
+        cached["model"] = None
+        cached["device"] = None
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    weights_path = os.path.join(folder_paths.models_dir, "foley", "vae_128d_48k.pth")
+    if not os.path.exists(weights_path):
+        from huggingface_hub import hf_hub_download
+        logger.info("DAC-VAE weights not found. Downloading from Tencent/HunyuanVideo-Foley")
+        weights_path = hf_hub_download(
+            repo_id="Tencent/HunyuanVideo-Foley",
+            filename="vae_128d_48k.pth",
+            local_dir=os.path.join(folder_paths.models_dir, "foley"),
+        )
+
+    logger.info(f"Loading DAC-VAE from {weights_path} on {target_device} (fp32)")
+    dac = load_dac_any(weights_path, device=target_device)
+    dac.requires_grad_(False)
+
+    cached.update(model=dac, device=target_device)
+    return dac
+
+
+class FoleyTuneDACVAERoundTrip:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "device": (["cuda", "cpu"], {"default": "cuda"}),
+            }
+        }
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "round_trip"
+    CATEGORY = "FoleyTune/Utils"
+    DESCRIPTION = "Encode->decode audio through HunyuanVideo-Foley's DAC-VAE (128-d, 48 kHz). For A/B comparison against Woosh-AE."
+
+    def round_trip(self, audio, device):
+        wave, _, _ = _prep_audio(audio)
+        orig_len_48k = wave.shape[-1]
+
+        # Guarantee at least 4 latent frames (see _DAC_MIN_LEN above).
+        wave, _ = _pad_to_min(wave, _DAC_MIN_LEN)
+
+        dac = _get_dac(device)
+        x = wave.to(next(dac.parameters()).device).float()
+
+        with torch.no_grad():
+            # DAC with continuous=True: encode() returns a 5-tuple
+            # (z, codes, latents, commitment_loss, codebook_loss) where `z`
+            # is a DiagonalGaussianDistribution. Use .mode() (the posterior
+            # mean) for deterministic, reproducible round-trips — this is
+            # what audio2audio uses for the same reason.
+            z_dist, _, _, _, _ = dac.encode(x)
+            z = z_dist.mode()
+            y = dac.decode(z)
+
+        y = y.float()
+        if not torch.isfinite(y).all():
+            raise RuntimeError(
+                "DAC-VAE round-trip produced non-finite values (NaN/Inf). "
+                "Check input audio for silence/extreme values."
+            )
+        return (_finalize(y, orig_len_48k),)

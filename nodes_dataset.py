@@ -1098,6 +1098,12 @@ class FoleyTuneVideoQualityFilter:
                     "default": 0, "min": 0, "max": 999999, "step": 1,
                     "tooltip": "Skip the first N clips (sorted order). Use to process only new clips when extending a dataset.",
                 }),
+                "top_n_per_folder": ("INT", {
+                    "default": 0, "min": 0, "max": 9999, "step": 1,
+                    "tooltip": "Cap clips kept per source subfolder after quality gating. "
+                               "0 = disabled. Picks round-robin across segments (a1/a2/m1/...) "
+                               "so one strong segment can't take every slot.",
+                }),
                 "seed": ("INT", {
                     "default": 42,
                     "tooltip": "Seed for random val clip selection from rejected clips.",
@@ -1131,6 +1137,7 @@ class FoleyTuneVideoQualityFilter:
                       clap_prompt: str = "",
                       clap_negative_prompt: str = "",
                       skip_first: int = 0,
+                      top_n_per_folder: int = 0,
                       seed: int = 42,
                       filter_options=None,
                       denoise_settings=None):
@@ -1581,14 +1588,11 @@ class FoleyTuneVideoQualityFilter:
                     f"  PASS    {rel} ({duration:.1f}s): "
                     f"BW={bw:.2f} SQ={sq:.2f} CLAP={cl_str} NEG={neg_cl_str} SCORE={composite:.2f}"
                 )
-                if do_copy:
-                    dst = out_dir / rel
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(r["path"], dst)
                 item = {
                     "sample_rate": r["sr"],
                     "name": r["rel"].stem,
                     "video_path": str(r["path"]),
+                    "_rel": r["rel"],
                     "scores": {
                         "bandwidth": round(bw, 4),
                         "spectral": round(sq, 4),
@@ -1612,20 +1616,103 @@ class FoleyTuneVideoQualityFilter:
                     f"  {status}  {rel} ({duration:.1f}s): "
                     f"BW={bw:.2f} SQ={sq:.2f} CLAP={cl_str} NEG={neg_cl_str} SCORE={composite:.2f}"
                 )
-                if do_copy and not skip_rejected:
-                    dst = out_dir / rel
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(r["path"], dst)
                 item = {
                     "sample_rate": r["sr"],
                     "name": r["rel"].stem,
                     "video_path": str(r["path"]),
+                    "_rel": r["rel"],
                 }
                 if r.get("cached"):
                     item["_needs_audio"] = True
                 else:
                     item["waveform"] = r["wav"]
                 rejected_items.append(item)
+
+        # --- Top-N per folder (segment-aware round-robin) ---
+        folder_stats = {}
+        if top_n_per_folder > 0 and accepted_items:
+            import re as _re_topn
+
+            def _folder_bucket(item):
+                rel_p = item["_rel"]
+                parts = rel_p.parts
+                return parts[0] if len(parts) > 1 else ""
+
+            def _segment_of(name: str) -> str:
+                return _re_topn.sub(r"_\d+$", "", name)
+
+            by_folder: dict = {}
+            for it in accepted_items:
+                by_folder.setdefault(_folder_bucket(it), []).append(it)
+
+            kept_all = []
+            demoted_all = []
+            for bucket, items in by_folder.items():
+                n_above = len(items)
+                # Group by segment prefix
+                by_seg: dict = {}
+                for it in items:
+                    by_seg.setdefault(_segment_of(it["name"]), []).append(it)
+                # Sort each segment by composite desc, name asc
+                for seg in by_seg:
+                    by_seg[seg].sort(
+                        key=lambda it: (-it["scores"]["composite"], it["name"])
+                    )
+                if n_above <= top_n_per_folder:
+                    kept_all.extend(items)
+                    folder_stats[bucket] = (n_above, n_above, len(by_seg))
+                    continue
+                # Order segments by peak score desc, name asc
+                seg_order = sorted(
+                    by_seg.keys(),
+                    key=lambda s: (-by_seg[s][0]["scores"]["composite"], s),
+                )
+                # Round-robin pick
+                picked = []
+                cursors = {s: 0 for s in seg_order}
+                while len(picked) < top_n_per_folder:
+                    progressed = False
+                    for seg in seg_order:
+                        if cursors[seg] < len(by_seg[seg]):
+                            picked.append(by_seg[seg][cursors[seg]])
+                            cursors[seg] += 1
+                            progressed = True
+                            if len(picked) >= top_n_per_folder:
+                                break
+                    if not progressed:
+                        break
+                kept_all.extend(picked)
+                picked_ids = {id(it) for it in picked}
+                for it in items:
+                    if id(it) not in picked_ids:
+                        demoted_all.append(it)
+                folder_stats[bucket] = (n_above, len(picked), len(by_seg))
+
+            if demoted_all:
+                quota_reason = f"folder quota: kept top {top_n_per_folder}"
+                for it in demoted_all:
+                    lines.append(
+                        f"  REJECT: {quota_reason}  {it['_rel']} "
+                        f"(SCORE={it['scores']['composite']:.2f})"
+                    )
+                    # strip score block to match other rejected items
+                    it.pop("scores", None)
+                    rejected_items.append(it)
+                reject_reasons[quota_reason] = len(demoted_all)
+                n_passed -= len(demoted_all)
+                n_rejected += len(demoted_all)
+                accepted_items = kept_all
+
+        # --- Deferred copy pass (uses _rel from items) ---
+        if do_copy:
+            to_copy = list(accepted_items)
+            if not skip_rejected:
+                to_copy.extend(rejected_items)
+            for item in to_copy:
+                src = Path(item["video_path"])
+                dst = out_dir / item["_rel"]
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
 
         t2 = time.time()
         print(f"[VideoQualityFilter] Phase 3 done in {t2-t_p3:.1f}s", flush=True)
@@ -1681,6 +1768,22 @@ class FoleyTuneVideoQualityFilter:
             lines.append("Rejection reasons:")
             for reason, count in sorted(reject_reasons.items(), key=lambda x: -x[1]):
                 lines.append(f"  {reason}: {count} clips")
+
+        if folder_stats:
+            lines.append("")
+            lines.append(f"Folder quota (top {top_n_per_folder} per folder):")
+            name_w = max(len(b) if b else len("<root>") for b in folder_stats)
+            for bucket in sorted(folder_stats):
+                n_above, n_kept, n_segs = folder_stats[bucket]
+                label = bucket if bucket else "<root>"
+                lines.append(
+                    f"  {label:<{name_w}}  {n_above:4d} above gate, "
+                    f"kept {n_kept:4d}  ({n_segs} segment{'s' if n_segs != 1 else ''})"
+                )
+
+        # Strip temporary _rel field before items leave the function
+        for it in dataset:
+            it.pop("_rel", None)
 
         # Score distribution: how many clips survive at each threshold
         if scores_all:

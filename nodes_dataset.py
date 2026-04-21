@@ -1218,21 +1218,18 @@ class FoleyTuneVideoQualityFilter:
         import json as _json
         import time
         import sys
-        import multiprocessing as _mp
-        from functools import partial as _partial
         from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
         t0 = time.time()
         folder_str = str(folder)
 
-        use_threads = sys.platform == "win32"
-        pool_type = "threads" if use_threads else "processes"
-        # Use spawn context on Linux to avoid CUDA-in-fork deadlock
-        # (ComfyUI typically has CUDA initialized in the parent process)
-        if use_threads:
-            PoolClass = ThreadPoolExecutor
-        else:
-            _spawn_ctx = _mp.get_context("spawn")
-            PoolClass = _partial(ProcessPoolExecutor, mp_context=_spawn_ctx)
+        # Always use threads: fork hangs after CUDA init in parent (ComfyUI),
+        # spawn workers can't import nodes_dataset because ComfyUI's custom
+        # node sys.path setup doesn't run in fresh interpreters. FFmpeg
+        # releases the GIL while the subprocess runs and numpy ops release
+        # it on large arrays, so threads parallelize this workload fine.
+        use_threads = True
+        pool_type = "threads"
+        PoolClass = ThreadPoolExecutor
 
         # Load scores cache
         cache_path = folder / ".quality_cache.json"
@@ -1520,9 +1517,9 @@ class FoleyTuneVideoQualityFilter:
                     with ThreadPoolExecutor(max_workers=num_workers) as pool:
                         mel_features = list(pool.map(_clap_preprocess, npy_paths, chunksize=8))
                 else:
-                    with ProcessPoolExecutor(max_workers=num_workers,
-                                             mp_context=_spawn_ctx,
-                                             initializer=_init_clap_worker) as pool:
+                    # Threads on Linux too: same reasons as Phase 1 pool above.
+                    _init_clap_worker()
+                    with ThreadPoolExecutor(max_workers=num_workers) as pool:
                         mel_features = list(pool.map(_clap_preprocess, npy_paths, chunksize=8))
             print(f"[VideoQualityFilter] Phase 2a done in {time.time()-t_pre:.1f}s", flush=True)
 

@@ -10,12 +10,30 @@ import threading
 import urllib.request
 import zipfile
 import shutil
+from math import prod
 from loguru import logger
 
 import torch
 import torchaudio
 import folder_paths
 import comfy.model_management as mm
+
+# Pull the DAC encoder-rate config up front so _DAC_HOP_LENGTH is derived
+# from the single source of truth in utils._DAC_KWARGS. load_dac_any is
+# left for deferred import inside _get_dac so the module stays importable
+# in environments that don't have utils.py's heavier deps (e.g. the
+# standalone smoke tests that just prepend the repo dir to sys.path).
+# Try relative import first (production: loaded as part of the ComfyUI
+# custom_nodes package); fall back to absolute for direct imports.
+try:
+    try:
+        from .utils import _DAC_KWARGS
+    except ImportError:
+        from utils import _DAC_KWARGS
+except ImportError:
+    # utils.py is unavailable (e.g. smoke-test env missing diffusers). Fall
+    # back to the hardcoded encoder_rates; keep in sync with utils._DAC_KWARGS.
+    _DAC_KWARGS = {"encoder_rates": [2, 3, 4, 5, 8]}
 
 # --- Woosh-AE weight auto-download -------------------------------------------
 
@@ -355,7 +373,7 @@ class FoleyTuneWooshVAERoundTrip:
 # external pre-pad is belt-and-suspenders; we keep it to mirror Woosh and
 # guarantee a usable minimum length (4 frames of latent) regardless of
 # _prep_audio output.
-_DAC_HOP_LENGTH = 960
+_DAC_HOP_LENGTH = prod(_DAC_KWARGS["encoder_rates"])  # 2*3*4*5*8 = 960
 _DAC_MIN_LEN = _DAC_HOP_LENGTH * 4  # 3840 samples @ 48 kHz (~80 ms)
 
 _DAC_SINGLETON = {"model": None, "device": None}
@@ -370,9 +388,8 @@ def _get_dac(device: str):
     real DAC checkpoint ships with ``continuous=True`` + the specific
     encoder/decoder rates pinned in ``utils._DAC_KWARGS``.
     """
-    # Try relative import first (production: loaded as part of the
-    # ComfyUI custom_nodes package). Fall back to absolute for standalone
-    # imports (smoke tests that just prepend the repo dir to sys.path).
+    # Deferred so standalone smoke tests (no diffusers) can still import
+    # this module; see the module-level try/except around _DAC_KWARGS.
     try:
         from .utils import load_dac_any
     except ImportError:
@@ -395,7 +412,14 @@ def _get_dac(device: str):
 
     weights_path = os.path.join(folder_paths.models_dir, "foley", "vae_128d_48k.pth")
     if not os.path.exists(weights_path):
-        from huggingface_hub import hf_hub_download
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError as e:
+            raise RuntimeError(
+                f"huggingface_hub is required to auto-download DAC-VAE weights. "
+                f"Install it (`pip install huggingface_hub`) or place the weights manually at "
+                f"{weights_path}."
+            ) from e
         logger.info("DAC-VAE weights not found. Downloading from Tencent/HunyuanVideo-Foley")
         weights_path = hf_hub_download(
             repo_id="Tencent/HunyuanVideo-Foley",

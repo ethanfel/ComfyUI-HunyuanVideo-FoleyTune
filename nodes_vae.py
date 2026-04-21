@@ -189,3 +189,38 @@ def ensure_woosh_ae() -> str:
 
         logger.info(f"Woosh-AE ready at {target}")
         return target
+
+
+# --- Shared audio helpers ----------------------------------------------------
+
+TARGET_SR = 48000
+
+def _prep_audio(audio: dict) -> tuple[torch.Tensor, int, int]:
+    """Normalize ComfyUI AUDIO to [B, 1, L] mono @ 48 kHz. Returns (wave, orig_sr, orig_len)."""
+    wave = audio["waveform"]  # [B, C, L]
+    sr = int(audio["sample_rate"])
+    orig_len = wave.shape[-1]
+
+    if wave.shape[1] > 1:
+        logger.warning(f"Stereo input, downmixing to mono")
+        wave = wave.mean(dim=1, keepdim=True)
+
+    if sr != TARGET_SR:
+        logger.warning(f"Resampling {sr} Hz -> {TARGET_SR} Hz")
+        wave = torchaudio.functional.resample(wave, sr, TARGET_SR)
+
+    return wave, sr, orig_len
+
+
+def _pad_to_min(wave: torch.Tensor, min_len: int) -> tuple[torch.Tensor, int]:
+    """Right-pad with silence if shorter than min_len. Returns (padded_wave, pad_applied)."""
+    pad = max(0, min_len - wave.shape[-1])
+    if pad:
+        wave = torch.nn.functional.pad(wave, (0, pad))
+    return wave, pad
+
+
+def _finalize(wave: torch.Tensor, orig_len_at_target_sr: int) -> dict:
+    """Trim to original duration (at target SR) and package as ComfyUI AUDIO."""
+    wave = wave[..., :orig_len_at_target_sr]
+    return {"waveform": wave.contiguous().cpu(), "sample_rate": TARGET_SR}

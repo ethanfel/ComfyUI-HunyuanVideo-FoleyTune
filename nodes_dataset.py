@@ -1262,6 +1262,10 @@ class FoleyTuneVideoQualityFilter:
             print(f"[VideoQualityFilter] Phase 1: extracting + scoring "
                   f"{n_uncached} new clips with {num_workers} {pool_type} "
                   f"({n_cached} cached)...", flush=True)
+            # Log every ~2% of progress, min 5, max 50 clips between updates
+            log_every = max(5, min(50, n_uncached // 50))
+            n_errors = 0
+            t_extract = time.time()
             with PoolClass(max_workers=num_workers) as pool:
                 futures = [pool.submit(_extract_and_score, (f, folder_str, need_clap))
                            for f in uncached_files]
@@ -1277,10 +1281,20 @@ class FoleyTuneVideoQualityFilter:
                         else:
                             r["path"] = Path(r["path"])
                             r["rel"] = Path(r["rel"])
+                            n_errors += 1
+                            print(f"  ERROR  {r['rel']}: {r['error']}", flush=True)
                         results.append(r)
-                        if (i + 1) % 10 == 0 or (i + 1) == n_uncached:
-                            print(f"  [{i+1}/{n_uncached}] done ({time.time()-t0:.1f}s)",
-                                  flush=True)
+                        done = i + 1
+                        if done % log_every == 0 or done == n_uncached:
+                            elapsed = time.time() - t_extract
+                            rate = done / elapsed if elapsed > 0 else 0
+                            remaining = (n_uncached - done) / rate if rate > 0 else 0
+                            err_str = f", {n_errors} errors" if n_errors else ""
+                            print(
+                                f"  [{done}/{n_uncached}] {rate:.1f} clips/s, "
+                                f"ETA {remaining:.0f}s{err_str}",
+                                flush=True,
+                            )
                 except:
                     for f in futures:
                         f.cancel()

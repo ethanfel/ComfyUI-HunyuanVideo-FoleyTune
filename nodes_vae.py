@@ -476,3 +476,16 @@ class FoleyTuneDACVAERoundTrip:
                 "Check input audio for silence/extreme values."
             )
         return (_finalize(y, orig_len_48k),)
+
+
+# --- Registration ------------------------------------------------------------
+
+NODE_CLASS_MAPPINGS = {
+    "FoleyTuneDACVAERoundTrip": FoleyTuneDACVAERoundTrip,
+    "FoleyTuneWooshVAERoundTrip": FoleyTuneWooshVAERoundTrip,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "FoleyTuneDACVAERoundTrip": "FoleyTune DAC VAE Round-Trip",
+    "FoleyTuneWooshVAERoundTrip": "FoleyTune Woosh VAE Round-Trip",
+}

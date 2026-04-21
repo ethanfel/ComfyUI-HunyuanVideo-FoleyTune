@@ -1262,13 +1262,17 @@ class FoleyTuneVideoQualityFilter:
             print(f"[VideoQualityFilter] Phase 1: extracting + scoring "
                   f"{n_uncached} new clips with {num_workers} {pool_type} "
                   f"({n_cached} cached)...", flush=True)
-            # Log every ~2% of progress, min 5, max 50 clips between updates
+            # Log first 5 individually, then every ~2% (min 5, max 50)
             log_every = max(5, min(50, n_uncached // 50))
             n_errors = 0
             t_extract = time.time()
             with PoolClass(max_workers=num_workers) as pool:
+                print(f"  pool ready ({pool_type}={num_workers}), "
+                      f"submitting {n_uncached} futures...", flush=True)
                 futures = [pool.submit(_extract_and_score, (f, folder_str, need_clap))
                            for f in uncached_files]
+                print(f"  futures submitted in {time.time()-t_extract:.1f}s, "
+                      f"waiting for results...", flush=True)
                 try:
                     for i, future in enumerate(as_completed(futures)):
                         throw_exception_if_processing_interrupted()
@@ -1285,7 +1289,13 @@ class FoleyTuneVideoQualityFilter:
                             print(f"  ERROR  {r['rel']}: {r['error']}", flush=True)
                         results.append(r)
                         done = i + 1
-                        if done % log_every == 0 or done == n_uncached:
+                        # Print first 5 individually, then on batch boundary
+                        should_log = (
+                            done <= 5
+                            or done % log_every == 0
+                            or done == n_uncached
+                        )
+                        if should_log:
                             elapsed = time.time() - t_extract
                             rate = done / elapsed if elapsed > 0 else 0
                             remaining = (n_uncached - done) / rate if rate > 0 else 0

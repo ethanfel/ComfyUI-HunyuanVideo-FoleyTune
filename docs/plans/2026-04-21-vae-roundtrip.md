@@ -330,7 +330,10 @@ def _get_woosh_ae(device: str, dtype_str: str):
 
     ckpt_dir = ensure_woosh_ae()
     logger.info(f"Loading Woosh-AE from {ckpt_dir} on {target_device} ({dtype})")
-    ae = AudioAutoEncoder(LoadConfig(ckpt_dir))
+    ae = AudioAutoEncoder(LoadConfig(path=ckpt_dir))
+    # Constructor only builds the graph; load_from_config() pulls safetensors
+    # weights from disk (mirrors upstream test_Woosh-AE.py).
+    ae.load_from_config()
     ae = ae.to(target_device).to(dtype).eval()
     ae.requires_grad_(False)
 
@@ -437,6 +440,8 @@ def _get_dac(device: str):
             local_dir=os.path.join(folder_paths.models_dir, "foley"),
         )
 
+    # DAC.load is a one-shot loader (builds graph + loads weights in one call);
+    # no symmetric load_from_config() step is needed here, unlike Woosh-AE.
     dac = DAC.load(weights_path).to(target_device).eval()
     dac.requires_grad_(False)
 

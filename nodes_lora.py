@@ -718,18 +718,25 @@ class FoleyTuneVAERoundtrip:
             waveform = waveform.mean(dim=1, keepdim=True)
 
         # DAC encode -> decode
-        # NOTE: DAC with continuous=True returns DiagonalGaussianDistribution, not tensor
+        # NOTE: DAC with continuous=True returns DiagonalGaussianDistribution.
+        # Use .mode() (posterior mean) for deterministic, reproducible A/B —
+        # .sample() makes every run produce different output, which defeats
+        # the purpose of a codec-ceiling diagnostic.
         dac.to(device)
         with torch.no_grad():
             audio_in = waveform.to(device=device, dtype=torch.float32)
             z_dist, _, _, _, _ = dac.encode(audio_in)
-            z = z_dist.sample()
+            z = z_dist.mode()
             reconstructed = dac.decode(z)
         dac.cpu()
         torch.cuda.empty_cache()
 
-        # Normalize output
         out = reconstructed.cpu().float()
+        if not torch.isfinite(out).all():
+            raise RuntimeError(
+                "DAC round-trip produced non-finite values (NaN/Inf). "
+                "Check input audio for silence/extreme values."
+            )
         rms = torch.sqrt(torch.mean(out ** 2))
         target_rms = 10 ** (-27 / 20)
         if rms > 1e-8:

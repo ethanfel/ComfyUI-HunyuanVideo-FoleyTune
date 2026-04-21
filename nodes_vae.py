@@ -253,17 +253,23 @@ def _alias_woosh_modules() -> None:
     #   woosh.module.model.VocosAutoEncoder
     #   woosh.module.model.vocos.ISTFTCircleHead
     #   woosh.module.model.vocos.ZeroDropoutTransform
-    sys.modules.setdefault("woosh", woosh_ae)
-    sys.modules.setdefault("woosh.module", woosh_ae.module)
-    sys.modules.setdefault("woosh.module.model", woosh_ae.module.model)
-    sys.modules.setdefault("woosh.module.model.vocos", woosh_ae.module.model.vocos)
+    # Destructive assignment: if the upstream `woosh` package is installed in
+    # the same venv, setdefault would preserve it and hydra would instantiate
+    # upstream classes instead of our vendored ones (subtle divergence, hard
+    # to diagnose). Overwrite and warn loudly so shadowing is visible.
+    existing = sys.modules.get("woosh")
+    if existing is not None and existing is not woosh_ae:
+        logger.warning("Overriding pre-existing 'woosh' module with vendored woosh_ae (FoleyTune)")
+    sys.modules["woosh"] = woosh_ae
+    sys.modules["woosh.module"] = woosh_ae.module
+    sys.modules["woosh.module.model"] = woosh_ae.module.model
+    sys.modules["woosh.module.model.vocos"] = woosh_ae.module.model.vocos
 
     _WOOSH_ALIASED = True
 
 
 def _get_woosh_ae(device: str, dtype_str: str):
     """Lazy-load + cache the Woosh-AE. Reloads if device or dtype changed."""
-    import torch
     _alias_woosh_modules()
     from woosh_ae import AudioAutoEncoder, LoadConfig
 
@@ -276,9 +282,25 @@ def _get_woosh_ae(device: str, dtype_str: str):
             and cached["dtype"] == dtype):
         return cached["model"]
 
+    # Free old model before loading a new one on device/dtype change so we
+    # don't hold 2x memory transiently. A local torch.cuda.empty_cache() on
+    # explicit reload is fine (unlike mm.soft_empty_cache(), which touches
+    # ComfyUI's global manager and is disallowed here).
+    if cached["model"] is not None:
+        cached["model"] = None
+        cached["device"] = None
+        cached["dtype"] = None
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     ckpt_dir = ensure_woosh_ae()
     logger.info(f"Loading Woosh-AE from {ckpt_dir} on {target_device} ({dtype})")
     ae = AudioAutoEncoder(LoadConfig(path=ckpt_dir))
+    # The constructor only sets up the graph; weights are pulled from disk
+    # by this explicit call (mirrors upstream test_Woosh-AE.py).
+    ae.load_from_config()
     ae = ae.to(target_device).to(dtype).eval()
     ae.requires_grad_(False)
 
@@ -302,12 +324,12 @@ class FoleyTuneWooshVAERoundTrip:
     DESCRIPTION = "Encode->decode audio through Woosh-AE (VOCOS, 128-d, 48 kHz). For A/B comparison against DAC-VAE."
 
     def round_trip(self, audio, device, dtype):
-        import torch
         wave, _, orig_len = _prep_audio(audio)
         orig_len_48k = wave.shape[-1]
 
-        # Woosh minimum frame is hop_length (480 samples); pad safely to 4x that.
-        wave, _ = _pad_to_min(wave, 1920)
+        # Woosh VOCOS hop_length=480. Pad to 6x hop for safety margin over
+        # any unknown upsampling/downsampling ratios. Silence is trimmed by _finalize.
+        wave, _ = _pad_to_min(wave, 2880)
 
         ae = _get_woosh_ae(device, dtype)
         torch_dtype = {"fp32": torch.float32, "fp16": torch.float16}[dtype]
@@ -318,4 +340,9 @@ class FoleyTuneWooshVAERoundTrip:
             y = ae.inverse(z)
 
         y = y.float()
+        if not torch.isfinite(y).all():
+            raise RuntimeError(
+                "Woosh-AE round-trip produced non-finite values (NaN/Inf). "
+                "Try switching dtype to fp32 or check input audio for silence/extreme values."
+            )
         return (_finalize(y, orig_len_48k),)

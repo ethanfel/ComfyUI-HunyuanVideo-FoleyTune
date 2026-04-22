@@ -2068,6 +2068,17 @@ class FoleyTuneDatasetSaver:
                     "default": "",
                     "tooltip": "Absolute path to output folder. Created if it does not exist.",
                 }),
+                "json_only": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Only write dataset.json, sweep.json, and scores.json — "
+                               "skip FLAC and NPZ files. Useful after a quality filter "
+                               "pass to produce the clip list for labeling.",
+                }),
+                "prompt": ("STRING", {
+                    "default": "",
+                    "tooltip": "Global prompt written to dataset.json. If empty, uses "
+                               "the prompt from the first training clip.",
+                }),
             },
         }
 
@@ -2082,7 +2093,7 @@ class FoleyTuneDatasetSaver:
         "with default training config (r128, curriculum, 15k steps)."
     )
 
-    def save(self, dataset, output_dir: str):
+    def save(self, dataset, output_dir: str, json_only: bool = False, prompt: str = ""):
         import json
         import soundfile as sf
 
@@ -2096,42 +2107,44 @@ class FoleyTuneDatasetSaver:
 
         for item in dataset:
             name = item["name"]
-            wav = item["waveform"][0]  # [C, L]
-            sr = item["sample_rate"]
             is_val = item.get("val", False)
 
-            # Determine output directory
-            if is_val:
-                item_dir = out_path / "val"
-                item_dir.mkdir(exist_ok=True)
-            else:
-                item_dir = out_path
+            if not json_only:
+                wav = item["waveform"][0]  # [C, L]
+                sr = item["sample_rate"]
 
-            # Write FLAC
-            wav_np = wav.permute(1, 0).float().numpy()  # [L, C]
-            if wav_np.shape[1] == 1:
-                wav_np = wav_np[:, 0]  # [L] mono
-            flac_path = item_dir / f"{name}.flac"
-            sf.write(str(flac_path), wav_np, sr, subtype="PCM_24")
-            saved += 1
+                # Determine output directory
+                if is_val:
+                    item_dir = out_path / "val"
+                    item_dir.mkdir(exist_ok=True)
+                else:
+                    item_dir = out_path
 
-            # Write .npz from features if present
-            if "features" in item:
-                feats = item["features"]
-                npz_path = item_dir / f"{name}.npz"
-                save_kwargs = {}
-                for key in ("clip_features", "sync_features", "text_embedding"):
-                    feat_val = feats.get(key)
-                    if feat_val is not None:
-                        save_kwargs[key] = feat_val.float().numpy() if hasattr(feat_val, 'numpy') else feat_val
-                if "duration" in feats:
-                    save_kwargs["duration"] = feats["duration"]
-                if "fps" in feats:
-                    save_kwargs["fps"] = feats["fps"]
-                if item.get("prompt"):
-                    save_kwargs["prompt"] = item["prompt"]
-                np.savez(str(npz_path), **save_kwargs)
-                features_saved += 1
+                # Write FLAC
+                wav_np = wav.permute(1, 0).float().numpy()  # [L, C]
+                if wav_np.shape[1] == 1:
+                    wav_np = wav_np[:, 0]  # [L] mono
+                flac_path = item_dir / f"{name}.flac"
+                sf.write(str(flac_path), wav_np, sr, subtype="PCM_24")
+                saved += 1
+
+                # Write .npz from features if present
+                if "features" in item:
+                    feats = item["features"]
+                    npz_path = item_dir / f"{name}.npz"
+                    save_kwargs = {}
+                    for key in ("clip_features", "sync_features", "text_embedding"):
+                        feat_val = feats.get(key)
+                        if feat_val is not None:
+                            save_kwargs[key] = feat_val.float().numpy() if hasattr(feat_val, 'numpy') else feat_val
+                    if "duration" in feats:
+                        save_kwargs["duration"] = feats["duration"]
+                    if "fps" in feats:
+                        save_kwargs["fps"] = feats["fps"]
+                    if item.get("prompt"):
+                        save_kwargs["prompt"] = item["prompt"]
+                    np.savez(str(npz_path), **save_kwargs)
+                    features_saved += 1
 
             # Track names for dataset.json
             if is_val:
@@ -2139,12 +2152,12 @@ class FoleyTuneDatasetSaver:
             else:
                 train_names.append(name)
 
-        # Derive global prompt from first training clip
-        prompt = ""
-        for item in dataset:
-            if not item.get("val") and item.get("prompt"):
-                prompt = item["prompt"]
-                break
+        # Use explicit prompt if provided, otherwise derive from first training clip
+        if not prompt:
+            for item in dataset:
+                if not item.get("val") and item.get("prompt"):
+                    prompt = item["prompt"]
+                    break
 
         # Write sweep.json — directly consumable by the Scheduler node
         data_dir_str = str(out_path)
@@ -2176,23 +2189,15 @@ class FoleyTuneDatasetSaver:
                 "latent_mixup_alpha": 0.0,
                 "latent_noise_sigma": 0.0,
                 "visual_dropout_prob": 0.0,
+                "prompt_override": "",
                 "gradient_checkpointing": False,
                 "blocks_to_swap": 0,
                 "resume_from": "",
             },
             "experiments": [],  # filled after merge
         }
-        # Merge into existing dataset.json if present (extend mode)
         ds_json_path = out_path / "dataset.json"
-        if ds_json_path.exists():
-            with open(ds_json_path) as f:
-                ds_json = json.load(f)
-            existing = set(ds_json.get("train", []))
-            for name in train_names:
-                if name not in existing:
-                    ds_json.setdefault("train", []).append(name)
-        else:
-            ds_json = {"train": train_names}
+        ds_json = {"train": train_names}
         if prompt:
             ds_json["prompt"] = prompt
         if val_name:
@@ -2223,8 +2228,11 @@ class FoleyTuneDatasetSaver:
             with open(scores_path, "w") as f:
                 json.dump(scores_sorted, f, indent=2)
 
-        lines = [f"[FoleyTuneDatasetSaver] Saved {saved} clips -> {out_path}"]
-        lines.append(f"  FLAC: {saved}  NPZ: {features_saved}")
+        if json_only:
+            lines = [f"[FoleyTuneDatasetSaver] JSON-only mode -> {out_path}"]
+        else:
+            lines = [f"[FoleyTuneDatasetSaver] Saved {saved} clips -> {out_path}"]
+            lines.append(f"  FLAC: {saved}  NPZ: {features_saved}")
         lines.append(f"  Train: {len(train_names)}  Val: {1 if val_name else 0}")
         lines.append(f"  sweep.json -> {sweep_path}")
         if scores_data:

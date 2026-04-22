@@ -10,7 +10,7 @@
   <a href="#quick-start-inference">Inference</a> &bull;
   <a href="#quick-start-training">Training</a> &bull;
   <a href="LORA_TRAINING.md">Full Training Guide</a> &bull;
-  <a href="#node-reference">All 31 Nodes</a> &bull;
+  <a href="#node-reference">All 35 Nodes</a> &bull;
   <a href="#vram-guide">VRAM Guide</a>
 </p>
 
@@ -21,7 +21,7 @@
 FoleyTune is a ComfyUI node pack for **Tencent HunyuanVideo-Foley** — a video-to-audio (and text-to-audio) diffusion model. It adds three things the original model doesn't have:
 
 1. **LoRA training** — fine-tune the model on your own video+audio pairs to teach it sounds it doesn't know or gets wrong.
-2. **A dataset pipeline** — 15 nodes that clean, normalize, filter, and prepare audio before training.
+2. **A dataset pipeline** — 16 nodes that clean, normalize, filter, tag, and prepare audio before training, plus a standalone [clip labeler](#clip-labeler-standalone-tool) web UI.
 3. **Flexible VRAM management** — run on anything from a 4 GB laptop GPU to a 96 GB workstation, with FP8 quantization, block swapping, and torch.compile.
 
 ---
@@ -83,11 +83,15 @@ Optionally clean the audio with the dataset pipeline nodes:
 Dataset Loader -> Resampler (48kHz) -> LUFS Normalizer -> HF Smoother -> Inspector -> Saver
 ```
 
-### 2. Extract features
+### 2. Label clips (optional)
 
-Run **FoleyTune Feature Extractor** once per clip to cache SigLIP2, Synchformer, and CLAP features as `.npz` files.
+Use the **[Clip Labeler](#clip-labeler-standalone-tool)** to tag each clip with a structured prompt. The labeler saves `.txt` sidecar files next to each `.mp4` which the Feature Extractor reads as per-clip prompts, overriding the global prompt.
 
-### 3. Train
+### 3. Extract features
+
+Run **FoleyTune Batch Feature Extractor** to cache SigLIP2, Synchformer, and CLAP features as `.npz` files. If sidecar `.txt` files exist, their content is used as the clip's prompt.
+
+### 4. Train
 
 Connect **Model Loader** -> **Dependencies Loader** -> **LoRA Trainer**. Point `data_dir` at your features folder.
 
@@ -101,7 +105,7 @@ Recommended starting defaults:
 | batch_size | 8 |
 | steps | 15000 |
 
-### 4. Use the adapter
+### 5. Use the adapter
 
 Connect **LoRA Loader** between the Model Loader and Sampler. Point it at your best checkpoint.
 
@@ -111,30 +115,32 @@ For the full training guide with hyperparameter recommendations, checkpoint sele
 
 ## Node Reference
 
-### Inference (6 nodes)
+### Inference (7 nodes)
 
 | Node | Description |
 |---|---|
 | **FoleyTune Model Loader** | Load the transformer with precision and FP8 quantization options |
 | **FoleyTune Dependencies Loader** | Load DAC-VAE, SigLIP2, Synchformer, and CLAP |
+| **FoleyTune Model Sampling** | Override the flow shift sigma schedule for fine-grained sampling control |
 | **FoleyTune Chunked Sampler** | Generate audio from video/text with chunked overlap for any duration |
 | **FoleyTune Torch Compile** | Optional `torch.compile` acceleration (~30% faster) |
 | **FoleyTune BlockSwap Settings** | Offload transformer blocks to CPU for low-VRAM operation |
 | **FoleyTune Select Audio From Batch** | Extract one audio clip from a batch by index |
 
-### Training (7 nodes)
+### Training (8 nodes)
 
 | Node | Description |
 |---|---|
-| **FoleyTune Feature Extractor** | Cache visual and text features from video+audio to `.npz` |
-| **FoleyTune Batch Feature Extractor** | Process an entire dataset in one pass with I/O prefetching |
-| **FoleyTune LoRA Trainer** | Train a LoRA adapter with flow matching loss and spectral eval |
-| **FoleyTune LoRA Loader** | Load a trained adapter into the model with adjustable strength |
+| **FoleyTune Feature Extractor** | Cache visual and text features from video+audio to `.npz`. Per-clip prompts via sidecar `.txt` files override the global prompt |
+| **FoleyTune Batch Feature Extractor** | Process an entire dataset in one pass with I/O prefetching. Sidecar `.txt` files take priority over the global prompt |
+| **FoleyTune LoRA Trainer** | Train a LoRA adapter with flow matching loss, spectral eval, and optional `visual_dropout_prob` for identity-decoupled training |
+| **FoleyTune LoRA Loader** | Load a trained adapter with adjustable strength. Outputs embedded training prompts |
 | **FoleyTune LoRA Scheduler** | Run multiple training experiments from a JSON sweep config |
 | **FoleyTune LoRA Evaluator** | Compare adapters with spectral metrics and generated audio |
 | **FoleyTune VAE Roundtrip** | Diagnostic: encode/decode audio through DAC to check codec quality |
+| **FoleyTune Checkpoint Finalizer** | Strip optimizer/scheduler state from a checkpoint, keeping only the adapter weights and metadata |
 
-### Dataset Preparation (14 nodes)
+### Dataset Preparation (16 nodes)
 
 | Node | Description |
 |---|---|
@@ -143,14 +149,16 @@ For the full training guide with hyperparameter recommendations, checkpoint sele
 | **FoleyTune Dataset LUFS Normalizer** | Normalize loudness to EBU R128 with true peak limiting |
 | **FoleyTune Dataset Compressor** | Parallel compression to reduce dynamic range |
 | **FoleyTune Dataset Inspector** | Flag quality issues: silence, clipping, loudness deviation |
-| **FoleyTune Dataset Quality Filter** | Score-based filtering for silence, anomalies, frequency balance |
-| **FoleyTune Video Quality Filter** | Filter video clips by analyzing their audio track quality |
 | **FoleyTune Denoiser Settings** | Configure spectral gating noise reduction (connects to Quality Filters) |
+| **FoleyTune Filter Options** | Set scoring profile weights and per-metric floors for quality filters (`general_foley`, `voice_dominated`, `music`, `custom`) |
+| **FoleyTune Dataset Quality Filter** | Score-based filtering for silence, anomalies, frequency balance |
+| **FoleyTune Video Quality Filter** | Filter video clips by audio quality. Supports scoring profiles, result caching, `top_n_per_folder` (segment-aware round-robin), `require_sidecar_txt`, and `skip_first` |
 | **FoleyTune Voice Tagger** | Auto-tag prompts with voice descriptors and rhythmic slapping detection |
+| **FoleyTune Retag NPZ** | Update prompts and CLAP embeddings in existing `.npz` files without re-extracting visual features |
 | **FoleyTune Dataset HF Smoother** | Soft high-frequency attenuation across the dataset |
 | **FoleyTune Dataset Augmenter** | Generate variants with pitch/time-stretch/gain changes |
 | **FoleyTune Dataset Spectral Matcher** | Adaptive EQ toward a reference audio distribution |
-| **FoleyTune Dataset Saver** | Save all clips to disk as FLAC with metadata |
+| **FoleyTune Dataset Saver** | Save clips as FLAC with metadata. Generates `sweep.json` ready for the Scheduler |
 | **FoleyTune Dataset Browser** | Browse dataset entries by index for inspection |
 
 ### Post-Processing (4 nodes)
@@ -161,6 +169,43 @@ For the full training guide with hyperparameter recommendations, checkpoint sele
 | **FoleyTune HF Smoother** | Single-clip high-frequency attenuation (post-generation) |
 | **FoleyTune Harmonic Exciter** | Multi-band harmonic enhancement |
 | **FoleyTune Output Normalizer** | Normalize generated audio to target LUFS |
+
+---
+
+## Clip Labeler (standalone tool)
+
+A keyboard-driven web UI for tagging training clips with structured prompts. Saves `.txt` sidecar files next to each `.mp4` which the Feature Extractor picks up as per-clip prompts.
+
+```bash
+cd tools/labeler
+./run.sh /path/to/features/dataset.json /path/to/mp4_root
+```
+
+| Key | Action |
+|---|---|
+| `1-9` | Select option for current stage |
+| `0` | Skip stage (omit value) |
+| `Space` | Replay video |
+| `S` | Skip clip (next) |
+| `B` | Previous clip |
+| `D` | Delete clip + all same-stem files |
+| `U` | Undo last save |
+| `R` | Reset stage selections |
+
+The labeler reads the `train` list from `dataset.json` and finds matching `.mp4` files recursively under the mp4 root. It jumps to the first untagged clip automatically. Prompt templates are defined in a JSON file (see `prompts.bj.json` for an example).
+
+---
+
+## Visual Dropout (identity-decoupled training)
+
+Set `visual_dropout_prob` to randomly zero out visual features during training, forcing the text/CLAP channel to carry the audio character signal. This decouples the learned sound from specific visual identity.
+
+| Use case | `visual_dropout_prob` |
+|---|---|
+| Identity-preserving LoRA (one performer) | `0.0` (default) |
+| Generic style LoRA (sound type, not performer) | `0.3` - `0.5` |
+
+Available on both the LoRA Trainer node and in sweep JSON configs.
 
 ---
 

@@ -107,6 +107,7 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16, clip
             "prompt": prompt,
             "name": stem,
         })
+        logger.info(f"  {stem}: {prompt!r}")
 
     # Offload DAC encoder back to CPU
     dac_model.cpu()

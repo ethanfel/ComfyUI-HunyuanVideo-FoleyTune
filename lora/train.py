@@ -235,7 +235,8 @@ def sample_timesteps(batch_size, mode, device, dtype,
 
 # -- Loss computation --------------------------------------------------------
 
-def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dtype):
+def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dtype,
+                       visual_dropout_prob=0.0):
     """Compute flow matching velocity prediction loss.
 
     Args:
@@ -247,11 +248,31 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
         text_feat: CLAP text embedding [B, N_text, D]
         device: torch device
         dtype: compute dtype
+        visual_dropout_prob: per-sample probability of replacing visual features with
+            null embeddings during training. Forces text channel to carry audio signal,
+            decoupling identity from sound. Use 0.5 for generic-style LoRAs, 0.0 for
+            identity-preserving LoRAs.
 
     Returns:
         loss: scalar MSE loss
     """
     B = x1.shape[0]
+
+    # Visual conditioning dropout: per-sample replace clip/sync with null embeddings.
+    # Uses the same null tokens the base model was pretrained to handle for CFG.
+    if visual_dropout_prob > 0:
+        drop_mask = torch.rand(B, device=clip_feat.device) < visual_dropout_prob
+        if drop_mask.any():
+            uncond_clip = model.get_empty_clip_sequence(
+                bs=B, len=clip_feat.shape[1]
+            ).to(device=clip_feat.device, dtype=clip_feat.dtype)
+            uncond_sync = model.get_empty_sync_sequence(
+                bs=B, len=sync_feat.shape[1]
+            ).to(device=sync_feat.device, dtype=sync_feat.dtype)
+            m = drop_mask.view(B, 1, 1)
+            clip_feat = torch.where(m, uncond_clip, clip_feat)
+            sync_feat = torch.where(m, uncond_sync, sync_feat)
+
     x0 = torch.randn_like(x1)  # noise
 
     # Scheduler convention: x(sigma) = sigma * noise + (1-sigma) * data

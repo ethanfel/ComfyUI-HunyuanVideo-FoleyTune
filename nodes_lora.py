@@ -782,6 +782,10 @@ class FoleyTuneLoRATrainer:
                 "schedule_type": (["constant", "cosine"], {"default": "constant"}),
                 "latent_mixup_alpha": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0}),
                 "latent_noise_sigma": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.1}),
+                "visual_dropout_prob": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 0.95, "step": 0.05,
+                    "tooltip": "Per-sample probability of zeroing visual features during training. Forces the text channel to carry audio-character signal, decoupling identity from sound. Use 0.5 for generic-style LoRAs (no performer binding); leave 0.0 for identity-preserving LoRAs.",
+                }),
                 "gradient_checkpointing": ("BOOLEAN", {"default": False}),
                 "resume_from": ("STRING", {"default": ""}),
                 "dataset_json": ("STRING", {
@@ -808,6 +812,7 @@ class FoleyTuneLoRATrainer:
               init_mode="standard", use_rslora=False, lora_dropout=0.0,
               lora_plus_ratio=1.0, schedule_type="constant",
               latent_mixup_alpha=0.0, latent_noise_sigma=0.0,
+              visual_dropout_prob=0.0,
               gradient_checkpointing=False,
               resume_from="", dataset_json=""):
 
@@ -825,6 +830,7 @@ class FoleyTuneLoRATrainer:
             logit_normal_sigma, curriculum_switch, init_mode, use_rslora,
             lora_dropout, lora_plus_ratio, schedule_type,
             latent_mixup_alpha, latent_noise_sigma,
+            visual_dropout_prob,
             gradient_checkpointing, resume_from,
             dataset_json,
         )
@@ -835,6 +841,7 @@ class FoleyTuneLoRATrainer:
                      logit_normal_sigma, curriculum_switch, init_mode, use_rslora,
                      lora_dropout, lora_plus_ratio, schedule_type,
                      latent_mixup_alpha, latent_noise_sigma,
+                     visual_dropout_prob,
                      gradient_checkpointing, resume_from,
                      dataset_json=""):
         import random
@@ -1042,6 +1049,7 @@ class FoleyTuneLoRATrainer:
             # Forward + loss
             loss = flow_matching_loss(
                 model, batch_latents, t, batch_clip, batch_sync, batch_text, device, dtype,
+                visual_dropout_prob=visual_dropout_prob,
             )
             loss = loss / grad_accum
             loss.backward()
@@ -1269,6 +1277,7 @@ class FoleyTuneLoRAScheduler:
         "init_mode": "standard", "use_rslora": False, "lora_dropout": 0.0,
         "lora_plus_ratio": 1.0, "schedule_type": "constant",
         "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
+        "visual_dropout_prob": 0.0,
         "gradient_checkpointing": False,
         "resume_from": "",
     }
@@ -1588,7 +1597,11 @@ class FoleyTuneLoRAScheduler:
                             step=step, total_steps=config["steps"],
                         )
 
-                        loss = flow_matching_loss(model, batch_latents, t, batch_clip, batch_sync, batch_text, device, dtype)
+                        loss = flow_matching_loss(
+                            model, batch_latents, t, batch_clip, batch_sync, batch_text,
+                            device, dtype,
+                            visual_dropout_prob=config.get("visual_dropout_prob", 0.0),
+                        )
                         loss = loss / config["grad_accum"]
                         loss.backward()
 

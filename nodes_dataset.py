@@ -1104,6 +1104,12 @@ class FoleyTuneVideoQualityFilter:
                                "0 = disabled. Picks round-robin across segments (a1/a2/m1/...) "
                                "so one strong segment can't take every slot.",
                 }),
+                "require_sidecar_txt": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Only process clips that have a same-stem .txt file next "
+                               "to them (e.g. clip_001.mp4 + clip_001.txt). Skipped clips "
+                               "are reported but not scored or copied.",
+                }),
                 "seed": ("INT", {
                     "default": 42,
                     "tooltip": "Seed for random val clip selection from rejected clips.",
@@ -1138,6 +1144,7 @@ class FoleyTuneVideoQualityFilter:
                       clap_negative_prompt: str = "",
                       skip_first: int = 0,
                       top_n_per_folder: int = 0,
+                      require_sidecar_txt: bool = False,
                       seed: int = 42,
                       filter_options=None,
                       denoise_settings=None):
@@ -1184,6 +1191,17 @@ class FoleyTuneVideoQualityFilter:
         files = _scan_video_folder(folder)
         if not files:
             raise RuntimeError(f"[VideoQualityFilter] No video files found in {folder}")
+
+        if require_sidecar_txt:
+            total_before = len(files)
+            files = [f for f in files if f.with_suffix(".txt").exists()]
+            n_skipped = total_before - len(files)
+            print(f"[VideoQualityFilter] Sidecar filter: {total_before} -> {len(files)} "
+                  f"clips with .txt ({n_skipped} skipped)", flush=True)
+            if not files:
+                raise RuntimeError(
+                    f"[VideoQualityFilter] No clips have a sidecar .txt in {folder}"
+                )
 
         if skip_first > 0:
             total_before = len(files)

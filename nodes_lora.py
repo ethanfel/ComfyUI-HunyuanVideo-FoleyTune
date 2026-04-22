@@ -1338,6 +1338,10 @@ class FoleyTuneLoRAScheduler:
         dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype,
                                   clip_names=clip_names)
 
+        from collections import Counter
+        _prompt_counts = Counter(d["prompt"] for d in dataset)
+        prompts_list = [p for p, _ in _prompt_counts.most_common()]
+
         # Load optional validation sample — from dataset_json val or explicit eval_npz
         val_entry = None
         val_ref_wav = None
@@ -1571,7 +1575,7 @@ class FoleyTuneLoRAScheduler:
                         if skip_flag.exists():
                             logger.info(f"Skip flag detected for {exp_id} at step {step}")
                             ckpt_path = exp_dir / f"adapter_cancelled_step{step:05d}.pt"
-                            meta = {**config, "steps_completed": step}
+                            meta = {**config, "steps_completed": step, "prompts": prompts_list}
                             save_checkpoint(model, optimizer, lr_sched, step, meta, ckpt_path)
                             skip_flag.unlink()
                             raise _SkipExperiment(f"Skipped at step {step}")
@@ -1630,7 +1634,7 @@ class FoleyTuneLoRAScheduler:
                             )
 
                         if (step + 1) % config["save_every"] == 0:
-                            meta = {**config, "steps_completed": step + 1}
+                            meta = {**config, "steps_completed": step + 1, "prompts": prompts_list}
                             ckpt_path = exp_dir / f"adapter_step{step+1:05d}.pt"
                             save_checkpoint(model, optimizer, lr_sched, step + 1, meta, ckpt_path)
                             _draw_loss_curve(losses, smoothed=_smooth_losses(losses)).save(str(exp_dir / "loss.png"))
@@ -1680,7 +1684,7 @@ class FoleyTuneLoRAScheduler:
                                        f"SC={step_metrics.get('spectral_convergence', 0):.3f}")
 
                     # Save final
-                    meta = {**config, "steps_completed": config["steps"]}
+                    meta = {**config, "steps_completed": config["steps"], "prompts": prompts_list}
                     final_path = exp_dir / "adapter_final.pt"
                     save_checkpoint(model, optimizer, lr_sched, config["steps"], meta, final_path, final=True)
                     # Draw and save per-experiment loss curve

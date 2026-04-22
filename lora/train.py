@@ -258,20 +258,12 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
     """
     B = x1.shape[0]
 
-    # Visual conditioning dropout: per-sample replace clip/sync with null embeddings.
-    # Uses the same null tokens the base model was pretrained to handle for CFG.
+    # Build per-sample visual dropout mask for the model's native drop_visual arg.
+    drop_visual = None
     if visual_dropout_prob > 0:
-        drop_mask = torch.rand(B, device=clip_feat.device) < visual_dropout_prob
-        if drop_mask.any():
-            uncond_clip = model.get_empty_clip_sequence(
-                bs=B, len=clip_feat.shape[1]
-            ).to(device=clip_feat.device, dtype=clip_feat.dtype)
-            uncond_sync = model.get_empty_sync_sequence(
-                bs=B, len=sync_feat.shape[1]
-            ).to(device=sync_feat.device, dtype=sync_feat.dtype)
-            m = drop_mask.view(B, 1, 1)
-            clip_feat = torch.where(m, uncond_clip, clip_feat)
-            sync_feat = torch.where(m, uncond_sync, sync_feat)
+        drop_visual = (torch.rand(B) < visual_dropout_prob).tolist()
+        if not any(drop_visual):
+            drop_visual = None
 
     x0 = torch.randn_like(x1)  # noise
 
@@ -304,6 +296,7 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
         cond=text_feat,
         clip_feat=clip_feat,
         sync_feat=sync_feat,
+        drop_visual=drop_visual,
     )["x"]
 
     v_target = v_target.to(device=device, dtype=dtype)

@@ -2175,6 +2175,7 @@ class FoleyTuneDatasetSaver:
                 "schedule_type": "constant",
                 "latent_mixup_alpha": 0.0,
                 "latent_noise_sigma": 0.0,
+                "visual_dropout_prob": 0.0,
                 "gradient_checkpointing": False,
                 "blocks_to_swap": 0,
                 "resume_from": "",

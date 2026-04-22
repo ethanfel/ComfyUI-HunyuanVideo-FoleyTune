@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# One-shot launcher. Edit ROOT below for other datasets.
-# Usage:  ./run.sh           # serves on 8765
-#         ./run.sh 9000      # custom port
-#         ./run.sh 9000 path/to/other/prompts.json
+# Usage:  ./run.sh DATASET_JSON MP4_ROOT [PORT] [PROMPTS_JSON]
+#
+# Example:
+#   ./run.sh /media/unraid/davinci/Foley/AD/blowjob/features_v3/dataset.json \
+#            /media/unraid/davinci/Foley/AD/blowjob/mp4
 
 set -euo pipefail
 
-ROOT="${LABELER_ROOT:-/media/unraid/davinci/Foley/AD/blowjob/mp4}"
-PORT="${1:-8765}"
-PROMPTS="${2:-$(dirname "$0")/prompts.bj.json}"
+if [ $# -lt 2 ]; then
+  echo "Usage: $0 DATASET_JSON MP4_ROOT [PORT] [PROMPTS_JSON]"
+  exit 1
+fi
+
+DATASET_JSON="$1"
+MP4_ROOT="$2"
+PORT="${3:-8765}"
+PROMPTS="${4:-$(dirname "$0")/prompts.bj.json}"
 
 cd "$(dirname "$0")"
 
@@ -21,4 +28,4 @@ cd "$(dirname "$0")"
     sleep 0.2
   done ) &
 
-exec python server.py --root "$ROOT" --prompts "$PROMPTS" --port "$PORT"
+exec python server.py "$DATASET_JSON" "$MP4_ROOT" --prompts "$PROMPTS" --port "$PORT"

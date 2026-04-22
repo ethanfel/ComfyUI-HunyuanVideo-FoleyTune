@@ -34,12 +34,30 @@ def _load_prompts(path: Path) -> dict:
     return cfg
 
 
-def _scan_clips(root: Path, allowed_stems: set[str] | None = None) -> list[dict]:
-    clips = []
+def _load_train_stems(dataset_json: Path) -> list[str]:
+    """Read train stems from a dataset.json (filter-output format)."""
+    with dataset_json.open() as f:
+        cfg = json.load(f)
+    if isinstance(cfg, dict) and isinstance(cfg.get("train"), list):
+        return cfg["train"]
+    raise ValueError(f"dataset.json must have a 'train' list: {dataset_json}")
+
+
+def _build_stem_index(root: Path) -> dict[str, Path]:
+    """Map clip stem -> video path for all videos under root (recursive)."""
+    index = {}
     for p in sorted(root.rglob("*")):
-        if not (p.is_file() and p.suffix.lower() in VIDEO_EXTS):
-            continue
-        if allowed_stems is not None and p.stem not in allowed_stems:
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
+            index[p.stem] = p
+    return index
+
+
+def _scan_clips(root: Path, stem_index: dict[str, Path],
+                train_stems: list[str]) -> list[dict]:
+    clips = []
+    for stem in train_stems:
+        p = stem_index.get(stem)
+        if p is None:
             continue
         txt_path = p.with_suffix(".txt")
         current = txt_path.read_text(encoding="utf-8").strip() if txt_path.exists() else ""
@@ -50,29 +68,6 @@ def _scan_clips(root: Path, allowed_stems: set[str] | None = None) -> list[dict]
             "current_prompt": current,
         })
     return clips
-
-
-def _load_allowed_stems(dataset_json: Path) -> set[str]:
-    """Accept either the filter-output format (dict with train/val) or the
-    source-index format (list of {path, label}). Returns clip stems (no extension).
-    """
-    with dataset_json.open() as f:
-        cfg = json.load(f)
-    stems: set[str] = set()
-    if isinstance(cfg, dict):
-        for key in ("train", "val"):
-            v = cfg.get(key)
-            if isinstance(v, str):
-                stems.add(Path(v).stem)
-            elif isinstance(v, list):
-                stems.update(Path(s).stem for s in v)
-    elif isinstance(cfg, list):
-        for rec in cfg:
-            if isinstance(rec, dict) and "path" in rec:
-                stems.add(Path(rec["path"]).stem)
-            elif isinstance(rec, str):
-                stems.add(Path(rec).stem)
-    return stems
 
 
 def _compose(template: str, selections: dict[str, str]) -> str:
@@ -97,9 +92,14 @@ def _match_existing(prompt: str, stages: list[dict]) -> dict[str, str]:
     return selections
 
 
-def create_app(root: Path, prompts_cfg: dict, allowed_stems: set[str] | None = None) -> Flask:
+def create_app(root: Path, prompts_cfg: dict, train_stems: list[str]) -> Flask:
     app = Flask(__name__, static_folder=None)
     here = Path(__file__).parent
+    stem_index = _build_stem_index(root)
+    missing = [s for s in train_stems if s not in stem_index]
+    if missing:
+        print(f"Warning: {len(missing)} train stems not found in {root} "
+              f"(first 5: {missing[:5]})")
 
     @app.route("/")
     def index():
@@ -111,7 +111,7 @@ def create_app(root: Path, prompts_cfg: dict, allowed_stems: set[str] | None = N
 
     @app.route("/api/clips")
     def api_clips():
-        clips = _scan_clips(root, allowed_stems)
+        clips = _scan_clips(root, stem_index, train_stems)
         for c in clips:
             c["preselect"] = _match_existing(c["current_prompt"], prompts_cfg["stages"])
         return jsonify({
@@ -203,50 +203,34 @@ def create_app(root: Path, prompts_cfg: dict, allowed_stems: set[str] | None = N
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="Clip labeler — tag training clips with keyboard-driven prompts.",
+        usage="%(prog)s DATASET_JSON MP4_ROOT [--prompts FILE] [--port N]",
+    )
     here = Path(__file__).parent
-    ap.add_argument("--root", required=True, help="Directory containing .mp4 clips")
+    ap.add_argument("dataset_json", help="Path to dataset.json (must have a 'train' list)")
+    ap.add_argument("mp4_root", help="Directory containing .mp4 clips (searched recursively)")
     ap.add_argument("--prompts", default=str(here / "prompts.bj.json"),
                     help="Path to prompts JSON (default: ./prompts.bj.json)")
-    ap.add_argument("--dataset-json", default="auto",
-                    help="dataset.json to restrict labeling. 'auto' (default) searches "
-                         "<root>/dataset.json, <root>/../features/dataset.json. "
-                         "'none' to disable. Or pass an explicit path.")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
 
-    root = Path(args.root).resolve()
+    ds_path = Path(args.dataset_json).resolve()
+    if not ds_path.is_file():
+        sys.exit(f"dataset.json not found: {ds_path}")
+    root = Path(args.mp4_root).resolve()
     if not root.is_dir():
         sys.exit(f"Not a directory: {root}")
     prompts_path = Path(args.prompts).resolve()
     if not prompts_path.is_file():
         sys.exit(f"Prompts JSON not found: {prompts_path}")
 
-    allowed = None
-    if args.dataset_json == "auto":
-        # Prefer filter-output dataset.json (sibling features/ dir) over the
-        # source index (which lives next to the mp4s and lists ALL clips).
-        candidates = [
-            root.parent / "features" / "dataset.json",
-            root.parent / "dataset.json",
-            root / "dataset.json",
-        ]
-        ds_path = next((c for c in candidates if c.is_file()), None)
-        if ds_path:
-            allowed = _load_allowed_stems(ds_path)
-            print(f"Auto-detected dataset.json: {ds_path} ({len(allowed)} clips)")
-        else:
-            print("No dataset.json found — labeling all .mp4 in root")
-    elif args.dataset_json and args.dataset_json != "none":
-        ds_path = Path(args.dataset_json).resolve()
-        if not ds_path.is_file():
-            sys.exit(f"dataset.json not found: {ds_path}")
-        allowed = _load_allowed_stems(ds_path)
-        print(f"Filtering to {len(allowed)} clips listed in {ds_path}")
+    train_stems = _load_train_stems(ds_path)
+    print(f"Loaded {len(train_stems)} train clips from {ds_path}")
 
     cfg = _load_prompts(prompts_path)
-    app = create_app(root, cfg, allowed)
+    app = create_app(root, cfg, train_stems)
     print(f"Labeler serving {root}")
     print(f"Open http://{args.host}:{args.port}/ in a browser")
     app.run(host=args.host, port=args.port, debug=False, threaded=True)

@@ -492,7 +492,12 @@ class FoleyTuneBatchFeatureExtractor:
                 "dataset": (FOLEYTUNE_AUDIO_DATASET,),
                 "prompt": ("STRING", {
                     "default": "", "multiline": True,
-                    "tooltip": "Global text prompt. Overridden by per-clip .txt sidecar files.",
+                    "tooltip": "Global text prompt. Overridden by per-clip .txt sidecar files unless use_sidecar_prompts is off.",
+                }),
+                "use_sidecar_prompts": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "When enabled, per-clip .txt sidecar files override the global prompt. "
+                               "Disable to always use the global prompt (useful when sidecars are only used for clip selection).",
                 }),
             },
         }
@@ -503,7 +508,7 @@ class FoleyTuneBatchFeatureExtractor:
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
-    def extract_batch(self, hunyuan_deps, dataset, prompt):
+    def extract_batch(self, hunyuan_deps, dataset, prompt, use_sidecar_prompts=True):
         from hunyuanvideo_foley.utils.feature_utils import (
             encode_video_with_siglip2, encode_video_with_sync,
         )
@@ -523,8 +528,10 @@ class FoleyTuneBatchFeatureExtractor:
                 continue
 
             txt_path = video_path.with_suffix(".txt")
-            clip_prompt = (txt_path.read_text().strip() if txt_path.exists()
-                           else item.get("prompt") or prompt)
+            if use_sidecar_prompts and txt_path.exists():
+                clip_prompt = txt_path.read_text().strip()
+            else:
+                clip_prompt = item.get("prompt") or prompt
 
             clips.append({
                 "item": item,

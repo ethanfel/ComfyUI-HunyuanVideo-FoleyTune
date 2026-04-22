@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Clip Labeler</title>
+<style>
+  :root {
+    --bg: #0e1014;
+    --panel: #1a1d24;
+    --border: #2a2f3a;
+    --text: #e7e9ee;
+    --muted: #8b93a3;
+    --accent: #6ee7b7;
+    --selected: #4f46e5;
+    --done: #22c55e;
+    --skip: #f59e0b;
+    --back: #6b7280;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  body { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  header .title { font-weight: 600; }
+  header .progress { color: var(--muted); font-variant-numeric: tabular-nums; }
+  main {
+    display: grid; grid-template-columns: 1fr 380px; gap: 12px; padding: 12px; overflow: hidden;
+  }
+  .video-pane {
+    display: flex; flex-direction: column; gap: 8px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px;
+    min-width: 0; min-height: 0;
+  }
+  video { width: 100%; height: 100%; object-fit: contain; background: black; border-radius: 4px; }
+  .clip-name { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+  .stage-pane {
+    display: flex; flex-direction: column; gap: 12px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 12px;
+    overflow-y: auto;
+  }
+  .stage-title { font-size: 16px; font-weight: 600; color: var(--accent); }
+  .options { display: flex; flex-direction: column; gap: 6px; }
+  .opt {
+    display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: center;
+    padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    cursor: pointer; transition: background 0.1s, border-color 0.1s;
+    user-select: none;
+  }
+  .opt:hover { border-color: var(--muted); }
+  .opt.selected { background: var(--selected); border-color: var(--selected); }
+  .opt .key { font-family: ui-monospace, monospace; font-weight: 700; text-align: center; color: var(--accent); }
+  .opt.selected .key { color: white; }
+  .opt .label { font-weight: 500; }
+  .opt .value { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .opt.selected .value { color: rgba(255,255,255,0.85); }
+  .opt-text { display: flex; flex-direction: column; }
+  .stages-progress {
+    display: flex; gap: 4px; margin-bottom: 4px;
+  }
+  .stages-progress .pip {
+    flex: 1; height: 4px; background: var(--border); border-radius: 2px;
+  }
+  .stages-progress .pip.done { background: var(--done); }
+  .stages-progress .pip.current { background: var(--accent); }
+  .preview {
+    margin-top: auto; padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+    font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; min-height: 48px;
+  }
+  .preview .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  footer {
+    padding: 8px 16px; border-top: 1px solid var(--border); background: var(--panel);
+    display: flex; gap: 18px; flex-wrap: wrap; color: var(--muted); font-size: 12px;
+  }
+  footer kbd {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 3px;
+    padding: 1px 6px; font-family: ui-monospace, monospace; color: var(--text);
+  }
+  .toast {
+    position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%);
+    background: var(--done); color: black; padding: 8px 16px; border-radius: 4px;
+    opacity: 0; transition: opacity 0.2s; pointer-events: none; font-weight: 500;
+  }
+  .toast.show { opacity: 1; }
+  .toast.skip { background: var(--skip); }
+  .toast.back { background: var(--back); color: white; }
+  .toast.undo { background: var(--back); color: white; }
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="title">Clip Labeler</div>
+    <div class="progress" id="progress">loading…</div>
+  </header>
+
+  <main>
+    <div class="video-pane">
+      <video id="video" autoplay loop controls></video>
+      <div class="clip-name" id="clipName">—</div>
+    </div>
+
+    <div class="stage-pane">
+      <div class="stages-progress" id="stagesProgress"></div>
+      <div class="stage-title" id="stageTitle">—</div>
+      <div class="options" id="options"></div>
+      <div class="preview">
+        <div class="label">composed prompt</div>
+        <div id="preview">—</div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <span><kbd>1-9</kbd> select option</span>
+    <span><kbd>0</kbd> skip stage (omit value)</span>
+    <span><kbd>Space</kbd> replay</span>
+    <span><kbd>S</kbd> skip clip</span>
+    <span><kbd>B</kbd> previous</span>
+    <span><kbd>U</kbd> undo last save</span>
+    <span><kbd>R</kbd> reset stages</span>
+  </footer>
+
+  <div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = {
+  config: null,
+  clips: [],
+  idx: 0,
+  stageIdx: 0,
+  selections: {},
+  lastSaved: null,
+};
+
+async function load() {
+  state.config = await (await fetch("/api/config")).json();
+  const c = await (await fetch("/api/clips")).json();
+  state.clips = c.clips;
+  if (state.clips.length === 0) {
+    document.querySelector("main").innerHTML = '<div class="empty">No video clips found in dataset.</div>';
+    return;
+  }
+  // Jump to first untagged
+  const firstUntagged = state.clips.findIndex(c => !c.tagged);
+  state.idx = firstUntagged >= 0 ? firstUntagged : 0;
+  loadClip();
+}
+
+function loadClip() {
+  if (state.clips.length === 0) return;
+  state.idx = (state.idx + state.clips.length) % state.clips.length;
+  const clip = state.clips[state.idx];
+  state.stageIdx = 0;
+  state.selections = {...(clip.preselect || {})};
+
+  const v = $("video");
+  v.src = "/clips/" + encodeURIComponent(clip.rel);
+  v.load();
+
+  $("clipName").textContent = clip.rel + (clip.tagged ? "  (already tagged)" : "");
+  updateProgress();
+  renderStage();
+}
+
+function updateProgress() {
+  const tagged = state.clips.filter(c => c.tagged).length;
+  $("progress").textContent = `[${state.idx + 1}/${state.clips.length}]  tagged: ${tagged}/${state.clips.length}`;
+}
+
+function renderStage() {
+  const stages = state.config.stages;
+  const stage = stages[state.stageIdx];
+  $("stageTitle").textContent = `${state.stageIdx + 1}. ${stage.title}`;
+
+  // Pips
+  const pips = stages.map((s, i) => {
+    const cls = i < state.stageIdx ? "pip done" : (i === state.stageIdx ? "pip current" : "pip");
+    return `<div class="${cls}"></div>`;
+  }).join("");
+  $("stagesProgress").innerHTML = pips;
+
+  // Options
+  const sel = state.selections[stage.id];
+  $("options").innerHTML = stage.options.map(opt => {
+    const isSel = sel === opt.key;
+    return `<div class="opt ${isSel ? 'selected' : ''}" data-key="${opt.key}">
+      <div class="key">${opt.key}</div>
+      <div class="opt-text">
+        <div class="label">${opt.label}</div>
+        <div class="value">${opt.value || '<no value>'}</div>
+      </div>
+    </div>`;
+  }).join("");
+
+  // Wire clicks
+  $("options").querySelectorAll(".opt").forEach(el => {
+    el.addEventListener("click", () => choose(el.dataset.key));
+  });
+
+  renderPreview();
+}
+
+function renderPreview() {
+  const values = {};
+  for (const stage of state.config.stages) {
+    const k = state.selections[stage.id];
+    const opt = stage.options.find(o => o.key === k);
+    values[stage.id] = opt ? opt.value : "";
+  }
+  let composed = state.config.prompt_template;
+  for (const k in values) composed = composed.split("{" + k + "}").join(values[k] || "");
+  composed = composed.replace(/,\s*,/g, ",").replace(/,\s*$/, "").replace(/^,\s*/, "").trim();
+  $("preview").textContent = composed || "—";
+}
+
+function choose(key) {
+  const stage = state.config.stages[state.stageIdx];
+  // Validate key exists for this stage; allow "0" as skip
+  if (key === "0") {
+    state.selections[stage.id] = null;
+  } else {
+    const opt = stage.options.find(o => o.key === key);
+    if (!opt) return;
+    state.selections[stage.id] = key;
+  }
+  renderStage();
+
+  if (state.stageIdx < state.config.stages.length - 1) {
+    state.stageIdx++;
+    renderStage();
+  } else {
+    saveAndAdvance();
+  }
+}
+
+async function saveAndAdvance() {
+  const clip = state.clips[state.idx];
+  const res = await fetch("/api/save", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({rel: clip.rel, selections: state.selections}),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    state.lastSaved = {idx: state.idx, rel: clip.rel};
+    clip.tagged = true;
+    clip.current_prompt = data.prompt;
+    clip.preselect = matchPreselect(data.prompt);
+    toast("✓ saved", "");
+    state.idx++;
+    if (state.idx >= state.clips.length) state.idx = state.clips.length - 1;
+    loadClip();
+  } else {
+    toast("save failed: " + (data.error || "unknown"), "skip");
+  }
+}
+
+function matchPreselect(prompt) {
+  const out = {};
+  for (const stage of state.config.stages) {
+    for (const opt of stage.options) {
+      if (opt.value && prompt.includes(opt.value)) {
+        out[stage.id] = opt.key;
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+function skipClip() {
+  toast("skipped", "skip");
+  state.idx++;
+  if (state.idx >= state.clips.length) state.idx = state.clips.length - 1;
+  loadClip();
+}
+
+function backClip() {
+  toast("← back", "back");
+  state.idx--;
+  if (state.idx < 0) state.idx = 0;
+  loadClip();
+}
+
+function resetStages() {
+  state.stageIdx = 0;
+  state.selections = {};
+  renderStage();
+}
+
+function replay() {
+  const v = $("video");
+  v.currentTime = 0;
+  v.play();
+}
+
+async function undoLast() {
+  if (!state.lastSaved) {
+    toast("nothing to undo", "skip");
+    return;
+  }
+  const {idx, rel} = state.lastSaved;
+  await fetch("/api/delete", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({rel}),
+  });
+  state.clips[idx].tagged = false;
+  state.clips[idx].current_prompt = "";
+  state.clips[idx].preselect = {};
+  state.lastSaved = null;
+  state.idx = idx;
+  loadClip();
+  toast("undone", "undo");
+}
+
+let toastTimer;
+function toast(msg, cls) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.className = "toast show " + (cls || "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.className = "toast", 900);
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  // Digit keys (top row + numpad)
+  if (/^[0-9]$/.test(e.key)) {
+    e.preventDefault();
+    choose(e.key);
+    return;
+  }
+  switch (e.key.toLowerCase()) {
+    case " ": e.preventDefault(); replay(); break;
+    case "s": e.preventDefault(); skipClip(); break;
+    case "b": e.preventDefault(); backClip(); break;
+    case "u": e.preventDefault(); undoLast(); break;
+    case "r": e.preventDefault(); resetStages(); break;
+  }
+});
+
+load();
+</script>
+</body>
+</html>

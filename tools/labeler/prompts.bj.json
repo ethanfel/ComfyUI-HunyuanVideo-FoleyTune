@@ -1,0 +1,29 @@
+{
+  "prompt_template": "blowjob, {texture}, {speed}",
+  "stages": [
+    {
+      "id": "texture",
+      "title": "Audio character (1-8)",
+      "options": [
+        {"key": "1", "label": "wet sloppy",   "value": "wet sloppy slurping, drool sounds"},
+        {"key": "2", "label": "suction",      "value": "suction sounds, lip smacking"},
+        {"key": "3", "label": "deep gagging", "value": "deep throat gagging, choking gurgle"},
+        {"key": "4", "label": "soft sucking", "value": "soft sucking, breathy moans"},
+        {"key": "5", "label": "tongue lick",  "value": "tongue licking, wet kissing sounds"},
+        {"key": "6", "label": "pull-off pop", "value": "suction pop, wet release"},
+        {"key": "7", "label": "vocal-forward","value": "muffled moaning, soft gag"},
+        {"key": "8", "label": "mixed/intense","value": "wet smacking, intense sucking"}
+      ]
+    },
+    {
+      "id": "speed",
+      "title": "Speed/tempo (1-4, 0=omit)",
+      "options": [
+        {"key": "1", "label": "slow",    "value": "slow tempo"},
+        {"key": "2", "label": "steady",  "value": "steady rhythm"},
+        {"key": "3", "label": "fast",    "value": "fast tempo"},
+        {"key": "4", "label": "frantic", "value": "frantic pace"}
+      ]
+    }
+  ]
+}

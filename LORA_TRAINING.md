@@ -192,6 +192,59 @@ The prompt conditions the CLAP text features used during training. Imprecise pro
 
 **The prompt affects inference more than training.** During training, the model learns audio patterns from all three conditioning streams (visual, sync, text). At inference, CFG amplifies the text guidance, so the prompt steers generation.
 
+### Per-clip prompts via `.txt` sidecars
+
+The Foley Feature Extractor checks for a `<clipname>.txt` next to each video. If found, its contents **override the global `prompt` input** for that clip. Use sidecars when different clips in the same dataset need different captions (e.g. categorizing wet vs. dry sounds, slow vs. fast tempos, vocal vs. silent variants).
+
+```
+dataset/my_sound/
+    clip_001.mp4
+    clip_001.txt       <- "wet sloppy slurping, drool sounds, fast tempo"
+    clip_002.mp4
+    clip_002.txt       <- "deep throat gagging, choking gurgle, slow tempo"
+    ...
+```
+
+**Important: training reads `text_embedding` from `.npz`, not `.txt`.** CLAP encoding happens once at extraction time and gets baked into the cache. After editing or adding `.txt` sidecars you **must re-run the Foley Feature Extractor** to produce updated `.npz` files — otherwise training will keep using the old embeddings regardless of what's in `.txt`.
+
+Recommended workflow when iterating on labels:
+
+1. Label or re-label clips → produces `.txt` sidecars
+2. Re-run Foley Feature Extractor with the same `data_dir` (or a new one for A/B comparison) → fresh `.npz` files with new text embeddings
+3. Train on the new `.npz`
+
+### Labeling tool: `tools/labeler/`
+
+For multi-stage prompt composition (texture × tempo, etc.) across hundreds of clips, the bundled standalone web tool is faster than editing `.txt` files by hand. It plays each clip in a browser and binds keyboard digits to options defined in a JSON template.
+
+```bash
+cd tools/labeler
+./run.sh                              # uses the default ROOT in run.sh
+LABELER_ROOT=/path/to/clips ./run.sh  # override per-call
+```
+
+The launcher auto-opens `http://127.0.0.1:8765/`. Auto-detects a sibling `dataset.json` (filter output) to restrict labeling to that subset, otherwise scans all `.mp4` under `--root`. Saves `<clip>.txt` next to each video. Keyboard: `1-9` choose option, `0` omit a stage's value, `space` replay, `s` skip, `b` back, `u` undo last save, `r` reset stages.
+
+The prompt template is defined in a JSON like `tools/labeler/prompts.bj.json`:
+
+```json
+{
+  "prompt_template": "<sound_class>, {texture}, {speed}",
+  "stages": [
+    {"id": "texture", "title": "Audio character (1-8)", "options": [
+      {"key": "1", "label": "wet sloppy", "value": "wet sloppy slurping, drool sounds"},
+      ...
+    ]},
+    {"id": "speed", "title": "Speed (1-4)", "options": [
+      {"key": "1", "label": "slow", "value": "slow tempo"},
+      ...
+    ]}
+  ]
+}
+```
+
+Stages compose left-to-right per clip. Stages with no selection (`0` key) are dropped, and stray commas are cleaned up automatically.
+
 ### Validation clip (recommended)
 
 Set aside one clip as a validation sample — ideally a rejected clip from the same domain that you didn't include in the training set. Save its `.npz` path as the `eval_npz` parameter in the trainer. This generates separate validation audio at each checkpoint, letting you detect overfitting (training eval improves while validation plateaus or degrades).

@@ -175,6 +175,30 @@ def create_app(root: Path, prompts_cfg: dict, allowed_stems: set[str] | None = N
             txt.unlink()
         return jsonify({"ok": True})
 
+    @app.route("/api/delete-clip", methods=["POST"])
+    def api_delete_clip():
+        """Delete a clip and all same-stem siblings (.txt, .npz, .flac, etc)."""
+        data = request.get_json(force=True)
+        rel = data.get("rel", "")
+        if not rel:
+            return jsonify({"error": "missing rel"}), 400
+        target = (root / rel).resolve()
+        try:
+            target.relative_to(root.resolve())
+        except ValueError:
+            abort(403)
+        if not target.exists():
+            return jsonify({"error": "clip not found"}), 404
+
+        deleted = []
+        stem = target.stem
+        parent = target.parent
+        for sibling in parent.iterdir():
+            if sibling.stem == stem and sibling.is_file():
+                sibling.unlink()
+                deleted.append(sibling.name)
+        return jsonify({"ok": True, "deleted": deleted})
+
     return app
 
 

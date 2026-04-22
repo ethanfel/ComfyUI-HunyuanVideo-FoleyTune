@@ -86,6 +86,7 @@
   .toast.skip { background: var(--skip); }
   .toast.back { background: var(--back); color: white; }
   .toast.undo { background: var(--back); color: white; }
+  .toast.deleted { background: #ef4444; color: white; }
   .empty { color: var(--muted); padding: 40px; text-align: center; }
 </style>
 </head>
@@ -120,6 +121,7 @@
     <span><kbd>B</kbd> previous</span>
     <span><kbd>U</kbd> undo last save</span>
     <span><kbd>R</kbd> reset stages</span>
+    <span><kbd>D</kbd> delete clip</span>
   </footer>
 
   <div class="toast" id="toast"></div>
@@ -317,6 +319,30 @@ async function undoLast() {
   toast("undone", "undo");
 }
 
+async function deleteClip() {
+  if (state.clips.length === 0) return;
+  const clip = state.clips[state.idx];
+  if (!confirm(`Delete "${clip.rel}" and all same-stem files? This cannot be undone.`)) return;
+  const res = await fetch("/api/delete-clip", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({rel: clip.rel}),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    state.clips.splice(state.idx, 1);
+    if (state.clips.length === 0) {
+      document.querySelector("main").innerHTML = '<div class="empty">No clips remaining.</div>';
+      return;
+    }
+    if (state.idx >= state.clips.length) state.idx = state.clips.length - 1;
+    toast(`deleted (${data.deleted.length} files)`, "deleted");
+    loadClip();
+  } else {
+    toast("delete failed: " + (data.error || "unknown"), "skip");
+  }
+}
+
 let toastTimer;
 function toast(msg, cls) {
   const el = $("toast");
@@ -340,6 +366,7 @@ document.addEventListener("keydown", (e) => {
     case "b": e.preventDefault(); backClip(); break;
     case "u": e.preventDefault(); undoLast(); break;
     case "r": e.preventDefault(); resetStages(); break;
+    case "d": e.preventDefault(); deleteClip(); break;
   }
 });
 

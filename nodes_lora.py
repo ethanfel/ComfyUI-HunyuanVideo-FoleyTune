@@ -1278,7 +1278,6 @@ class FoleyTuneLoRAScheduler:
         "lora_plus_ratio": 1.0, "schedule_type": "constant",
         "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
         "visual_dropout_prob": 0.0,
-        "prompt_override": "",
         "gradient_checkpointing": False,
         "resume_from": "",
     }
@@ -1424,12 +1423,6 @@ class FoleyTuneLoRAScheduler:
             config = self._merge_config(base_config, exp)
             exp_dir = output_root / exp_id
             exp_dir.mkdir(parents=True, exist_ok=True)
-
-            # Per-experiment prompt override
-            exp_prompts = prompts_list
-            if config.get("prompt_override"):
-                exp_prompts = [config["prompt_override"]]
-                logger.info(f"Prompt override: {config['prompt_override']!r}")
 
             logger.info(f"Starting experiment: {exp_id}")
             logger.info(f"Config: {json.dumps({k: v for k, v in config.items() if k != 'description'}, indent=2)}")
@@ -1582,7 +1575,7 @@ class FoleyTuneLoRAScheduler:
                         if skip_flag.exists():
                             logger.info(f"Skip flag detected for {exp_id} at step {step}")
                             ckpt_path = exp_dir / f"adapter_cancelled_step{step:05d}.pt"
-                            meta = {**config, "steps_completed": step, "prompts": exp_prompts}
+                            meta = {**config, "steps_completed": step, "prompts": prompts_list}
                             save_checkpoint(model, optimizer, lr_sched, step, meta, ckpt_path)
                             skip_flag.unlink()
                             raise _SkipExperiment(f"Skipped at step {step}")
@@ -1641,7 +1634,7 @@ class FoleyTuneLoRAScheduler:
                             )
 
                         if (step + 1) % config["save_every"] == 0:
-                            meta = {**config, "steps_completed": step + 1, "prompts": exp_prompts}
+                            meta = {**config, "steps_completed": step + 1, "prompts": prompts_list}
                             ckpt_path = exp_dir / f"adapter_step{step+1:05d}.pt"
                             save_checkpoint(model, optimizer, lr_sched, step + 1, meta, ckpt_path)
                             _draw_loss_curve(losses, smoothed=_smooth_losses(losses)).save(str(exp_dir / "loss.png"))
@@ -1691,7 +1684,7 @@ class FoleyTuneLoRAScheduler:
                                        f"SC={step_metrics.get('spectral_convergence', 0):.3f}")
 
                     # Save final
-                    meta = {**config, "steps_completed": config["steps"], "prompts": exp_prompts}
+                    meta = {**config, "steps_completed": config["steps"], "prompts": prompts_list}
                     final_path = exp_dir / "adapter_final.pt"
                     save_checkpoint(model, optimizer, lr_sched, config["steps"], meta, final_path, final=True)
                     # Draw and save per-experiment loss curve

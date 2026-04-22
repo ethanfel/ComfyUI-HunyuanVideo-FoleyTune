@@ -1710,7 +1710,9 @@ class FoleyTuneVideoQualityFilter:
                     kept_all.extend(items)
                     folder_stats[bucket] = (n_above, n_above, len(by_seg))
                     continue
-                # Order segments by peak score desc, name asc
+                # Expand quota so every segment gets at least 1 pick
+                effective_quota = max(top_n_per_folder, len(by_seg))
+                # Order segments by peak score desc for round-robin
                 seg_order = sorted(
                     by_seg.keys(),
                     key=lambda s: (-by_seg[s][0]["scores"]["composite"], s),
@@ -1718,14 +1720,14 @@ class FoleyTuneVideoQualityFilter:
                 # Round-robin pick
                 picked = []
                 cursors = {s: 0 for s in seg_order}
-                while len(picked) < top_n_per_folder:
+                while len(picked) < effective_quota:
                     progressed = False
                     for seg in seg_order:
                         if cursors[seg] < len(by_seg[seg]):
                             picked.append(by_seg[seg][cursors[seg]])
                             cursors[seg] += 1
                             progressed = True
-                            if len(picked) >= top_n_per_folder:
+                            if len(picked) >= effective_quota:
                                 break
                     if not progressed:
                         break
@@ -1819,7 +1821,7 @@ class FoleyTuneVideoQualityFilter:
 
         if folder_stats:
             lines.append("")
-            lines.append(f"Folder quota (top {top_n_per_folder} per folder):")
+            lines.append(f"Folder quota (top {top_n_per_folder} per folder, expanded when segments exceed quota):")
             name_w = max(len(b) if b else len("<root>") for b in folder_stats)
             for bucket in sorted(folder_stats):
                 n_above, n_kept, n_segs = folder_stats[bucket]

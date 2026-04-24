@@ -644,3 +644,108 @@ as the model transitions from easy timesteps to uniform sampling.
 - per_band_correlation trending up but staying below 0.8
 - Val and train metrics moving in the same direction (small gap OK)
 - temporal_variance close to reference value (dynamic, not flat)
+
+---
+
+## Training Experiments — Blowjob LoRA (April 2026)
+
+### Dataset Iterations
+
+| Version | Clips | Spread | Scoring | Prompts | Notes |
+|---------|-------|--------|---------|---------|-------|
+| v1 | ~320 | 2-4s | CLAP+SQ | Generic | Original extraction, high overlap (50-75%) |
+| v2 | 319 | 2-4s | CLAP+SQ | Generic | First quality filter pass |
+| v3 | 299 | 6s | SQ-only (0.40 threshold, top_n=15) | Per-clip (8 texture × 4 speed) | Wider spread (25% overlap), segment-aware round-robin |
+| v4 | 299 | 6s | SQ-only (0.40 threshold, top_n=15) | Generic: "blowjob, wet sucking and gagging, rhythmic oral sounds" | Same clips as v3, single CLAP embedding |
+
+**Key dataset findings:**
+- 6s spread (v3/v4) improved spectral convergence by ~0.1 vs 2-4s spread (v2): 1.39 vs 1.48
+- Per-clip prompts (v3) vs generic prompt (v4) made no measurable difference at 299-clip scale
+- v4 (generic prompt) generalizes better to diverse input videos at inference — the model learns audio variation from visual features rather than relying on text conditioning
+- Segment-aware round-robin with effective quota expansion ensures all source video segments get representation
+
+### Hyperparameter Sweep Results
+
+All experiments use v4 dataset (299 clips, generic prompt), rank 96, alpha 96, visual_dropout_prob 0.5.
+
+#### LoRA Rank (rank 96 vs 128)
+
+| Config | Loss | SC | MCD | PBC |
+|--------|------|----|-----|-----|
+| v4 r96 | 1.453 | 1.388 | **8.75** | **0.177** |
+| v4 r128 | 1.452 | 1.392 | 9.09 | 0.168 |
+| v3 r128 | 1.451 | 1.393 | 9.15 | 0.163 |
+
+**Finding:** Rank 128 is marginally worse — extra capacity isn't productive. Rank 96 is the sweet spot.
+
+#### LR Schedule × Timestep Mode (12k steps)
+
+| Config | Loss | SC | MCD | PBC | Notes |
+|--------|------|----|-----|-----|-------|
+| **constant/curriculum 0.7** | 1.453 | 1.388 | 8.75 | **0.177** | Baseline, stable post-curriculum climb |
+| cosine/curriculum 0.7 | 1.454 | 1.384 | 8.77 | 0.143 | **Flatlined post-9k** — cosine decays LR when curriculum switch needs it most |
+| constant/curriculum 0.5 | 1.453 | 1.399 | 8.76 | 0.154 | Too-early switch, model not ready at 6k |
+| constant/uniform | 1.453 | **1.379** | **8.50** | 0.155 | Best SC+MCD but per-band oscillates (0.10-0.21) |
+| **cosine/uniform** | 1.460 | 1.387 | 8.67 | 0.175 | Most stable, near-best PBC |
+
+**Critical finding — cosine + curriculum is a bad combination:** Curriculum switches to harder uniform timesteps at 70% of training. Cosine has already decayed the LR significantly by that point, starving the model of learning capacity exactly when it needs it. Metrics froze completely at steps 9-12k.
+
+**Critical finding — uniform timesteps are viable without curriculum:** With 299 clips the curriculum's logit_normal phase may over-fit easy timesteps rather than building useful foundations. Uniform reaches competitive loss in half the steps.
+
+#### Optimal Training Length
+
+Uniform timestep runs peak at **step 7k**, then degrade or plateau:
+
+| Run | Best PBC | At step | 12k PBC |
+|-----|----------|---------|---------|
+| constant/uniform | 0.214 | 6k | 0.155 (crashed) |
+| cosine/uniform | **0.195** | 7k | 0.176 (stable) |
+
+Constant LR + uniform oscillates wildly (wavelength ~4k steps). Cosine dampens this, plateauing at 0.175 after 9k.
+
+For curriculum runs, the 9k inflection (curriculum switch) is key — post-curriculum improvement requires constant LR to keep learning.
+
+#### Cosine/Uniform Fine-Tuning (8k steps)
+
+| Config | Best PBC | At step | MCD | Notes |
+|--------|----------|---------|-----|-------|
+| **5e-5 baseline (10k)** | **0.195** | **7k** | **8.56** | **Best overall** |
+| 7e-5 | 0.177 | 6k | 9.00 | Higher LR decays too fast under cosine |
+| 1e-4 | 0.191 | 1k | 8.65 | Too aggressive, only reached 1k step |
+| 5e-5, warmup 500 | 0.194 | 1k | 8.99 | Wastes training budget on ramp-up |
+
+**Finding:** 5e-5 is the right LR for cosine/uniform. Higher LR doesn't help because cosine decay brings it down too fast.
+
+### Best Configuration
+
+```json
+{
+  "target": "all_attn_mlp",
+  "rank": 96,
+  "alpha": 96,
+  "lr": 0.00005,
+  "steps": 10000,
+  "schedule_type": "cosine",
+  "timestep_mode": "uniform",
+  "visual_dropout_prob": 0.5,
+  "warmup_steps": 100,
+  "batch_size": 8,
+  "seed": 42
+}
+```
+
+**Best checkpoint:** `v4_cosine_uniform/adapter_step07000.pt`
+- Loss: 1.438, SC: 1.386, MCD: 8.56, PBC: 0.195
+- Use generic prompt for inference: "blowjob, wet sucking and gagging, rhythmic oral sounds"
+- Generalizes well across diverse input videos
+
+### Key Takeaways
+
+1. **Dataset quality > quantity:** 299 well-filtered clips with 6s spread outperform 319 clips with 2-4s spread on spectral convergence
+2. **Generic prompt > per-clip labels** at small dataset scale — forces the model to learn audio variation from visual signal, improving generalization
+3. **Cosine/uniform is simpler and better** than curriculum for small datasets — fewer hyperparameters (no curriculum_switch to tune), trains in 7k steps vs 12k
+4. **Cosine + curriculum is actively harmful** — never combine them
+5. **Rank 96 is sufficient** — 128 adds parameters without improving any metric
+6. **LR 5e-5 is the sweet spot** — higher LRs decay too fast under cosine schedule
+7. **Stop at step 7k** for cosine/uniform — per-band correlation peaks then plateaus or degrades
+8. **Next lever is dataset scale** — more performers needed to test generalization beyond single-performer training

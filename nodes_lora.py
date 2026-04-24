@@ -789,6 +789,18 @@ class FoleyTuneLoRATrainer:
                 "schedule_type": (["constant", "cosine"], {"default": "constant"}),
                 "latent_mixup_alpha": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0}),
                 "latent_noise_sigma": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.1}),
+                "noise_offset": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 0.1, "step": 0.005,
+                    "tooltip": "Per-sample channel-uniform noise added to latents before flow matching. Improves dynamic range unlike latent_noise_sigma which is per-element.",
+                }),
+                "min_snr_gamma": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 20.0, "step": 1.0,
+                    "tooltip": "Min-SNR loss weighting gamma. Downweights high-noise timesteps where gradients are noisy. 5.0 recommended. 0 = disabled.",
+                }),
+                "ema_decay": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 0.9999, "step": 0.0001,
+                    "tooltip": "EMA decay for LoRA weights. Smooths training, used at save time. 0.9995 recommended for fine-tuning. 0 = disabled.",
+                }),
                 "visual_dropout_prob": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 0.95, "step": 0.05,
                     "tooltip": "Per-sample probability of zeroing visual features during training. Forces the text channel to carry audio-character signal, decoupling identity from sound. Use 0.5 for generic-style LoRAs (no performer binding); leave 0.0 for identity-preserving LoRAs.",
@@ -819,6 +831,7 @@ class FoleyTuneLoRATrainer:
               init_mode="standard", use_rslora=False, lora_dropout=0.0,
               lora_plus_ratio=1.0, schedule_type="constant",
               latent_mixup_alpha=0.0, latent_noise_sigma=0.0,
+              noise_offset=0.0, min_snr_gamma=0.0, ema_decay=0.0,
               visual_dropout_prob=0.0,
               gradient_checkpointing=False,
               resume_from="", dataset_json=""):
@@ -837,6 +850,7 @@ class FoleyTuneLoRATrainer:
             logit_normal_sigma, curriculum_switch, init_mode, use_rslora,
             lora_dropout, lora_plus_ratio, schedule_type,
             latent_mixup_alpha, latent_noise_sigma,
+            noise_offset, min_snr_gamma, ema_decay,
             visual_dropout_prob,
             gradient_checkpointing, resume_from,
             dataset_json,
@@ -848,6 +862,7 @@ class FoleyTuneLoRATrainer:
                      logit_normal_sigma, curriculum_switch, init_mode, use_rslora,
                      lora_dropout, lora_plus_ratio, schedule_type,
                      latent_mixup_alpha, latent_noise_sigma,
+                     noise_offset, min_snr_gamma, ema_decay,
                      visual_dropout_prob,
                      gradient_checkpointing, resume_from,
                      dataset_json=""):
@@ -931,7 +946,7 @@ class FoleyTuneLoRATrainer:
         else:
             param_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": lr}]
 
-        optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.01)
+        optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 
         # -- LR Scheduler --
         # scheduler.step() is called once per grad_accum training steps,
@@ -949,6 +964,7 @@ class FoleyTuneLoRATrainer:
 
         # -- Resume --
         start_step = 0
+        _resumed_ema = None
         if resume_from and os.path.exists(resume_from):
             ckpt = torch.load(resume_from, map_location="cpu", weights_only=False)
             load_lora(model, ckpt["state_dict"])
@@ -957,8 +973,20 @@ class FoleyTuneLoRATrainer:
             if "scheduler" in ckpt:
                 scheduler.load_state_dict(ckpt["scheduler"])
             start_step = ckpt.get("step", 0)
+            _resumed_ema = ckpt.get("ema_state", None)
             logger.info(f"Resumed from step {start_step}: {resume_from}")
             del ckpt
+
+        # -- EMA --
+        ema_state = None
+        if ema_decay > 0:
+            if _resumed_ema is not None:
+                ema_state = {k: v.to(device) for k, v in _resumed_ema.items()}
+                logger.info(f"EMA restored from checkpoint (decay={ema_decay})")
+                del _resumed_ema
+            else:
+                ema_state = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
+                logger.info(f"EMA initialized fresh (decay={ema_decay})")
 
         # -- Training loop --
         meta = {
@@ -971,6 +999,9 @@ class FoleyTuneLoRATrainer:
             "schedule_type": schedule_type,
             "latent_mixup_alpha": latent_mixup_alpha,
             "latent_noise_sigma": latent_noise_sigma,
+            "noise_offset": noise_offset,
+            "min_snr_gamma": min_snr_gamma,
+            "ema_decay": ema_decay,
             "gradient_checkpointing": gradient_checkpointing,
             "n_clips": n_clips, "precision": precision, "seed": seed,
         }
@@ -1046,6 +1077,11 @@ class FoleyTuneLoRATrainer:
             if latent_noise_sigma > 0:
                 batch_latents = batch_latents + torch.randn_like(batch_latents) * latent_noise_sigma
 
+            if noise_offset > 0:
+                # Channel-uniform noise: same value across all spatial/temporal dims per sample per channel
+                offset = torch.randn(batch_latents.shape[0], batch_latents.shape[1], 1, device=device, dtype=dtype) * noise_offset
+                batch_latents = batch_latents + offset
+
             # Sample timesteps
             t = sample_timesteps(
                 batch_size, timestep_mode, device, dtype,
@@ -1057,6 +1093,7 @@ class FoleyTuneLoRATrainer:
             loss = flow_matching_loss(
                 model, batch_latents, t, batch_clip, batch_sync, batch_text, device, dtype,
                 visual_dropout_prob=visual_dropout_prob,
+                min_snr_gamma=min_snr_gamma,
             )
             loss = loss / grad_accum
             loss.backward()
@@ -1068,6 +1105,12 @@ class FoleyTuneLoRATrainer:
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
+
+                if ema_state is not None:
+                    with torch.no_grad():
+                        for n, p in model.named_parameters():
+                            if p.requires_grad and n in ema_state:
+                                ema_state[n].mul_(ema_decay).add_(p.data, alpha=1 - ema_decay)
 
             losses.append(loss.item() * grad_accum)
 
@@ -1090,9 +1133,18 @@ class FoleyTuneLoRATrainer:
 
             # Save checkpoint + eval sample
             if (step + 1) % save_every == 0:
+                # Save with live weights for optimizer consistency on resume
                 ckpt_path = output_path / f"adapter_step{step+1:05d}.pt"
-                save_checkpoint(model, optimizer, scheduler, step + 1, meta, ckpt_path)
+                save_checkpoint(model, optimizer, scheduler, step + 1, meta, ckpt_path,
+                                ema_state=ema_state)
                 _draw_loss_curve(losses, start_step=start_step, smoothed=_smooth_losses(losses)).save(str(output_path / "loss.png"))
+
+                # Swap in EMA weights for eval (better sample quality)
+                if ema_state is not None:
+                    _live_params = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
+                    for n, p in model.named_parameters():
+                        if p.requires_grad and n in ema_state:
+                            p.data.copy_(ema_state[n])
 
                 # Generate eval sample + compute metrics
                 model.eval()
@@ -1134,6 +1186,12 @@ class FoleyTuneLoRATrainer:
                     _save_wav(samples_path / f"val_step_{step+1:05d}.wav", val_wav_t, val_sr)
                     _save_spectrogram(val_wav_mono, val_sr, samples_path / f"val_step_{step+1:05d}")
 
+                # Restore live weights for continued training
+                if ema_state is not None:
+                    for n, p in model.named_parameters():
+                        if p.requires_grad and n in _live_params:
+                            p.data.copy_(_live_params[n])
+
                 model.train()
 
         # Save metrics history
@@ -1142,6 +1200,11 @@ class FoleyTuneLoRATrainer:
                 json.dump(metrics_history, f, indent=2)
 
         # -- Save final --
+        if ema_state is not None:
+            for n, p in model.named_parameters():
+                if p.requires_grad and n in ema_state:
+                    p.data.copy_(ema_state[n])
+
         final_path = output_path / "adapter_final.pt"
         meta["steps_completed"] = step + 1 if step >= start_step else start_step
         save_checkpoint(model, optimizer, scheduler, step + 1, meta, final_path, final=True)
@@ -1199,6 +1262,12 @@ class FoleyTuneLoRALoader:
         if "state_dict" in ckpt:
             state_dict = ckpt["state_dict"]
             meta = ckpt.get("meta", {})
+            # Prefer EMA weights for inference when available
+            if "ema_state" in ckpt:
+                for key, ema_val in ckpt["ema_state"].items():
+                    if key in state_dict:
+                        state_dict[key] = ema_val
+                logger.info("Using EMA weights from checkpoint for inference")
         else:
             state_dict = ckpt
             meta = {}
@@ -1284,6 +1353,7 @@ class FoleyTuneLoRAScheduler:
         "init_mode": "standard", "use_rslora": False, "lora_dropout": 0.0,
         "lora_plus_ratio": 1.0, "schedule_type": "constant",
         "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
+        "noise_offset": 0.0, "min_snr_gamma": 0.0, "ema_decay": 0.0,
         "visual_dropout_prob": 0.0,
         "gradient_checkpointing": False,
         "resume_from": "",
@@ -1470,7 +1540,7 @@ class FoleyTuneLoRAScheduler:
                     else:
                         param_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": _lr}]
 
-                    optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.01)
+                    optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 
                     _ga = config["grad_accum"]
                     def lr_lambda(sched_step):
@@ -1486,6 +1556,7 @@ class FoleyTuneLoRAScheduler:
 
                     # Resume from checkpoint
                     start_step = 0
+                    _resumed_ema = None
                     resume_path = config.get("resume_from", "")
                     if resume_path and os.path.exists(resume_path):
                         ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
@@ -1495,8 +1566,21 @@ class FoleyTuneLoRAScheduler:
                         if "scheduler" in ckpt:
                             lr_sched.load_state_dict(ckpt["scheduler"])
                         start_step = ckpt.get("step", 0)
+                        _resumed_ema = ckpt.get("ema_state", None)
                         logger.info(f"[{exp_id}] Resumed from step {start_step}: {resume_path}")
                         del ckpt
+
+                    # EMA
+                    _ema_decay = config.get("ema_decay", 0.0)
+                    ema_state = None
+                    if _ema_decay > 0:
+                        if _resumed_ema is not None:
+                            ema_state = {k: v.to(device) for k, v in _resumed_ema.items()}
+                            logger.info(f"[{exp_id}] EMA restored from checkpoint (decay={_ema_decay})")
+                            del _resumed_ema
+                        else:
+                            ema_state = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
+                            logger.info(f"[{exp_id}] EMA initialized fresh (decay={_ema_decay})")
 
                     import random
                     torch.manual_seed(config["seed"])
@@ -1601,6 +1685,11 @@ class FoleyTuneLoRAScheduler:
                         if pad_sync > 0:
                             batch_sync = F.pad(batch_sync, (0, 0, 0, pad_sync))
 
+                        _noise_offset = config.get("noise_offset", 0.0)
+                        if _noise_offset > 0:
+                            offset = torch.randn(batch_latents.shape[0], batch_latents.shape[1], 1, device=device, dtype=dtype) * _noise_offset
+                            batch_latents = batch_latents + offset
+
                         t = sample_timesteps(
                             bs, config["timestep_mode"], device, dtype,
                             sigma=config["logit_normal_sigma"],
@@ -1612,6 +1701,7 @@ class FoleyTuneLoRAScheduler:
                             model, batch_latents, t, batch_clip, batch_sync, batch_text,
                             device, dtype,
                             visual_dropout_prob=config.get("visual_dropout_prob", 0.0),
+                            min_snr_gamma=config.get("min_snr_gamma", 0.0),
                         )
                         loss = loss / config["grad_accum"]
                         loss.backward()
@@ -1621,6 +1711,12 @@ class FoleyTuneLoRAScheduler:
                             optimizer.step()
                             lr_sched.step()
                             optimizer.zero_grad()
+
+                            if ema_state is not None:
+                                with torch.no_grad():
+                                    for n, p in model.named_parameters():
+                                        if p.requires_grad and n in ema_state:
+                                            ema_state[n].mul_(_ema_decay).add_(p.data, alpha=1 - _ema_decay)
 
                         losses.append(loss.item() * config["grad_accum"])
 
@@ -1641,9 +1737,18 @@ class FoleyTuneLoRAScheduler:
                             )
 
                         if (step + 1) % config["save_every"] == 0:
+                            # Save with live weights for optimizer consistency on resume
                             meta = {**config, "steps_completed": step + 1, "prompts": prompts_list}
                             ckpt_path = exp_dir / f"adapter_step{step+1:05d}.pt"
-                            save_checkpoint(model, optimizer, lr_sched, step + 1, meta, ckpt_path)
+                            save_checkpoint(model, optimizer, lr_sched, step + 1, meta, ckpt_path,
+                                            ema_state=ema_state)
+
+                            # Swap in EMA weights for eval
+                            if ema_state is not None:
+                                _live_params = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
+                                for n, p in model.named_parameters():
+                                    if p.requires_grad and n in ema_state:
+                                        p.data.copy_(ema_state[n])
                             _draw_loss_curve(losses, smoothed=_smooth_losses(losses)).save(str(exp_dir / "loss.png"))
 
                             # Generate eval audio sample + compute metrics
@@ -1681,6 +1786,12 @@ class FoleyTuneLoRAScheduler:
                                 _save_wav(samples_dir / f"val_step_{step+1:05d}.wav", wav_v_t, sr_v)
                                 _save_spectrogram(wav_v_mono, sr_v, samples_dir / f"val_step_{step+1:05d}")
 
+                            # Restore live (non-EMA) weights for continued training
+                            if ema_state is not None:
+                                for n, p in model.named_parameters():
+                                    if p.requires_grad and n in _live_params:
+                                        p.data.copy_(_live_params[n])
+
                             model.train()
 
                             logger.info(f"[{exp_id}] Step {step+1}: "
@@ -1690,7 +1801,12 @@ class FoleyTuneLoRAScheduler:
                                        f"HF={step_metrics.get('hf_energy_ratio', 0):.3f}  "
                                        f"SC={step_metrics.get('spectral_convergence', 0):.3f}")
 
-                    # Save final
+                    # Save final (with EMA weights if enabled)
+                    if ema_state is not None:
+                        for n, p in model.named_parameters():
+                            if p.requires_grad and n in ema_state:
+                                p.data.copy_(ema_state[n])
+
                     meta = {**config, "steps_completed": config["steps"], "prompts": prompts_list}
                     final_path = exp_dir / "adapter_final.pt"
                     save_checkpoint(model, optimizer, lr_sched, config["steps"], meta, final_path, final=True)
@@ -2016,10 +2132,16 @@ class FoleyTuneCheckpointFinalizer:
         if "state_dict" not in ckpt:
             raise ValueError("Not a valid training checkpoint (no state_dict)")
 
-        final = {"state_dict": ckpt["state_dict"], "meta": ckpt.get("meta", {})}
+        state_dict = ckpt["state_dict"]
+        if "ema_state" in ckpt:
+            for key, ema_val in ckpt["ema_state"].items():
+                if key in state_dict:
+                    state_dict[key] = ema_val
+
+        final = {"state_dict": state_dict, "meta": ckpt.get("meta", {})}
 
         removed = []
-        for key in ("optimizer", "scheduler", "step"):
+        for key in ("optimizer", "scheduler", "step", "ema_state"):
             if key in ckpt:
                 removed.append(key)
 

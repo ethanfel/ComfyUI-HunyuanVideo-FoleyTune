@@ -97,7 +97,7 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16, clip
         with torch.no_grad():
             audio_input = waveform.unsqueeze(0).to(device=device, dtype=torch.float32)
             z_dist, _, _, _, _ = dac_model.encode(audio_input)
-            latents = z_dist.sample().cpu().float()  # [1, 128, T]
+            latents = z_dist.mode().cpu().float()  # [1, 128, T] — deterministic posterior mean
 
         dataset.append({
             "latents": latents,
@@ -237,7 +237,7 @@ def sample_timesteps(batch_size, mode, device, dtype,
 # -- Loss computation --------------------------------------------------------
 
 def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dtype,
-                       visual_dropout_prob=0.0):
+                       visual_dropout_prob=0.0, min_snr_gamma=0.0):
     """Compute flow matching velocity prediction loss.
 
     Args:
@@ -253,6 +253,9 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
             null embeddings during training. Forces text channel to carry audio signal,
             decoupling identity from sound. Use 0.5 for generic-style LoRAs, 0.0 for
             identity-preserving LoRAs.
+        min_snr_gamma: Min-SNR loss weighting gamma. When > 0, downweights
+            high-noise timesteps where gradients are noisy and uninformative,
+            focusing learning on the perceptually critical mid-range. Use 5.0.
 
     Returns:
         loss: scalar MSE loss
@@ -301,7 +304,14 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
     )["x"]
 
     v_target = v_target.to(device=device, dtype=dtype)
-    loss = F.mse_loss(v_pred, v_target)
+
+    if min_snr_gamma > 0:
+        # SNR = signal²/noise² = (1-t)²/t² for flow matching xt = t*noise + (1-t)*data
+        snr = ((1 - t) / (t + 1e-8)) ** 2
+        weight = torch.clamp(snr, max=min_snr_gamma) / (snr + 1e-8)
+        loss = (weight.view(B, 1, 1) * F.mse_loss(v_pred, v_target, reduction='none')).mean()
+    else:
+        loss = F.mse_loss(v_pred, v_target)
     return loss
 
 
@@ -309,7 +319,7 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
 
 @torch.no_grad()
 def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
-                         num_steps=25, seed=42, cfg_scale=5.0):
+                         num_steps=50, seed=42, cfg_scale=5.0):
     """Generate an audio sample for evaluation during training.
 
     Uses classifier-free guidance (CFG) matching the inference pipeline.
@@ -434,7 +444,8 @@ def save_loss_curve(losses, path, start_step=0, smoothing=0.95):
 
 # -- Checkpoint I/O ----------------------------------------------------------
 
-def save_checkpoint(model, optimizer, scheduler, step, meta, path, final=False):
+def save_checkpoint(model, optimizer, scheduler, step, meta, path, final=False,
+                    ema_state=None):
     """Save training checkpoint or final adapter."""
     # PiSSA modifies base weights during init — must save them too
     if meta.get("init_mode") == "pissa":
@@ -445,6 +456,8 @@ def save_checkpoint(model, optimizer, scheduler, step, meta, path, final=False):
         state["optimizer"] = optimizer.state_dict()
         state["scheduler"] = scheduler.state_dict()
         state["step"] = step
+        if ema_state is not None:
+            state["ema_state"] = {k: v.cpu() for k, v in ema_state.items()}
     torch.save(state, path)
 
 

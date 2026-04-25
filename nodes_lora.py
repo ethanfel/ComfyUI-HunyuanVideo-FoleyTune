@@ -1004,6 +1004,8 @@ class FoleyTuneLoRATrainer:
                 scheduler.load_state_dict(ckpt["scheduler"])
             start_step = ckpt.get("step", 0)
             _resumed_ema = ckpt.get("ema_state", None)
+            if start_step >= steps:
+                steps = start_step + steps
             logger.info(f"Resumed from step {start_step}: {resume_from}")
             del ckpt
 
@@ -1630,6 +1632,9 @@ class FoleyTuneLoRAScheduler:
                             lr_sched.load_state_dict(ckpt["scheduler"])
                         start_step = ckpt.get("step", 0)
                         _resumed_ema = ckpt.get("ema_state", None)
+                        # steps field means additional steps when resuming
+                        if start_step >= config["steps"]:
+                            config["steps"] = start_step + config["steps"]
                         logger.info(f"[{exp_id}] Resumed from step {start_step}: {resume_path}")
                         del ckpt
 
@@ -1664,16 +1669,22 @@ class FoleyTuneLoRAScheduler:
 
                     # Load existing loss/metrics history when resuming
                     if start_step > 0:
-                        loss_file = exp_dir / "loss_history.json"
-                        if loss_file.exists():
-                            with open(loss_file) as f:
-                                losses = json.load(f)
-                            logger.info(f"[{exp_id}] Loaded {len(losses)} loss entries from previous run")
-                        metrics_file = exp_dir / "metrics_history.json"
-                        if metrics_file.exists():
-                            with open(metrics_file) as f:
-                                metrics_history = json.load(f)
-                            logger.info(f"[{exp_id}] Loaded {len(metrics_history)} metrics entries from previous run")
+                        # Check local dir first, then source checkpoint dir
+                        resume_dir = Path(resume_path).parent if resume_path else exp_dir
+                        for search_dir in [exp_dir, resume_dir]:
+                            loss_file = search_dir / "loss_history.json"
+                            if loss_file.exists():
+                                with open(loss_file) as f:
+                                    losses = json.load(f)
+                                logger.info(f"[{exp_id}] Loaded {len(losses)} loss entries from {search_dir}")
+                                break
+                        for search_dir in [exp_dir, resume_dir]:
+                            metrics_file = search_dir / "metrics_history.json"
+                            if metrics_file.exists():
+                                with open(metrics_file) as f:
+                                    metrics_history = json.load(f)
+                                logger.info(f"[{exp_id}] Loaded {len(metrics_history)} metrics entries from {search_dir}")
+                                break
 
                     n_clips = len(dataset)
                     t_start = time.time()
@@ -1910,8 +1921,8 @@ class FoleyTuneLoRAScheduler:
                     final_metrics = metrics_history[-1] if metrics_history else {}
                     exp_result.update({
                         "status": "completed",
-                        "final_loss": float(np.mean(losses[-100:])),
-                        "min_loss": float(min(losses)),
+                        "final_loss": float(np.mean(losses[-100:])) if losses else 0.0,
+                        "min_loss": float(min(losses)) if losses else 0.0,
                         "final_metrics": final_metrics,
                         "adapter_path": str(final_path),
                         "duration_seconds": elapsed,

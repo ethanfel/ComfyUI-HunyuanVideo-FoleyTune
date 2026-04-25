@@ -818,3 +818,104 @@ All experiments: v4 dataset, rank 96, cosine/uniform, lr 5e-5, 8k steps, visual_
 11. **Min-SNR is counterproductive** at 299-clip scale — easy timesteps carry useful signal
 12. **EMA needs decay ≤ 0.99** for sub-10k training, otherwise weights barely evolve
 13. **Noise offset trades PBC for MCD/LSD** — potentially useful if spectral fidelity matters more than per-band tracking
+
+---
+
+### v6 Sweep — New Features & Optimizer (April 2026)
+
+Testing recently added training features (cosine sim loss, channel weighting, timestep clipping) plus Prodigy optimizer and architectural/alpha ablations.
+
+**Dataset:** features_v4 (blowjob AD, 299 clips). **Base config:** r96, alpha=96, lr=5e-5, 8k steps, batch=8, cosine schedule, uniform timestep, curriculum_switch=0.7, visual_dropout=0.5.
+
+**Bugs fixed during this sweep:**
+- Prodigy optimizer crashed on per-group lr — stripped lr from param groups (`77e5b40`)
+- Failed experiments left GPU memory dirty — added cleanup on exception (`b7d4ca3`)
+- DAC reference audio encoding ran on CPU — moved model to GPU for round-trip eval (`b29ab06`)
+
+**Variables tested:**
+- `v6_baseline` — v5 best config (control)
+- `v6_alpha32` — alpha=32 (effective lr scaling = alpha/rank = 0.33)
+- `v6_attn_only` — target=all_attn (no MLP layers)
+- `v6_cos01` — cos_sim_weight=0.1 (cosine similarity auxiliary loss)
+- `v6_chweight` — channel_loss_weight=true (per-channel loss weighting)
+- `v6_prodigy` — optimizer_type=prodigy (adaptive learning rate)
+- `v6_tclip` — t_min=0.01, t_max=0.99 (avoids uninformative endpoints)
+- `v6_combined` — alpha=32 + cos_sim=0.1 + channel_weight + tclip — not yet started
+
+#### Results
+
+| Experiment | SC | MCD | PBC | TV | Loss | Duration |
+|-----------|------|------|-------|------|-------|----------|
+| **v6_prodigy** | **1.327** | 8.30 | **0.378** | 2.02 | **1.360** | 82 min |
+| v6_alpha32 | 1.389 | **8.21** | 0.251 | 2.16 | 1.401 | 70 min |
+| v6_baseline | 1.407 | 8.28 | 0.235 | **2.59** | 1.389 | 70 min |
+| v6_cos01 | 1.413 | 8.59 | 0.234 | 2.71 | 1.432 | 70 min |
+| v6_attn_only | 1.412 | 12.35 | 0.224 | 1.98 | 1.407 | 66 min |
+| v6_tclip | 1.410 | 8.52 | 0.228 | 2.71 | 1.390 | 70 min |
+| v6_chweight | 1.390 | **8.03** | 0.211 | 2.12 | 1.488 | 71 min |
+
+#### Prodigy Trajectory
+
+| Step | SC | MCD | PBC | TV |
+|------|------|------|-------|------|
+| 1k | 1.376 | 8.65 | 0.165 | 1.95 |
+| 2k | 1.352 | 7.45 | 0.251 | 1.64 |
+| 3k | 1.383 | 8.42 | 0.211 | 1.88 |
+| 4k | 1.372 | 8.01 | 0.238 | 1.92 |
+| 5k | 1.386 | 9.15 | 0.283 | 2.23 |
+| 6k | 1.372 | 8.22 | 0.371 | 2.05 |
+| 7k | 1.327 | 8.16 | 0.377 | 2.02 |
+| 8k | 1.327 | 8.30 | 0.378 | 2.02 |
+
+PBC surges between steps 5-6k (0.283 → 0.371) and SC drops sharply at 7k. Prodigy's adaptive lr found a productive regime late in training — PBC is still climbing at 8k and has not converged.
+
+#### Analysis
+
+**Prodigy is the clear winner.** Best SC (1.327, -5.7% vs baseline), best PBC (0.378, +61% vs baseline), lowest loss. PBC kept climbing through all 8k steps while baseline plateaued at ~0.235 by step 4k. Prodigy's adaptive learning rate discovers a better optimization trajectory than fixed cosine — it hasn't converged yet at 8k steps, strongly suggesting the run should be extended to 12-15k.
+
+**alpha=32 is a modest win.** Better PBC (0.251 vs 0.235) and best MCD (8.21). Lower effective lr (alpha/rank = 0.33) acts as implicit regularization. TV drops to 2.16 vs baseline 2.59 — temporal dynamics are slightly flatter.
+
+**attn_only is clearly bad.** MCD explodes to 12.35 (49% worse than baseline). The model needs MLP layers for spectral fidelity — attention layers alone cannot reconstruct fine frequency detail.
+
+**Cosine sim loss (0.1) is neutral.** PBC tied with baseline (0.234 vs 0.235), slightly worse SC and MCD. The auxiliary loss adds no useful signal at this weight.
+
+**Timestep clipping is neutral.** PBC 0.228 vs baseline 0.235 — within noise. The t=0 and t=1 endpoints are not wasting training capacity at this scale. Clipping [0.01, 0.99] changes nothing meaningful.
+
+**Channel weighting hurts PBC.** Worst PBC (0.211) despite best raw MCD (8.03). Per-channel weighting over-focuses on dominant channels at the expense of cross-band correlation. Higher loss (1.488) confirms it fights the main MSE objective.
+
+#### Updated Best Configuration
+
+```json
+{
+  "target": "all_attn_mlp",
+  "rank": 96,
+  "alpha": 96,
+  "lr": 5e-05,
+  "steps": 8000,
+  "schedule_type": "cosine",
+  "timestep_mode": "uniform",
+  "visual_dropout_prob": 0.5,
+  "warmup_steps": 100,
+  "batch_size": 8,
+  "seed": 42,
+  "optimizer_type": "prodigy",
+  "curriculum_switch": 0.7,
+  "min_snr_gamma": 0.0,
+  "ema_decay": 0.0,
+  "noise_offset": 0.0,
+  "cos_sim_weight": 0.0,
+  "channel_loss_weight": false
+}
+```
+
+**Best checkpoint:** `v6_prodigy/adapter_step08000.pt` (likely not converged — extend run)
+- Loss: 1.360, SC: 1.327, MCD: 8.30, PBC: 0.378
+- +61% PBC over v5 best (0.235), +67% over v5_baseline (0.226)
+
+#### Updated Takeaways
+
+14. **Prodigy >> AdamW** for LoRA fine-tuning — adaptive lr finds better trajectory, +61% PBC over fixed cosine schedule
+15. **Prodigy needs longer runs** — PBC still climbing at 8k, extend to 12-15k steps
+16. **MLP layers are essential** — attn_only MCD is 49% worse; skip MLP ablations going forward
+17. **Cosine sim loss and channel weighting are dead ends** at current scale — drop from future sweeps
+18. **alpha < rank provides mild regularization** — alpha=32 gives +7% PBC over alpha=96, worth combining with Prodigy

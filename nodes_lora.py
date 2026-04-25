@@ -971,6 +971,8 @@ class FoleyTuneLoRATrainer:
 
         if optimizer_type == "prodigy":
             from prodigyopt import Prodigy
+            for pg in param_groups:
+                pg.pop("lr", None)
             optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01)
             logger.info("Using Prodigy optimizer (lr auto-tuned)")
         else:
@@ -1594,6 +1596,8 @@ class FoleyTuneLoRAScheduler:
 
                     if config.get("optimizer_type", "adamw") == "prodigy":
                         from prodigyopt import Prodigy
+                        for pg in param_groups:
+                            pg.pop("lr", None)
                         optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01)
                         logger.info(f"[{exp_id}] Using Prodigy optimizer (lr auto-tuned)")
                     else:

@@ -801,6 +801,23 @@ class FoleyTuneLoRATrainer:
                     "default": 0.0, "min": 0.0, "max": 0.9999, "step": 0.0001,
                     "tooltip": "EMA decay for LoRA weights. Smooths training, used at save time. 0.9995 recommended for fine-tuning. 0 = disabled.",
                 }),
+                "cos_sim_weight": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Weight for cosine similarity auxiliary loss on velocity. Directly targets phase/correlation alignment. 0.1 recommended. 0 = disabled.",
+                }),
+                "channel_loss_weight": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Weight velocity MSE by per-channel variance from dataset. Upweights perceptually important latent dimensions.",
+                }),
+                "t_min": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 0.2, "step": 0.01,
+                    "tooltip": "Minimum timestep for sampling. Avoids near-clean timesteps. 0.05 recommended.",
+                }),
+                "t_max": ("FLOAT", {
+                    "default": 1.0, "min": 0.8, "max": 1.0, "step": 0.01,
+                    "tooltip": "Maximum timestep for sampling. Avoids near-noise timesteps. 0.95 recommended.",
+                }),
+                "optimizer_type": (["adamw", "prodigy"], {"default": "adamw"}),
                 "visual_dropout_prob": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 0.95, "step": 0.05,
                     "tooltip": "Per-sample probability of zeroing visual features during training. Forces the text channel to carry audio-character signal, decoupling identity from sound. Use 0.5 for generic-style LoRAs (no performer binding); leave 0.0 for identity-preserving LoRAs.",
@@ -832,6 +849,8 @@ class FoleyTuneLoRATrainer:
               lora_plus_ratio=1.0, schedule_type="constant",
               latent_mixup_alpha=0.0, latent_noise_sigma=0.0,
               noise_offset=0.0, min_snr_gamma=0.0, ema_decay=0.0,
+              cos_sim_weight=0.0, channel_loss_weight=False,
+              t_min=0.0, t_max=1.0, optimizer_type="adamw",
               visual_dropout_prob=0.0,
               gradient_checkpointing=False,
               resume_from="", dataset_json=""):
@@ -851,6 +870,8 @@ class FoleyTuneLoRATrainer:
             lora_dropout, lora_plus_ratio, schedule_type,
             latent_mixup_alpha, latent_noise_sigma,
             noise_offset, min_snr_gamma, ema_decay,
+            cos_sim_weight, channel_loss_weight,
+            t_min, t_max, optimizer_type,
             visual_dropout_prob,
             gradient_checkpointing, resume_from,
             dataset_json,
@@ -863,6 +884,8 @@ class FoleyTuneLoRATrainer:
                      lora_dropout, lora_plus_ratio, schedule_type,
                      latent_mixup_alpha, latent_noise_sigma,
                      noise_offset, min_snr_gamma, ema_decay,
+                     cos_sim_weight, channel_loss_weight,
+                     t_min, t_max, optimizer_type,
                      visual_dropout_prob,
                      gradient_checkpointing, resume_from,
                      dataset_json=""):
@@ -946,7 +969,12 @@ class FoleyTuneLoRATrainer:
         else:
             param_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": lr}]
 
-        optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
+        if optimizer_type == "prodigy":
+            from prodigyopt import Prodigy
+            optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01)
+            logger.info("Using Prodigy optimizer (lr auto-tuned)")
+        else:
+            optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 
         # -- LR Scheduler --
         # scheduler.step() is called once per grad_accum training steps,
@@ -1002,6 +1030,10 @@ class FoleyTuneLoRATrainer:
             "noise_offset": noise_offset,
             "min_snr_gamma": min_snr_gamma,
             "ema_decay": ema_decay,
+            "cos_sim_weight": cos_sim_weight,
+            "channel_loss_weight": channel_loss_weight,
+            "t_min": t_min, "t_max": t_max,
+            "optimizer_type": optimizer_type,
             "gradient_checkpointing": gradient_checkpointing,
             "n_clips": n_clips, "precision": precision, "seed": seed,
         }
@@ -1010,6 +1042,15 @@ class FoleyTuneLoRATrainer:
         from collections import Counter
         prompt_counts = Counter(d["prompt"] for d in dataset)
         meta["prompts"] = [p for p, _ in prompt_counts.most_common()]
+
+        # Pre-compute per-channel variance weights for channel-weighted loss
+        channel_weights = None
+        if channel_loss_weight:
+            all_latents = torch.cat([d["latents"] for d in dataset], dim=0)
+            ch_var = all_latents.var(dim=(0, 2))
+            channel_weights = (ch_var / ch_var.mean()).clamp(0.5, 2.0)
+            logger.info(f"Channel weights: min={channel_weights.min():.2f} max={channel_weights.max():.2f}")
+            del all_latents
 
         losses = []
         metrics_history = []  # list of {step, loss, ...spectral metrics}
@@ -1034,7 +1075,13 @@ class FoleyTuneLoRATrainer:
             if _sr != 48000:
                 import soxr as _soxr
                 _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
-            ref_wav_np = _raw
+            # DAC round-trip: measure model quality, not codec ceiling
+            with torch.no_grad():
+                _ref_t = torch.from_numpy(_raw).float().unsqueeze(0).unsqueeze(0)
+                _ref_t = _ref_t.to(device=device, dtype=torch.float32)
+                _z, _, _, _, _ = hunyuan_deps.dac_model.encode(_ref_t)
+                _ref_dec = hunyuan_deps.dac_model.decode(_z.mode())
+                ref_wav_np = _ref_dec.squeeze().cpu().numpy()
             _save_spectrogram(ref_wav_np, 48000, samples_path / "reference")
 
         logger.info(f"Starting training: {steps} steps, batch {batch_size}, lr {lr}")
@@ -1087,6 +1134,7 @@ class FoleyTuneLoRATrainer:
                 batch_size, timestep_mode, device, dtype,
                 sigma=logit_normal_sigma, curriculum_switch=curriculum_switch,
                 step=step, start_step=start_step, total_steps=steps,
+                t_min=t_min, t_max=t_max,
             )
 
             # Forward + loss
@@ -1094,6 +1142,8 @@ class FoleyTuneLoRATrainer:
                 model, batch_latents, t, batch_clip, batch_sync, batch_text, device, dtype,
                 visual_dropout_prob=visual_dropout_prob,
                 min_snr_gamma=min_snr_gamma,
+                cos_sim_weight=cos_sim_weight,
+                channel_weights=channel_weights,
             )
             loss = loss / grad_accum
             loss.backward()
@@ -1354,6 +1404,8 @@ class FoleyTuneLoRAScheduler:
         "lora_plus_ratio": 1.0, "schedule_type": "constant",
         "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
         "noise_offset": 0.0, "min_snr_gamma": 0.0, "ema_decay": 0.0,
+        "cos_sim_weight": 0.0, "channel_loss_weight": False,
+        "t_min": 0.0, "t_max": 1.0, "optimizer_type": "adamw",
         "visual_dropout_prob": 0.0,
         "gradient_checkpointing": False,
         "resume_from": "",
@@ -1540,7 +1592,12 @@ class FoleyTuneLoRAScheduler:
                     else:
                         param_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": _lr}]
 
-                    optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
+                    if config.get("optimizer_type", "adamw") == "prodigy":
+                        from prodigyopt import Prodigy
+                        optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01)
+                        logger.info(f"[{exp_id}] Using Prodigy optimizer (lr auto-tuned)")
+                    else:
+                        optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 
                     _ga = config["grad_accum"]
                     def lr_lambda(sched_step):
@@ -1582,6 +1639,15 @@ class FoleyTuneLoRAScheduler:
                             ema_state = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
                             logger.info(f"[{exp_id}] EMA initialized fresh (decay={_ema_decay})")
 
+                    # Channel-weighted loss
+                    _channel_weights = None
+                    if config.get("channel_loss_weight", False):
+                        _all_lat = torch.cat([d["latents"] for d in dataset], dim=0)
+                        _ch_var = _all_lat.var(dim=(0, 2))
+                        _channel_weights = (_ch_var / _ch_var.mean()).clamp(0.5, 2.0)
+                        logger.info(f"[{exp_id}] Channel weights: min={_channel_weights.min():.2f} max={_channel_weights.max():.2f}")
+                        del _all_lat
+
                     import random
                     torch.manual_seed(config["seed"])
                     random.seed(config["seed"])
@@ -1607,7 +1673,7 @@ class FoleyTuneLoRAScheduler:
                     t_start = time.time()
                     pbar_train = comfy.utils.ProgressBar(config["steps"] - start_step)
 
-                    # Load reference audio for metrics
+                    # Load reference audio for metrics (DAC round-trip)
                     ref_entry = dataset[0]
                     ref_wav_np = None
                     for ext in (".flac", ".wav", ".ogg"):
@@ -1620,7 +1686,12 @@ class FoleyTuneLoRAScheduler:
                             if _sr != 48000:
                                 import soxr as _soxr
                                 _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
-                            ref_wav_np = _raw
+                            with torch.no_grad():
+                                _ref_t = torch.from_numpy(_raw).float().unsqueeze(0).unsqueeze(0)
+                                _ref_t = _ref_t.to(device=device, dtype=torch.float32)
+                                _z, _, _, _, _ = hunyuan_deps.dac_model.encode(_ref_t)
+                                _ref_dec = hunyuan_deps.dac_model.decode(_z.mode())
+                                ref_wav_np = _ref_dec.squeeze().cpu().numpy()
                             samples_dir_ref = exp_dir / "samples"
                             samples_dir_ref.mkdir(exist_ok=True)
                             _save_spectrogram(ref_wav_np, 48000, samples_dir_ref / "reference")
@@ -1695,6 +1766,8 @@ class FoleyTuneLoRAScheduler:
                             sigma=config["logit_normal_sigma"],
                             curriculum_switch=config["curriculum_switch"],
                             step=step, total_steps=config["steps"],
+                            t_min=config.get("t_min", 0.0),
+                            t_max=config.get("t_max", 1.0),
                         )
 
                         loss = flow_matching_loss(
@@ -1702,6 +1775,8 @@ class FoleyTuneLoRAScheduler:
                             device, dtype,
                             visual_dropout_prob=config.get("visual_dropout_prob", 0.0),
                             min_snr_gamma=config.get("min_snr_gamma", 0.0),
+                            cos_sim_weight=config.get("cos_sim_weight", 0.0),
+                            channel_weights=_channel_weights,
                         )
                         loss = loss / config["grad_accum"]
                         loss.backward()

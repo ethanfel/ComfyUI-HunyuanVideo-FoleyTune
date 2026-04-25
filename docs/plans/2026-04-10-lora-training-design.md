@@ -749,3 +749,72 @@ For curriculum runs, the 9k inflection (curriculum switch) is key — post-curri
 6. **LR 5e-5 is the sweet spot** — higher LRs decay too fast under cosine schedule
 7. **Stop at step 7k** for cosine/uniform — per-band correlation peaks then plateaus or degrades
 8. **Next lever is dataset scale** — more performers needed to test generalization beyond single-performer training
+
+---
+
+### v5 Sweep — Training Pipeline Improvements (April 2026)
+
+Research-driven changes applied globally before this sweep:
+- **AdamW beta2: 0.95 → 0.999** — better gradient variance tracking for fine-tuning
+- **DAC `.sample()` → `.mode()`** — deterministic latent encoding, removes stochastic noise from dataset
+
+New features tested (all optional, default disabled):
+- **Min-SNR loss weighting** (`min_snr_gamma`) — downweights easy high-SNR timesteps
+- **EMA** (`ema_decay`) — exponential moving average of LoRA weights
+- **Noise offset** (`noise_offset`) — channel-uniform noise for dynamic range
+
+All experiments: v4 dataset, rank 96, cosine/uniform, lr 5e-5, 8k steps, visual_dropout_prob 0.5.
+
+#### Results
+
+| Experiment | Best PBC | At step | MCD | LSD | Notes |
+|-----------|---------|---------|-----|-----|-------|
+| **v5_baseline** | **0.226** | **6k** | 9.07 | 21.57 | **Betas fix alone = +16% PBC over v4 best (0.195)** |
+| v5_snr5 (γ=5) | 0.218 | 4k | 9.04 | 21.70 | Hurts PBC — easy timesteps are informative at this scale |
+| v5_ema (0.9995) | 0.213 | 1k | 10.14 | 26.48 | Broken — decay too high, EMA barely evolves over 8k steps |
+| v5_offset03 | 0.236 | 3k | 8.55 | 21.14 | Best MCD/LSD, but PBC spikes at 3k then crashes to 0.203 |
+| v5_offset01 | 0.233 | 3k | 8.54 | 21.19 | Same pattern, more stable decay — PBC settles at 0.214 |
+
+#### Analysis
+
+**AdamW betas was the big win.** Changing beta2 from 0.95 to 0.999 improved PBC from 0.195 → 0.226 (+16%) with no downsides. The higher beta2 gives the optimizer longer memory for gradient variance, which helps fine-tuning where gradients are small and noisy.
+
+**Min-SNR hurts at small dataset scale.** Standard Min-SNR downweights easy (high-SNR) timesteps to focus on harder ones. But with 299 clips, the easy timesteps carry useful structural information — the model needs them to learn fine frequency detail. Loss is lower (1.13 vs 1.37) but that's misleading since the weighting changes the loss scale.
+
+**EMA 0.9995 is too slow for 8k-step training.** With decay 0.9995, the half-life is ~1400 optimizer steps. Eval uses EMA weights, so the eval samples are always ~1400 steps behind live training. All metrics flatlined from step 1k onward — the EMA weights barely moved from initialization. Would need decay ≤ 0.99 at this training scale, but that defeats the purpose of smoothing.
+
+**Noise offset improves spectral fidelity but destabilizes PBC.** Both 0.01 and 0.03 gave better MCD (~8.54 vs 9.07) and LSD (~21.2 vs 21.6) — the channel-uniform noise helps the model learn dynamic range. But PBC peaks early (3k) then declines, suggesting the offset interferes with fine per-band frequency tracking as cosine LR decays.
+
+#### Updated Best Configuration
+
+```json
+{
+  "target": "all_attn_mlp",
+  "rank": 96,
+  "alpha": 96,
+  "lr": 0.00005,
+  "steps": 8000,
+  "schedule_type": "cosine",
+  "timestep_mode": "uniform",
+  "visual_dropout_prob": 0.5,
+  "warmup_steps": 100,
+  "batch_size": 8,
+  "seed": 42,
+  "min_snr_gamma": 0.0,
+  "ema_decay": 0.0,
+  "noise_offset": 0.0
+}
+```
+
+**Best checkpoint:** `v5_baseline/adapter_step06000.pt`
+- Loss: 1.373, SC: 1.407, MCD: 9.07, PBC: 0.226
+- +16% PBC over previous best (v4_cosine_uniform step 7k)
+- Improvement came entirely from AdamW betas fix and DAC `.mode()`
+
+#### Updated Takeaways
+
+9. **AdamW beta2=0.999 >> 0.95** for LoRA fine-tuning — single biggest quality lever found so far
+10. **DAC `.mode()` over `.sample()`** — deterministic encoding removes unnecessary variance from small datasets
+11. **Min-SNR is counterproductive** at 299-clip scale — easy timesteps carry useful signal
+12. **EMA needs decay ≤ 0.99** for sub-10k training, otherwise weights barely evolve
+13. **Noise offset trades PBC for MCD/LSD** — potentially useful if spectral fidelity matters more than per-band tracking

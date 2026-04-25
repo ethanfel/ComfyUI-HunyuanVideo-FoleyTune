@@ -193,7 +193,7 @@ def prepare_single_entry(npz_path: str, dac_model, device, dtype=torch.bfloat16)
     with torch.no_grad():
         audio_input = waveform.unsqueeze(0).to(device=device, dtype=torch.float32)
         z_dist, _, _, _, _ = dac_model.encode(audio_input)
-        latents = z_dist.sample().cpu().float()
+        latents = z_dist.mode().cpu().float()
     dac_model.cpu()
     torch.cuda.empty_cache()
 
@@ -217,8 +217,9 @@ def prepare_single_entry(npz_path: str, dac_model, device, dtype=torch.bfloat16)
 
 def sample_timesteps(batch_size, mode, device, dtype,
                      sigma=1.0, curriculum_switch=0.6,
-                     step=0, start_step=0, total_steps=1000):
-    """Sample timesteps t in [0, 1] for flow matching training."""
+                     step=0, start_step=0, total_steps=1000,
+                     t_min=0.0, t_max=1.0):
+    """Sample timesteps t in [t_min, t_max] for flow matching training."""
     if mode == "logit_normal":
         u = torch.randn(batch_size, device=device, dtype=dtype) * sigma
         t = torch.sigmoid(u)
@@ -231,13 +232,16 @@ def sample_timesteps(batch_size, mode, device, dtype,
             t = torch.rand(batch_size, device=device, dtype=dtype)
     else:  # uniform
         t = torch.rand(batch_size, device=device, dtype=dtype)
+    if t_min > 0.0 or t_max < 1.0:
+        t = t.clamp(min=t_min, max=t_max)
     return t
 
 
 # -- Loss computation --------------------------------------------------------
 
 def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dtype,
-                       visual_dropout_prob=0.0, min_snr_gamma=0.0):
+                       visual_dropout_prob=0.0, min_snr_gamma=0.0,
+                       cos_sim_weight=0.0, channel_weights=None):
     """Compute flow matching velocity prediction loss.
 
     Args:
@@ -305,13 +309,23 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
 
     v_target = v_target.to(device=device, dtype=dtype)
 
+    mse_unreduced = F.mse_loss(v_pred, v_target, reduction='none')
+
+    if channel_weights is not None:
+        mse_unreduced = channel_weights.view(1, -1, 1).to(device=device, dtype=dtype) * mse_unreduced
+
     if min_snr_gamma > 0:
         # SNR = signal²/noise² = (1-t)²/t² for flow matching xt = t*noise + (1-t)*data
         snr = ((1 - t) / (t + 1e-8)) ** 2
         weight = torch.clamp(snr, max=min_snr_gamma) / (snr + 1e-8)
-        loss = (weight.view(B, 1, 1) * F.mse_loss(v_pred, v_target, reduction='none')).mean()
+        loss = (weight.view(B, 1, 1) * mse_unreduced).mean()
     else:
-        loss = F.mse_loss(v_pred, v_target)
+        loss = mse_unreduced.mean()
+
+    if cos_sim_weight > 0:
+        cos_loss = 1 - F.cosine_similarity(v_pred, v_target, dim=-1).mean()
+        loss = loss + cos_sim_weight * cos_loss
+
     return loss
 
 

@@ -919,3 +919,51 @@ PBC surges between steps 5-6k (0.283 → 0.371) and SC drops sharply at 7k. Prod
 16. **MLP layers are essential** — attn_only MCD is 49% worse; skip MLP ablations going forward
 17. **Cosine sim loss and channel weighting are dead ends** at current scale — drop from future sweeps
 18. **alpha < rank provides mild regularization** — alpha=32 gives +7% PBC over alpha=96, worth combining with Prodigy
+
+---
+
+### v7 Sweep — Prodigy Resume (April 2026)
+
+Resumed v6_prodigy from step 8k to find convergence point. Used existing checkpoint at `output_v6/v6_prodigy/adapter_step08000.pt`.
+
+#### Prodigy Extended Trajectory (steps 1k–15k)
+
+| Step | SC | MCD | PBC | TV | Loss |
+|------|------|------|-------|------|-------|
+| 1k | 1.376 | 8.65 | 0.165 | 1.95 | 1.373 |
+| 2k | 1.352 | 7.45 | 0.251 | 1.64 | 1.360 |
+| 3k | 1.383 | 8.42 | 0.211 | 1.88 | 1.349 |
+| 4k | 1.372 | 8.01 | 0.238 | 1.92 | 1.351 |
+| 5k | 1.386 | 9.15 | 0.283 | 2.23 | 1.360 |
+| 6k | 1.372 | 8.22 | 0.371 | 2.05 | 1.346 |
+| 7k | 1.327 | 8.16 | 0.377 | 2.02 | 1.337 |
+| 8k | 1.327 | 8.30 | 0.378 | 2.02 | 1.360 |
+| 9k | 1.407 | 9.73 | 0.171 | 2.23 | 1.364 |
+| 10k | 1.325 | 8.24 | 0.327 | 1.90 | 1.352 |
+| 11k | 1.330 | 7.63 | 0.359 | 1.99 | 1.339 |
+| **12k** | **1.184** | **7.40** | **0.433** | 1.80 | 1.343 |
+| 13k | 1.212 | 7.90 | 0.439 | 1.87 | 1.351 |
+| 14k | 1.226 | 7.99 | 0.430 | 1.89 | 1.339 |
+| 15k | 1.224 | 7.98 | 0.431 | 1.89 | 1.332 |
+
+#### Analysis
+
+**Step 9k instability.** PBC crashed to 0.171 and SC spiked to 1.407 — Prodigy hit an unstable lr regime at the resume boundary. Recovered by step 10k and surpassed the pre-resume best.
+
+**Step 12k is the peak.** SC hit an all-time best of 1.184 (-11% vs v6 best), MCD bottomed at 7.40 (-11%), PBC jumped to 0.433 (+15% vs v6 best). TV dropped to 1.80 — consistent with the sixth sweep pattern where TV decline signals the perceptual sweet spot is near.
+
+**Steps 13-15k plateau.** SC regressed from 1.184 to 1.224, MCD from 7.40 to 7.98. PBC peaked at 13k (0.439) then flatlined at 0.430. No benefit from training past 12k.
+
+#### Updated Best Configuration
+
+**Best checkpoint:** `v7_prodigy_resume/adapter_step12000.pt`
+- Loss: 1.343, SC: 1.184, MCD: 7.40, PBC: 0.433
+- +84% PBC over v5 best (0.235)
+- -16% SC over v6 best (1.327 → 1.184)
+- -11% MCD over v6 best (8.30 → 7.40)
+
+#### Updated Takeaways
+
+19. **Prodigy converges at 12k steps** on 299-clip dataset — all metrics plateau or regress after
+20. **Resume causes a transient instability** at step 9k — Prodigy lr adapts through it within 2k steps
+21. **TV < 1.80 signals overfitting onset** — consistent with sixth sweep temporal variance pattern

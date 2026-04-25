@@ -818,6 +818,14 @@ class FoleyTuneLoRATrainer:
                     "tooltip": "Maximum timestep for sampling. Avoids near-noise timesteps. 0.95 recommended.",
                 }),
                 "optimizer_type": (["adamw", "prodigy"], {"default": "adamw"}),
+                "prodigy_d_coef": ("FLOAT", {
+                    "default": 1.0, "min": 0.01, "max": 10.0, "step": 0.01,
+                    "tooltip": "Prodigy d_coef: scales the learned step size. Lower values (e.g. 0.5) reduce effective lr. Only used with Prodigy optimizer.",
+                }),
+                "prodigy_growth_rate": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 100.0, "step": 0.1,
+                    "tooltip": "Prodigy growth_rate: max multiplicative increase of d per step. 0 = unlimited (inf). E.g. 1.02 = max 2%% growth per step. Only used with Prodigy optimizer.",
+                }),
                 "visual_dropout_prob": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 0.95, "step": 0.05,
                     "tooltip": "Per-sample probability of zeroing visual features during training. Forces the text channel to carry audio-character signal, decoupling identity from sound. Use 0.5 for generic-style LoRAs (no performer binding); leave 0.0 for identity-preserving LoRAs.",
@@ -853,7 +861,8 @@ class FoleyTuneLoRATrainer:
               t_min=0.0, t_max=1.0, optimizer_type="adamw",
               visual_dropout_prob=0.0,
               gradient_checkpointing=False,
-              resume_from="", dataset_json=""):
+              resume_from="", dataset_json="",
+              prodigy_d_coef=1.0, prodigy_growth_rate=0.0):
 
         import random
         device = mm.get_torch_device()
@@ -874,7 +883,7 @@ class FoleyTuneLoRATrainer:
             t_min, t_max, optimizer_type,
             visual_dropout_prob,
             gradient_checkpointing, resume_from,
-            dataset_json,
+            dataset_json, prodigy_d_coef, prodigy_growth_rate,
         )
 
     def _train_inner(self, hunyuan_model, hunyuan_deps, data_dir, output_dir, target, rank,
@@ -888,7 +897,8 @@ class FoleyTuneLoRATrainer:
                      t_min, t_max, optimizer_type,
                      visual_dropout_prob,
                      gradient_checkpointing, resume_from,
-                     dataset_json=""):
+                     dataset_json="",
+                     prodigy_d_coef=1.0, prodigy_growth_rate=0.0):
         import random
 
         torch.manual_seed(seed)
@@ -973,8 +983,10 @@ class FoleyTuneLoRATrainer:
             from prodigyopt import Prodigy
             for pg in param_groups:
                 pg.pop("lr", None)
-            optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01)
-            logger.info("Using Prodigy optimizer (lr auto-tuned)")
+            _growth = float("inf") if prodigy_growth_rate <= 0 else prodigy_growth_rate
+            optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
+                                d_coef=prodigy_d_coef, growth_rate=_growth)
+            logger.info(f"Using Prodigy optimizer (d_coef={prodigy_d_coef}, growth_rate={_growth})")
         else:
             optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 
@@ -1602,8 +1614,12 @@ class FoleyTuneLoRAScheduler:
                         from prodigyopt import Prodigy
                         for pg in param_groups:
                             pg.pop("lr", None)
-                        optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01)
-                        logger.info(f"[{exp_id}] Using Prodigy optimizer (lr auto-tuned)")
+                        _d_coef = config.get("prodigy_d_coef", 1.0)
+                        _growth = config.get("prodigy_growth_rate", 0.0)
+                        _growth = float("inf") if _growth <= 0 else _growth
+                        optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
+                                            d_coef=_d_coef, growth_rate=_growth)
+                        logger.info(f"[{exp_id}] Using Prodigy optimizer (d_coef={_d_coef}, growth_rate={_growth})")
                     else:
                         optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 

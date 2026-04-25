@@ -1079,11 +1079,13 @@ class FoleyTuneLoRATrainer:
                 _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
             # DAC round-trip: measure model quality, not codec ceiling
             with torch.no_grad():
+                hunyuan_deps.dac_model.to(device)
                 _ref_t = torch.from_numpy(_raw).float().unsqueeze(0).unsqueeze(0)
                 _ref_t = _ref_t.to(device=device, dtype=torch.float32)
                 _z, _, _, _, _ = hunyuan_deps.dac_model.encode(_ref_t)
                 _ref_dec = hunyuan_deps.dac_model.decode(_z.mode())
                 ref_wav_np = _ref_dec.squeeze().cpu().numpy()
+                hunyuan_deps.dac_model.cpu()
             _save_spectrogram(ref_wav_np, 48000, samples_path / "reference")
 
         logger.info(f"Starting training: {steps} steps, batch {batch_size}, lr {lr}")
@@ -1691,11 +1693,13 @@ class FoleyTuneLoRAScheduler:
                                 import soxr as _soxr
                                 _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
                             with torch.no_grad():
+                                hunyuan_deps.dac_model.to(device)
                                 _ref_t = torch.from_numpy(_raw).float().unsqueeze(0).unsqueeze(0)
                                 _ref_t = _ref_t.to(device=device, dtype=torch.float32)
                                 _z, _, _, _, _ = hunyuan_deps.dac_model.encode(_ref_t)
                                 _ref_dec = hunyuan_deps.dac_model.decode(_z.mode())
                                 ref_wav_np = _ref_dec.squeeze().cpu().numpy()
+                                hunyuan_deps.dac_model.cpu()
                             samples_dir_ref = exp_dir / "samples"
                             samples_dir_ref.mkdir(exist_ok=True)
                             _save_spectrogram(ref_wav_np, 48000, samples_dir_ref / "reference")
@@ -1916,8 +1920,9 @@ class FoleyTuneLoRAScheduler:
             except _SkipExperiment as e:
                 exp_result["status"] = f"skipped: {e}"
             except Exception as e:
+                import traceback
                 exp_result["status"] = f"failed: {e}"
-                logger.error(f"Experiment {exp_id} failed: {e}")
+                logger.error(f"Experiment {exp_id} failed: {e}\n{traceback.format_exc()}")
 
             gc.collect()
             torch.cuda.empty_cache()

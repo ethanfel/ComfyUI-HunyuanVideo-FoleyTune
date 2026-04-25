@@ -1913,15 +1913,14 @@ class FoleyTuneLoRAScheduler:
                         "duration_seconds": elapsed,
                     })
 
-                    del model, optimizer, lr_sched
-                    gc.collect()
-                    torch.cuda.empty_cache()
-
             except _SkipExperiment as e:
                 exp_result["status"] = f"skipped: {e}"
             except Exception as e:
                 exp_result["status"] = f"failed: {e}"
                 logger.error(f"Experiment {exp_id} failed: {e}")
+
+            gc.collect()
+            torch.cuda.empty_cache()
 
             results.append(exp_result)
 

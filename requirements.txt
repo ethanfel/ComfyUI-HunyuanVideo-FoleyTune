@@ -29,5 +29,6 @@ noisereduce
 pedalboard
 praat-parselmouth
 
-# LoRA training (loss curves, eval charts)
+# LoRA training (loss curves, eval charts, optimizers)
 matplotlib
+prodigyopt

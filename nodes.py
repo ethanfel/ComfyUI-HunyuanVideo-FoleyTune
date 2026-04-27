@@ -283,7 +283,6 @@ class FoleyTuneChunkedSampler:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "steps": ("INT", {"default": 50, "min": 10, "max": 100, "step": 1}),
                 "cfg_scale": ("FLOAT", {"default": 4.5, "min": 1.0, "max": 10.0, "step": 0.1}),
-                "force_offload": ("BOOLEAN", {"default": True}),
             },
             "optional": {
                 "sampler_options": ("FOLEYTUNE_SAMPLER_OPTIONS",),
@@ -291,6 +290,7 @@ class FoleyTuneChunkedSampler:
                 "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
                              "tooltip": "1.0=full generation from noise, 0.0=keep original. "
                                         "Uses sigma-based mapping for smooth control across the full range."}),
+                "force_offload": ("BOOLEAN", {"default": True}),
             }
         }
 
@@ -307,10 +307,10 @@ class FoleyTuneChunkedSampler:
         seed,
         steps,
         cfg_scale,
-        force_offload,
         sampler_options=None,
         init_audio=None,
         denoise=1.0,
+        force_offload=True,
     ):
         opts = sampler_options or {}
         sampler = opts.get("sampler", "euler")

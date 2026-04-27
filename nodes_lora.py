@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+from safetensors.torch import load_file as load_safetensors
 from loguru import logger
 
 import folder_paths
@@ -28,6 +29,19 @@ from .lora.train import (
 )
 from .lora.spectral_metrics import spectral_metrics, reference_metrics, clap_similarity
 from PIL import Image, ImageDraw
+
+
+def _load_adapter_checkpoint(path: str) -> dict:
+    """Load a LoRA checkpoint from .safetensors or .pt format."""
+    if path.endswith(".safetensors"):
+        state_dict = load_safetensors(path)
+        json_path = path.replace(".safetensors", ".json")
+        meta = {}
+        if os.path.exists(json_path):
+            with open(json_path) as f:
+                meta = json.load(f)
+        return {"state_dict": state_dict, "meta": meta}
+    return torch.load(path, map_location="cpu", weights_only=False)
 
 FOLEYTUNE_AUDIO_DATASET = "FOLEYTUNE_AUDIO_DATASET"
 
@@ -1324,7 +1338,7 @@ class FoleyTuneLoRALoader:
         if not adapter_path or not os.path.exists(adapter_path):
             raise FileNotFoundError(f"Adapter not found: {adapter_path}")
 
-        ckpt = torch.load(adapter_path, map_location="cpu", weights_only=False)
+        ckpt = _load_adapter_checkpoint(adapter_path)
 
         # Handle both raw state_dict and wrapped checkpoint formats
         if "state_dict" in ckpt:
@@ -2149,7 +2163,7 @@ class FoleyTuneLoRAEvaluator:
 
             # Load adapter or use baseline
             if adapter_path and os.path.exists(adapter_path):
-                ckpt = torch.load(adapter_path, map_location="cpu", weights_only=False)
+                ckpt = _load_adapter_checkpoint(adapter_path)
                 sd = ckpt.get("state_dict", ckpt)
                 meta = ckpt.get("meta", {})
 

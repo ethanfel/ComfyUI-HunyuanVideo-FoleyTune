@@ -1003,6 +1003,8 @@ class FoleyTuneLoRATrainer:
             logger.info(f"Using Prodigy optimizer (d_coef={prodigy_d_coef}, growth_rate={_growth})")
         elif optimizer_type == "automagic":
             from lora.automagic import Automagic
+            if lora_plus_ratio > 1.0:
+                logger.warning("lora_plus_ratio has no effect with Automagic (per-element LR)")
             for pg in param_groups:
                 pg.pop("lr", None)
             optimizer = Automagic(param_groups, lr=1e-6, min_lr=1e-7, max_lr=1e-3, lr_bump=1e-6)
@@ -1700,6 +1702,8 @@ class FoleyTuneLoRAScheduler:
                         logger.info(f"[{exp_id}] Using Prodigy optimizer (d_coef={_d_coef}, growth_rate={_growth})")
                     elif _opt_type == "automagic":
                         from lora.automagic import Automagic
+                        if config.get("lora_plus_ratio", 1.0) > 1.0:
+                            logger.warning(f"[{exp_id}] lora_plus_ratio has no effect with Automagic")
                         for pg in param_groups:
                             pg.pop("lr", None)
                         optimizer = Automagic(param_groups, lr=1e-6, min_lr=1e-7, max_lr=1e-3, lr_bump=1e-6)

@@ -119,7 +119,7 @@ class Automagic(torch.optim.Optimizer):
         return torch.mul(r_factor, c_factor)
 
     def _get_lr(self, param_group, param_state):
-        return param_state.get("avg_lr", 0.0)
+        return param_state.get("avg_lr", self.lr)
 
     def _get_group_lr(self, group):
         lrs = [self._get_lr(group, self.state[p]) for p in group["params"]]
@@ -255,4 +255,6 @@ class Automagic(torch.optim.Optimizer):
                 continue
             if param not in self.state:
                 self._initialize_state(param)
-            self.state[param]["lr_mask"] = Auto8bitTensor(saved["lr_mask"])
+            lr_mask = Auto8bitTensor(saved["lr_mask"])
+            lr_mask.quantized = lr_mask.quantized.to(param.device)
+            self.state[param]["lr_mask"] = lr_mask

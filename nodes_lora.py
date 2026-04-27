@@ -1398,6 +1398,10 @@ class FoleyTuneLoRAScheduler:
                 "hunyuan_model": ("FOLEYTUNE_MODEL",),
                 "hunyuan_deps": ("FOLEYTUNE_DEPS",),
                 "sweep_json": ("STRING", {"default": ""}),
+                "run_only": ("STRING", {
+                    "default": "all",
+                    "tooltip": "Run all experiments or a single one by id (e.g. 'sigma07_cur05').",
+                }),
             }
         }
 
@@ -1411,22 +1415,56 @@ class FoleyTuneLoRAScheduler:
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
-    # Default training params (mirrors trainer node defaults)
+    # Default training params — tuned from sweep results (v5–v10)
     _PARAM_DEFAULTS = {
-        "target": "all_attn_mlp", "rank": 128, "alpha": 128.0,
-        "lr": 1e-4, "steps": 15000, "batch_size": 8, "grad_accum": 1,
-        "warmup_steps": 100, "save_every": 500,
-        "timestep_mode": "curriculum", "precision": "bf16", "seed": 42,
-        "logit_normal_sigma": 1.0, "curriculum_switch": 0.6,
+        "target": "all_attn_mlp", "rank": 64, "alpha": 64.0,
+        "lr": 5e-5, "steps": 13000, "batch_size": 8, "grad_accum": 1,
+        "warmup_steps": 100, "save_every": 1000,
+        "timestep_mode": "uniform", "precision": "bf16", "seed": 42,
+        "logit_normal_sigma": 0.7, "curriculum_switch": 0.5,
         "init_mode": "standard", "use_rslora": False, "lora_dropout": 0.0,
-        "lora_plus_ratio": 1.0, "schedule_type": "constant",
+        "lora_plus_ratio": 1.0, "schedule_type": "cosine",
         "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
         "noise_offset": 0.0, "min_snr_gamma": 0.0, "ema_decay": 0.0,
         "cos_sim_weight": 0.0, "channel_loss_weight": False,
-        "t_min": 0.0, "t_max": 1.0, "optimizer_type": "adamw",
-        "visual_dropout_prob": 0.0,
+        "t_min": 0.0, "t_max": 1.0, "optimizer_type": "prodigy",
+        "prodigy_d_coef": 1.0, "prodigy_growth_rate": 0.0,
+        "visual_dropout_prob": 0.5,
         "gradient_checkpointing": False,
         "resume_from": "",
+    }
+
+    _DEFAULT_SWEEP = {
+        "name": "sweep",
+        "dataset_json": "",
+        "output_root": "",
+        "base": {},
+        "experiments": [
+            {
+                "id": "sigma07_cur05",
+                "description": "Best overall — sigma=0.7, curriculum=0.5 (PBC=0.661)",
+                "logit_normal_sigma": 0.7,
+                "curriculum_switch": 0.5,
+            },
+            {
+                "id": "sigma08_cur05",
+                "description": "Best TV — sigma=0.8, curriculum=0.5 (PBC=0.642, TV=1.82)",
+                "logit_normal_sigma": 0.8,
+                "curriculum_switch": 0.5,
+            },
+            {
+                "id": "sigma07_cur04",
+                "description": "Earlier curriculum — sigma=0.7, curriculum=0.4 (PBC=0.644)",
+                "logit_normal_sigma": 0.7,
+                "curriculum_switch": 0.4,
+            },
+            {
+                "id": "baseline_cur05",
+                "description": "Baseline — default sigma=1.0, curriculum=0.5 (PBC=0.592)",
+                "logit_normal_sigma": 1.0,
+                "curriculum_switch": 0.5,
+            },
+        ],
     }
 
     def _merge_config(self, base, experiment):
@@ -1436,9 +1474,19 @@ class FoleyTuneLoRAScheduler:
                 merged[k] = v
         return merged
 
-    def run_sweep(self, hunyuan_model, hunyuan_deps, sweep_json):
+    def run_sweep(self, hunyuan_model, hunyuan_deps, sweep_json, run_only="all"):
+        if not sweep_json:
+            raise ValueError("sweep_json path is required")
         if not os.path.exists(sweep_json):
-            raise FileNotFoundError(f"Sweep JSON not found: {sweep_json}")
+            template = copy.deepcopy(self._DEFAULT_SWEEP)
+            template["output_root"] = str(Path(sweep_json).parent / "output")
+            os.makedirs(os.path.dirname(sweep_json), exist_ok=True)
+            with open(sweep_json, "w") as f:
+                json.dump(template, f, indent=2)
+            raise FileNotFoundError(
+                f"Sweep JSON not found — wrote default template to: {sweep_json}\n"
+                "Edit it with your dataset_json path and output_root, then re-run."
+            )
 
         with open(sweep_json) as f:
             sweep = json.load(f)
@@ -1449,6 +1497,13 @@ class FoleyTuneLoRAScheduler:
         output_root = Path(sweep.get("output_root", f"lora_output/{sweep_name}"))
         base_config = sweep.get("base", {})
         experiments = sweep.get("experiments", [])
+
+        if run_only and run_only.strip().lower() != "all":
+            target_id = run_only.strip()
+            experiments = [e for e in experiments if e.get("id") == target_id]
+            if not experiments:
+                all_ids = [e.get("id", "?") for e in sweep.get("experiments", [])]
+                raise ValueError(f"Experiment '{target_id}' not found. Available: {all_ids}")
 
         output_root.mkdir(parents=True, exist_ok=True)
         summary_path = output_root / "experiment_summary.json"

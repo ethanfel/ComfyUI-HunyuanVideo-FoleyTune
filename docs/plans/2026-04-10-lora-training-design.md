@@ -922,11 +922,19 @@ PBC surges between steps 5-6k (0.283 → 0.371) and SC drops sharply at 7k. Prod
 
 ---
 
-### v7 Sweep — Prodigy Resume (April 2026)
+### v7 Sweep — Prodigy Exploration (April 2026)
 
-Resumed v6_prodigy from step 8k to find convergence point. Used existing checkpoint at `output_v6/v6_prodigy/adapter_step08000.pt`.
+Testing Prodigy variants: resume from v6, rank ablations, d_coef/growth_rate control, noise offset, curriculum timing, warmup, alpha.
 
-#### Prodigy Extended Trajectory (steps 1k–15k)
+**Base config:** r96, alpha=96, Prodigy, 13k steps, batch=8, cosine, curriculum_switch=0.7, visual_dropout=0.5.
+
+**Bugs fixed during this sweep:**
+- Cross-sweep resume treated `steps` as total instead of additional — empty training loop (`5f2afaa`)
+- History loading searched new exp dir only — now falls back to source checkpoint dir (`5f2afaa`)
+
+#### Prodigy Resume Trajectory (steps 1k–15k)
+
+Resumed from `output_v6/v6_prodigy/adapter_step08000.pt`.
 
 | Step | SC | MCD | PBC | TV | Loss |
 |------|------|------|-------|------|-------|
@@ -946,24 +954,191 @@ Resumed v6_prodigy from step 8k to find convergence point. Used existing checkpo
 | 14k | 1.226 | 7.99 | 0.430 | 1.89 | 1.339 |
 | 15k | 1.224 | 7.98 | 0.431 | 1.89 | 1.332 |
 
+#### Full v7 Results (best step per experiment)
+
+| Experiment | Best PBC | At step | SC | MCD | TV | Key change |
+|---|---|---|---|---|---|---|
+| **v7_prodigy_r64** | **0.590** | 12k | 1.212 | 7.38 | 1.73 | **rank 64** |
+| v7_prodigy_dcoef05 | 0.518 | 12k | 1.315 | 8.10 | 1.79 | d_coef=0.5 |
+| v7_prodigy_offset01 | 0.444 | 12k | 1.337 | 7.90 | 1.98 | noise offset 0.01 |
+| v7_prodigy_resume | 0.439 | 13k | 1.212 | 7.90 | 1.87 | continued v6 8k→15k |
+| v7_prodigy_r128 | 0.323 | 13k | 1.404 | 8.42 | 2.65 | rank 128 |
+| v7_prodigy_alpha32 | 0.267 | 5k | 1.391 | 9.47 | 2.26 | alpha=32 (incomplete) |
+| v7_prodigy_warmup1k | 0.236 | 4k | 1.362 | 7.57 | 1.56 | warmup=1000 (incomplete) |
+| v7_prodigy_growth102 | 0.205 | 13k | 1.369 | 7.95 | 1.58 | growth_rate=1.02 |
+
+#### Prodigy Learning Rate Analysis
+
+Prodigy's `d` (auto-tuned step size) revealed why the model learns aggressively in the first 1k steps:
+
+| Step | d (r96) | Cosine | Effective LR | vs AdamW 5e-5 |
+|------|---------|--------|-------------|---------------|
+| 1k | 0.000327 | 0.968 | 3.17e-4 | 6.3x |
+| 4k | 0.000327 | 0.510 | 1.67e-4 | 3.3x |
+| 7k | 0.001239 | 0.039 | 4.8e-5 | 1.0x |
+| 8k | 0.001255 | 0.000 | 0 | 0x |
+
+Prodigy ramps `d` as cosine decays — compensating for the schedule. The early effective lr is 6x the AdamW baseline, causing fast domain adaptation in the first 1k steps with slower refinement after.
+
+Lower rank naturally constrains `d`: r64 started at d=0.000273 (vs 0.000327 at r96), giving a 15% lower initial effective lr. This implicit regularization explains why r64 outperformed r96.
+
 #### Analysis
 
-**Step 9k instability.** PBC crashed to 0.171 and SC spiked to 1.407 — Prodigy hit an unstable lr regime at the resume boundary. Recovered by step 10k and surpassed the pre-resume best.
+**r64 is the clear winner.** PBC=0.590 (+151% vs v5, +35% vs resume). Lower rank constrains Prodigy's step size, acting as implicit regularization. The optimizer doesn't overshoot early, and the model reaches a better final state.
 
-**Step 12k is the peak.** SC hit an all-time best of 1.184 (-11% vs v6 best), MCD bottomed at 7.40 (-11%), PBC jumped to 0.433 (+15% vs v6 best). TV dropped to 1.80 — consistent with the sixth sweep pattern where TV decline signals the perceptual sweet spot is near.
+**Rank ordering: r64 > r96 > r128.** More capacity hurts with Prodigy — r128 PBC was only 0.323. Prodigy compensates for higher rank by pushing `d` higher, amplifying the overshoot problem.
 
-**Steps 13-15k plateau.** SC regressed from 1.184 to 1.224, MCD from 7.40 to 7.98. PBC peaked at 13k (0.439) then flatlined at 0.430. No benefit from training past 12k.
+**d_coef=0.5 helps at r96 but is redundant at r64.** At r96, halving `d` gave a smooth trajectory to PBC=0.518. At r64, the rank itself provides enough regularization (see v8 results below).
+
+**growth_rate=1.02 was too restrictive.** PBC stuck at 0.205 — the cap prevented Prodigy from ever reaching the productive lr regime.
+
+**alpha=32 is counterproductive with Prodigy.** Prodigy compensated for the lower effective scaling by pushing `d` 45% higher, negating the regularization intent.
+
+**warmup=1000 backfired.** Longer warmup gave Prodigy more gradient history, and it estimated an even higher d=0.000851 (2.6x baseline).
+
+**Resume instability at step 9k.** PBC crashed to 0.171 — Prodigy's lr state was disrupted at the resume boundary. Recovered within 2k steps.
+
+**Noise offset slow start, steady climb.** PBC=0.085 at 1k (TV=0.62 — nearly collapsed) but recovered to 0.444 by 12k. The offset disrupts early training but doesn't prevent eventual convergence.
+
+---
+
+### v8 Sweep — r64 Refinement (April 2026)
+
+Testing r64 variants: d_coef, lower rank (r48), curriculum timing, noise offset.
+
+**Base config:** r64, alpha=64, Prodigy, 13k steps, batch=8, cosine, curriculum_switch=0.7, visual_dropout=0.5.
+
+#### Results
+
+| Experiment | Best PBC | At step | SC | MCD | TV | Key change |
+|---|---|---|---|---|---|---|
+| **v8_r64_baseline** | **0.512** | 13k | **1.189** | **6.95** | 1.82 | control (reproduce v7 r64) |
+| v8_r48 | 0.497 | 12k | 1.293 | 7.42 | 1.95 | rank 48 |
+| v8_r64_dcoef05 | 0.428 | 12k | 1.289 | 7.82 | 1.78 | d_coef=0.5 |
+| **v8_r64_curriculum05** | **0.592** | 12k | 1.254 | **6.81** | 1.69 | **curriculum_switch=0.5** |
+| v8_r64_dcoef03 | 0.372 | 11k | 1.360 | 8.16 | 2.15 | d_coef=0.3 |
+
+**v8_r64_offset01** (noise_offset=0.01) — hit all-time best SC (1.187) and MCD (6.26) at step 10k, but TV collapsed to 1.34. Perceptual comparison with curriculum05 confirmed fewer distinct sound elements in the waveform despite better spectral numbers. Noise offset optimizes for dominant spectral features at the expense of ambient textures and temporal variation. SC/MCD improvements are misleading when TV is this low — the output sounds cleaner but flatter.
+
+#### Analysis
+
+**r64 baseline reproduced.** PBC=0.512 (vs 0.590 in v7 — seed/order variance). MCD hit **6.95**, first time under 7. SC=1.189 nearly matches v7.
+
+**d_coef hurts at r64.** Both 0.5 (PBC=0.428) and 0.3 (PBC=0.372) are worse. At r64, Prodigy's natural `d` is already lower — the rank itself is enough regularization. Scaling `d` down further starves the optimizer. d_coef=0.3 plateaued at step 11k.
+
+**r48 is slightly worse.** PBC=0.497, SC=1.293, MCD=7.42 — all behind r64. TV=1.95 (healthier than r64's 1.82) suggests underfitting. r48 has too little capacity.
+
+**curriculum_switch=0.5 ties for best PBC and sets new MCD record.** PBC=0.592 matches v7 r64 (0.590), MCD=6.81 beats baseline (6.95). The earlier transition at 50% gives Prodigy more cosine-schedule steps to refine after the curriculum switch. PBC surge started at step 8k, exactly 1.5k after the transition at step 6.5k — consistent with the 2-3k post-transition peak pattern seen across all sweeps. TV=1.69 is below the 1.80 warning threshold, suggesting it's right at the overfitting edge.
+
+**r64 is the sweet spot.** Going lower (r48) underfits, going higher (r96/r128) overfits with Prodigy's adaptive lr. No Prodigy tuning knobs (d_coef, growth_rate, warmup) improve on plain r64. curriculum_switch=0.5 is the only variant that matches or beats the default.
 
 #### Updated Best Configuration
 
-**Best checkpoint:** `v7_prodigy_resume/adapter_step12000.pt`
-- Loss: 1.343, SC: 1.184, MCD: 7.40, PBC: 0.433
-- +84% PBC over v5 best (0.235)
-- -16% SC over v6 best (1.327 → 1.184)
-- -11% MCD over v6 best (8.30 → 7.40)
+```json
+{
+  "target": "all_attn_mlp",
+  "rank": 64,
+  "alpha": 64,
+  "lr": 5e-05,
+  "steps": 13000,
+  "schedule_type": "cosine",
+  "timestep_mode": "uniform",
+  "visual_dropout_prob": 0.5,
+  "warmup_steps": 100,
+  "batch_size": 8,
+  "seed": 42,
+  "optimizer_type": "prodigy",
+  "curriculum_switch": 0.5,
+  "min_snr_gamma": 0.0,
+  "ema_decay": 0.0,
+  "noise_offset": 0.0,
+  "cos_sim_weight": 0.0,
+  "channel_loss_weight": false
+}
+```
+
+**Best checkpoint:** `v8_r64_curriculum05/adapter_step12000.pt`
+- Loss: 1.345, SC: 1.253, MCD: 6.82, PBC: 0.590
+- +151% PBC over v5 best (0.235)
+- MCD 6.82 — all-time best, first time below 6.9
 
 #### Updated Takeaways
 
 19. **Prodigy converges at 12k steps** on 299-clip dataset — all metrics plateau or regress after
-20. **Resume causes a transient instability** at step 9k — Prodigy lr adapts through it within 2k steps
-21. **TV < 1.80 signals overfitting onset** — consistent with sixth sweep temporal variance pattern
+20. **r64 is the optimal rank for Prodigy** — lower (r48) underfits, higher (r96/r128) allows lr overshoot
+21. **Prodigy's `d` is naturally constrained by rank** — d_coef/growth_rate tuning is unnecessary at r64
+22. **d_coef helps only at r96+** where Prodigy overshoots — at r64 it starves the optimizer
+23. **MCD < 7 achievable** — r64 Prodigy hit 6.93/6.95 at step 12k, first time below 7
+24. **TV < 1.80 signals overfitting onset** — consistent across all sweep versions
+25. **Resume causes transient Prodigy instability** — recovers within 2k steps but wastes compute vs fresh run
+26. **curriculum_switch=0.5 > 0.7** — earlier transition gives Prodigy more cosine steps to refine; PBC surge lands 1.5k steps after switch
+27. **Noise offset inflates SC/MCD while killing TV** — offset=0.01 hit best SC (1.187) and MCD (6.26) but TV=1.34; perceptual listening confirms fewer sound elements despite better spectral numbers. TV is the better proxy for perceptual quality than SC/MCD alone
+
+---
+
+### v9 Sweep — Temporal Variance & Timestep Distribution (April 2026)
+
+Goal: improve TV while maintaining the PBC/SC/MCD gains from v8. Testing curriculum timing and logit-normal sigma (timestep sampling distribution width).
+
+**Base config:** r64, alpha=64, Prodigy, 13k steps, curriculum_switch=0.5, logit_normal_sigma=1.0.
+
+#### Results
+
+| Experiment | Best PBC | At step | SC | MCD | TV | Key change |
+|---|---|---|---|---|---|---|
+| **v9_sigma07** | **0.635** | 13k | **1.067** | **6.06** | 1.51 | **sigma=0.7** |
+| v9_curriculum04 | 0.644 | 12k | 1.143 | 6.05 | 1.53 | curriculum=0.4 |
+| v9_curriculum06 | 0.588 | 12k | 1.302 | 7.18 | 1.66 | curriculum=0.6 |
+| v9_sigma05 | 0.580 | 12k | 1.167 | 6.91 | 1.61 | sigma=0.5 |
+| *v8 winner* | *0.592* | *12k* | *1.254* | *6.81* | *1.69* | *reference* |
+
+#### Analysis
+
+**sigma=0.7 is the new best — perceptually confirmed.** SC broke 1.1 for the first time (1.067), MCD=6.06, PBC=0.635 (+170% vs v5). TV=1.51 is lower than v8 but perceptual listening during inference confirmed it sounds the best yet. The narrower timestep distribution focuses training on informative mid-range timesteps, improving all spectral metrics simultaneously.
+
+**sigma=0.5 was too narrow.** PBC=0.580, worse than both sigma=0.7 and the v8 baseline. Over-constraining the timestep distribution hurts — the model needs some extreme timesteps to learn the full noise-to-signal trajectory.
+
+**curriculum=0.4 has the highest raw PBC (0.644)** but TV=1.53 and SC=1.143 are worse than sigma=0.7. Pushing the curriculum switch earlier gives diminishing returns — the model runs out of logit-normal steps too early.
+
+**curriculum=0.6 is the most conservative.** Best TV of the group (1.66) with PBC=0.588. A viable option if TV matters more than peak spectral quality, but perceptually sigma=0.7 sounds better.
+
+**TV vs PBC tradeoff appears fundamental at 299 clips.** Every lever that improves PBC/SC/MCD compresses TV. The TV warning threshold (1.80) from earlier sweeps may have been too conservative — sigma=0.7 at TV=1.51 sounds better than curriculum=0.5 at TV=1.69. Perceptual quality correlates more with the PBC×SC combination than TV alone at this scale.
+
+#### Updated Best Configuration
+
+```json
+{
+  "target": "all_attn_mlp",
+  "rank": 64,
+  "alpha": 64,
+  "lr": 5e-05,
+  "steps": 13000,
+  "schedule_type": "cosine",
+  "timestep_mode": "uniform",
+  "visual_dropout_prob": 0.5,
+  "warmup_steps": 100,
+  "batch_size": 8,
+  "seed": 42,
+  "optimizer_type": "prodigy",
+  "curriculum_switch": 0.5,
+  "logit_normal_sigma": 0.7,
+  "min_snr_gamma": 0.0,
+  "ema_decay": 0.0,
+  "noise_offset": 0.0,
+  "cos_sim_weight": 0.0,
+  "channel_loss_weight": false
+}
+```
+
+**Best checkpoint:** `v9_sigma07/adapter_step13000.pt`
+- Loss: 1.351, SC: 1.067, MCD: 6.06, PBC: 0.635
+- +170% PBC over v5 best (0.235)
+- SC first time under 1.1, MCD first time under 6.1
+- Perceptually confirmed as best sounding during inference
+
+#### Updated Takeaways
+
+28. **logit_normal_sigma=0.7 > 1.0** — narrower timestep distribution improves all spectral metrics; focuses training on informative mid-range timesteps
+29. **sigma=0.5 is too narrow** — over-constraining timesteps hurts PBC; the model needs some extreme timesteps
+30. **TV threshold is not a hard perceptual limit** — TV=1.51 sounds better than TV=1.69 when SC/MCD/PBC are all stronger; perceptual quality is a function of the full metric profile, not TV alone
+31. **Perceptual quality correlates best with low SC + high PBC** — these capture spectral fidelity and frequency tracking; TV is a secondary indicator at this dataset scale

@@ -136,7 +136,7 @@
       ],
       "size": [
         416,
-        832
+        992
       ],
       "flags": {},
       "order": 12,
@@ -202,6 +202,16 @@
         0,
         false,
         "",
+        "",
+        "",
+        false,
+        0,
+        1,
+        "adamw",
+        1,
+        0,
+        0,
+        false,
         "",
         ""
       ]
@@ -1318,58 +1328,6 @@
       ]
     },
     {
-      "id": 20,
-      "type": "FoleyTuneLoRAScheduler",
-      "pos": [
-        2112,
-        128
-      ],
-      "size": [
-        384,
-        320
-      ],
-      "flags": {},
-      "order": 13,
-      "mode": 2,
-      "inputs": [
-        {
-          "name": "hunyuan_model",
-          "type": "FOLEYTUNE_MODEL",
-          "link": 30
-        },
-        {
-          "name": "hunyuan_deps",
-          "type": "FOLEYTUNE_DEPS",
-          "link": 31
-        }
-      ],
-      "outputs": [
-        {
-          "name": "summary_path",
-          "type": "STRING",
-          "links": null
-        },
-        {
-          "name": "comparison_curves",
-          "type": "IMAGE",
-          "links": null
-        }
-      ],
-      "properties": {
-        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-Foley",
-        "ver": "4a2ba7774ef3863e6e373ae56f0170a5841eb8a9",
-        "Node name for S&R": "FoleyTuneLoRAScheduler",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        "/media/unraid/davinci/Foley/AD/blowjob/features_v4/sweep_v10.json"
-      ]
-    },
-    {
       "id": 40,
       "type": "VHS_VideoCombine",
       "pos": [
@@ -1818,6 +1776,59 @@
         "safa",
         false
       ]
+    },
+    {
+      "id": 20,
+      "type": "FoleyTuneLoRAScheduler",
+      "pos": [
+        2112,
+        128
+      ],
+      "size": [
+        384,
+        320
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 2,
+      "inputs": [
+        {
+          "name": "hunyuan_model",
+          "type": "FOLEYTUNE_MODEL",
+          "link": 30
+        },
+        {
+          "name": "hunyuan_deps",
+          "type": "FOLEYTUNE_DEPS",
+          "link": 31
+        }
+      ],
+      "outputs": [
+        {
+          "name": "summary_path",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "comparison_curves",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-Foley",
+        "ver": "4a2ba7774ef3863e6e373ae56f0170a5841eb8a9",
+        "Node name for S&R": "FoleyTuneLoRAScheduler",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        "/media/unraid/davinci/Foley/AD/blowjob/features_v4/sweep_v10.json",
+        "all"
+      ]
     }
   ],
   "links": [
@@ -2217,10 +2228,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 1.2653593931290206,
+      "scale": 0.3029169783096769,
       "offset": [
-        1247.1364211683929,
-        -767.4632652070637
+        5230.850220856984,
+        1736.0442584351356
       ]
     },
     "ue_links": [],

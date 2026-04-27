@@ -5,6 +5,7 @@ import hashlib
 import weakref
 import gc
 import torch
+import torchaudio
 import torch.nn as nn
 import torch.nn.functional as F
 from inspect import cleandoc
@@ -296,7 +297,11 @@ class FoleyTuneChunkedSampler:
                 "init_audio": ("AUDIO", {"tooltip": "Reference audio for audio2audio. Connect to use img2img-style generation."}),
                 "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
                              "tooltip": "1.0=full generation from noise, 0.0=keep original. "
-                                        "The model is strongly video-conditioned, so the effective range is roughly 0.6-1.0."}),
+                                        "Uses sigma-based mapping for smooth control across the full range."}),
+                "noise_blend": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                                 "tooltip": "Blend reference audio dynamics into the initial noise. "
+                                            "0.0=pure gaussian, 1.0=preserves temporal rhythm from reference. "
+                                            "Try 0.3-0.5 to keep timing while regenerating timbre."}),
                 "torch_compile_cfg": ("FOLEYTUNE_COMPILE_CFG",),
                 "block_swap_args": ("FOLEYTUNE_BLOCKSWAP",),
             }
@@ -323,6 +328,7 @@ class FoleyTuneChunkedSampler:
         force_offload,
         init_audio=None,
         denoise=1.0,
+        noise_blend=0.0,
         torch_compile_cfg=None,
         block_swap_args=None,
     ):
@@ -389,7 +395,6 @@ class FoleyTuneChunkedSampler:
             if init_waveform.shape[1] > 1:
                 init_waveform = init_waveform[:, :1, :]  # take first channel
             if init_sr != 48000:
-                import torchaudio
                 init_waveform = torchaudio.functional.resample(init_waveform, init_sr, 48000)
             init_latents = encode_audio_to_latents(init_waveform, hunyuan_deps["dac_model"], device)
             # Ensure init_latents match expected duration
@@ -419,6 +424,7 @@ class FoleyTuneChunkedSampler:
             generator=rng,
             init_latents=init_latents,
             strength=denoise,
+            noise_blend=noise_blend,
         )
 
         waveform_batch = decoded_waveform.float().cpu()
@@ -701,6 +707,9 @@ class FoleyTuneInpainter:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "fade_frames": ("INT", {"default": 4, "min": 0, "max": 20, "step": 1,
                                  "tooltip": "Soft mask edge width in latent frames (~20ms each). Prevents DAC boundary clicks."}),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 1.0, "step": 0.01,
+                             "tooltip": "Regeneration strength in masked region. 1.0=fully regenerate, "
+                                        "lower values preserve more of the original structure."}),
                 "force_offload": ("BOOLEAN", {"default": True}),
             },
             "optional": {
@@ -732,6 +741,7 @@ class FoleyTuneInpainter:
         sampler,
         seed,
         fade_frames,
+        denoise,
         force_offload,
         torch_compile_cfg=None,
         block_swap_args=None,
@@ -758,7 +768,6 @@ class FoleyTuneInpainter:
         if init_waveform.shape[1] > 1:
             init_waveform = init_waveform[:, :1, :]
         if init_sr != 48000:
-            import torchaudio
             init_waveform = torchaudio.functional.resample(init_waveform, init_sr, 48000)
 
         # Apply torch.compile if configured
@@ -846,10 +855,12 @@ class FoleyTuneInpainter:
             "uncond_text_feat": features["uncond_text_feat"].to(device),
         }
 
-        # Run denoising with inpainting
+        # Run denoising with inpainting + optional partial regeneration
         audio, sample_rate = denoise_process_with_generator(
             visual, text, duration, model_dict, hunyuan_cfg,
             cfg_scale, steps, 1, sampler, rng,
+            init_latents=init_latents,
+            strength=denoise,
             inpaint_mask=mask,
             inpaint_original=init_latents,
             inpaint_noise=inpaint_noise,
@@ -939,7 +950,6 @@ class FoleyTuneStyleTransfer:
     )
 
     def transfer_style(self, content_audio, style_audio, hunyuan_deps, strength):
-        import torchaudio
         device = mm.get_torch_device()
         dac = hunyuan_deps["dac_model"]
         dac.to(device=device, dtype=torch.float32)

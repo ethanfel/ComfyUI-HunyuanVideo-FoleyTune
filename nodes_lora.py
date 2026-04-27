@@ -831,7 +831,7 @@ class FoleyTuneLoRATrainer:
                     "default": 1.0, "min": 0.8, "max": 1.0, "step": 0.01,
                     "tooltip": "Maximum timestep for sampling. Avoids near-noise timesteps. 0.95 recommended.",
                 }),
-                "optimizer_type": (["adamw", "prodigy"], {"default": "adamw"}),
+                "optimizer_type": (["adamw", "prodigy", "automagic"], {"default": "prodigy"}),
                 "prodigy_d_coef": ("FLOAT", {
                     "default": 1.0, "min": 0.01, "max": 10.0, "step": 0.01,
                     "tooltip": "Prodigy d_coef: scales the learned step size. Lower values (e.g. 0.5) reduce effective lr. Only used with Prodigy optimizer.",
@@ -1001,6 +1001,12 @@ class FoleyTuneLoRATrainer:
             optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
                                 d_coef=prodigy_d_coef, growth_rate=_growth)
             logger.info(f"Using Prodigy optimizer (d_coef={prodigy_d_coef}, growth_rate={_growth})")
+        elif optimizer_type == "automagic":
+            from lora.automagic import Automagic
+            for pg in param_groups:
+                pg.pop("lr", None)
+            optimizer = Automagic(param_groups, lr=1e-6, min_lr=1e-7, max_lr=1e-3, lr_bump=1e-6)
+            logger.info("Using Automagic optimizer")
         else:
             optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 
@@ -1200,9 +1206,11 @@ class FoleyTuneLoRATrainer:
             if (step + 1) % log_interval == 0:
                 avg_loss = np.mean(losses[-log_interval:])
                 elapsed = time.time() - t_start
+                _lr_str = (f"{optimizer.get_avg_learning_rate():.2e}"
+                           if hasattr(optimizer, "get_avg_learning_rate")
+                           else f"{scheduler.get_last_lr()[0]:.2e}")
                 logger.info(f"Step {step+1}/{steps} | loss: {avg_loss:.4f} | "
-                           f"lr: {scheduler.get_last_lr()[0]:.2e} | "
-                           f"elapsed: {elapsed:.0f}s")
+                           f"lr: {_lr_str} | elapsed: {elapsed:.0f}s")
 
                 preview_img = _draw_loss_curve(
                     losses, start_step=start_step,
@@ -1679,7 +1687,8 @@ class FoleyTuneLoRAScheduler:
                     else:
                         param_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": _lr}]
 
-                    if config.get("optimizer_type", "adamw") == "prodigy":
+                    _opt_type = config.get("optimizer_type", "prodigy")
+                    if _opt_type == "prodigy":
                         from prodigyopt import Prodigy
                         for pg in param_groups:
                             pg.pop("lr", None)
@@ -1689,6 +1698,12 @@ class FoleyTuneLoRAScheduler:
                         optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
                                             d_coef=_d_coef, growth_rate=_growth)
                         logger.info(f"[{exp_id}] Using Prodigy optimizer (d_coef={_d_coef}, growth_rate={_growth})")
+                    elif _opt_type == "automagic":
+                        from lora.automagic import Automagic
+                        for pg in param_groups:
+                            pg.pop("lr", None)
+                        optimizer = Automagic(param_groups, lr=1e-6, min_lr=1e-7, max_lr=1e-3, lr_bump=1e-6)
+                        logger.info(f"[{exp_id}] Using Automagic optimizer")
                     else:
                         optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 
@@ -1902,8 +1917,11 @@ class FoleyTuneLoRAScheduler:
                         if (step + 1) % 50 == 0:
                             avg_loss = np.mean(losses[-50:])
                             elapsed = time.time() - t_start
+                            _lr_str = (f"{optimizer.get_avg_learning_rate():.2e}"
+                                       if hasattr(optimizer, "get_avg_learning_rate")
+                                       else f"{lr_sched.get_last_lr()[0]:.2e}")
                             logger.info(f"[{exp_id}] Step {step+1}/{config['steps']} | "
-                                       f"loss: {avg_loss:.4f} | lr: {lr_sched.get_last_lr()[0]:.2e} | "
+                                       f"loss: {avg_loss:.4f} | lr: {_lr_str} | "
                                        f"elapsed: {elapsed:.0f}s")
 
                             preview_img = _draw_loss_curve(

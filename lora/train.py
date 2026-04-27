@@ -237,6 +237,87 @@ def sample_timesteps(batch_size, mode, device, dtype,
     return t
 
 
+def min_snr_weight(sigma, gamma=5.0):
+    """Compute Min-SNR loss weighting from sigma values.
+
+    For flow matching with linear schedule: SNR = (1-sigma)^2 / sigma^2.
+    Weight = clamp(SNR, max=gamma). Emphasizes low-noise timesteps
+    where the model learns fine detail.
+
+    Args:
+        sigma: [B] tensor of sigma values in [0, 1]
+        gamma: clamp ceiling (default 5.0)
+
+    Returns:
+        [B] weight tensor, broadcastable to loss shape
+    """
+    snr = ((1 - sigma) ** 2) / (sigma ** 2 + 1e-8)
+    return snr.clamp(max=gamma)
+
+
+def multi_resolution_spectral_loss(predicted, target, window_sizes=(4, 16, 64), hf_weight=2.0):
+    """Multi-resolution STFT loss in DAC latent space.
+
+    Computes L1 magnitude + log-magnitude loss at multiple STFT resolutions,
+    with extra weight on high-frequency bins.
+
+    DAC latents are [B, C, T] where C=128 channels at 50fps. STFT is computed
+    per-channel along the time axis.
+
+    Args:
+        predicted: [B, C, T] predicted latents
+        target: [B, C, T] target latents
+        window_sizes: STFT n_fft sizes to use
+        hf_weight: multiplier for upper-half frequency bins
+
+    Returns:
+        scalar loss
+    """
+    B, C, T = predicted.shape
+    # Flatten batch and channel for per-channel STFT: [B*C, T]
+    pred_flat = predicted.reshape(B * C, T)
+    tgt_flat = target.reshape(B * C, T)
+
+    total = torch.tensor(0.0, device=predicted.device, dtype=predicted.dtype)
+    for ws in window_sizes:
+        if T < ws:
+            continue  # skip if latent sequence too short for this window
+
+        pred_stft = torch.stft(
+            pred_flat, n_fft=ws, hop_length=max(ws // 4, 1),
+            win_length=ws, return_complex=True,
+            window=torch.hann_window(ws, device=predicted.device, dtype=predicted.dtype),
+        )
+        tgt_stft = torch.stft(
+            tgt_flat, n_fft=ws, hop_length=max(ws // 4, 1),
+            win_length=ws, return_complex=True,
+            window=torch.hann_window(ws, device=target.device, dtype=target.dtype),
+        )
+
+        mag_pred = pred_stft.abs()
+        mag_tgt = tgt_stft.abs()
+
+        # L1 magnitude loss
+        convergence = F.l1_loss(mag_pred, mag_tgt)
+
+        # Log-magnitude loss (perceptual)
+        log_loss = F.l1_loss(torch.log1p(mag_pred), torch.log1p(mag_tgt))
+
+        # HF emphasis: weight upper half of frequency bins
+        n_bins = mag_pred.shape[-2]
+        hf_mask = torch.zeros_like(mag_pred)
+        hf_mask[..., n_bins // 2:, :] = hf_weight
+        hf_loss = F.l1_loss(mag_pred * hf_mask, mag_tgt * hf_mask)
+
+        total = total + convergence + log_loss + 0.5 * hf_loss
+
+    n_valid = sum(1 for ws in window_sizes if T >= ws)
+    if n_valid > 0:
+        total = total / n_valid
+
+    return total
+
+
 # -- Loss computation --------------------------------------------------------
 
 def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dtype,

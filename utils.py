@@ -122,6 +122,60 @@ def prepare_latents_with_generator(scheduler, batch_size, num_channels_latents, 
     return latents
 
 
+def _find_start_step(sigmas, strength):
+    """Map a2a strength to the correct starting step via sigma lookup.
+
+    Instead of the naive `steps - int(steps * strength)` which maps linearly
+    to step indices, this finds the step whose sigma is closest to the target.
+    With non-linear sigma schedules (sd3 shift, flux shift) the difference
+    is significant — linear mapping over- or under-noises by up to 15%.
+    """
+    sigma_target = strength
+    # sigmas are in decreasing order (1.0 → 0.0)
+    # Find first index where sigma <= target (that's where we start denoising)
+    for i in range(len(sigmas)):
+        if sigmas[i] <= sigma_target:
+            return i, sigma_target
+    return len(sigmas) - 1, sigma_target
+
+
+def _blend_reference_noise(gaussian_noise, init_latents, noise_blend):
+    """Blend reference audio structure into the initial noise.
+
+    Preserves temporal dynamics (rhythm, timing, envelope) from the reference
+    while keeping the noise statistically valid for the diffusion process.
+    """
+    if noise_blend <= 0:
+        return gaussian_noise
+    # Normalize reference to unit Gaussian per channel
+    ref_mean = init_latents.mean(dim=-1, keepdim=True)
+    ref_residual = init_latents - ref_mean
+    ref_std = ref_residual.std(dim=-1, keepdim=True).clamp(min=1e-6)
+    ref_noise = ref_residual / ref_std
+    # Blend and renormalize to preserve unit variance
+    blended = (1 - noise_blend) * gaussian_noise + noise_blend * ref_noise
+    blend_std = blended.std(dim=-1, keepdim=True).clamp(min=1e-6)
+    return blended / blend_std
+
+
+def encode_audio_to_latents(audio_waveform, dac_model, device):
+    """Encode raw audio waveform to DAC latent space.
+
+    Args:
+        audio_waveform: [B, 1, samples] tensor at 48kHz
+        dac_model: DAC model in continuous mode
+        device: target device
+
+    Returns:
+        Latent tensor [B, 128, T] (deterministic via distribution mode)
+    """
+    with torch.no_grad():
+        dac_weight = next(dac_model.parameters())
+        waveform = audio_waveform.to(device=dac_weight.device, dtype=torch.float32)
+        z_dist, _, _, _, _ = dac_model.encode(waveform)
+        return z_dist.mode()  # deterministic: returns mean of distribution
+
+
 # Denoise keeps fast CFG path; we optimize memory elsewhere (ping-pong + precision + no extra repeats)
 def denoise_process_with_generator(
     visual_feats,
@@ -134,6 +188,13 @@ def denoise_process_with_generator(
     batch_size,
     sampler,
     generator=None,
+    init_latents=None,
+    strength=1.0,
+    noise_blend=0.0,
+    init_noise=None,
+    inpaint_mask=None,
+    inpaint_original=None,
+    inpaint_noise=None,
 ):
     """
     An adaptation of the original denoise_process that accepts a torch.Generator for seeding,
@@ -148,14 +209,32 @@ def denoise_process_with_generator(
         solver=sampler
     )
     scheduler.set_timesteps(num_inference_steps, device=device)
-    timesteps = scheduler.timesteps
 
-    latents = prepare_latents_with_generator(
-        scheduler, batch_size=batch_size,
-        num_channels_latents=cfg.model_config.model_kwargs.audio_vae_latent_dim,
-        length=audio_len_in_s * cfg.model_config.model_kwargs.audio_frame_rate,
-        dtype=target_dtype, device=device, generator=generator
-    )
+    if init_latents is not None and strength < 1.0:
+        # Audio2Audio: sigma-based strength mapping
+        start_step, sigma_target = _find_start_step(scheduler.sigmas, strength)
+        timesteps = scheduler.timesteps[start_step:]
+
+        # Build noise — optionally blend reference temporal structure
+        if init_noise is not None:
+            noise = init_noise.to(device=device, dtype=target_dtype)
+        else:
+            noise = randn_tensor(
+                init_latents.shape, device=device, dtype=target_dtype, generator=generator
+            )
+            noise = _blend_reference_noise(noise, init_latents.to(device=device, dtype=target_dtype), noise_blend)
+
+        # Flow matching: x_t = sigma * noise + (1 - sigma) * data
+        latents = sigma_target * noise + (1 - sigma_target) * init_latents.to(device=device, dtype=target_dtype)
+        latents = latents.repeat(batch_size, 1, 1) if latents.shape[0] == 1 else latents
+    else:
+        timesteps = scheduler.timesteps
+        latents = prepare_latents_with_generator(
+            scheduler, batch_size=batch_size,
+            num_channels_latents=cfg.model_config.model_kwargs.audio_vae_latent_dim,
+            length=audio_len_in_s * cfg.model_config.model_kwargs.audio_frame_rate,
+            dtype=target_dtype, device=device, generator=generator
+        )
 
     # Precompute CFG-invariant feature tensors once outside the loop to reduce allocator churn
     siglip2_feat_rep = visual_feats['siglip2_feat'].repeat(batch_size, 1, 1)
@@ -247,6 +326,23 @@ def denoise_process_with_generator(
 
             # Scheduler step
             latents = scheduler.step(noise_pred, t, latents)[0]
+
+            # Inpainting: replace known regions with properly noised original.
+            # Only apply after complete solver steps — for multi-order solvers
+            # (heun-2, kutta-4), skip inner/predictor sub-steps where the scheduler
+            # hasn't finished its full update cycle.
+            if inpaint_mask is not None and inpaint_original is not None and scheduler.state_in_first_order:
+                # After a complete step, _step_index was incremented.
+                # sigmas[_step_index] is the sigma the sample has been denoised to.
+                if scheduler._step_index < len(scheduler.sigmas):
+                    sigma_current = scheduler.sigmas[scheduler._step_index]
+                else:
+                    sigma_current = 0.0
+                original_noised = sigma_current * inpaint_noise + (1 - sigma_current) * inpaint_original
+                # mask: 1.0 = regenerate (model output), 0.0 = keep original
+                mask_expanded = inpaint_mask.to(device=latents.device, dtype=latents.dtype)
+                latents = latents * mask_expanded + original_noised * (1 - mask_expanded)
+
             pbar.update(1)
 
     # Decode latents to audio waveform
@@ -453,6 +549,9 @@ def chunked_denoise_process(
     batch_size,
     sampler,
     generator=None,
+    init_latents=None,
+    strength=1.0,
+    noise_blend=0.0,
 ):
     """Chunked denoising with overlap stitching for long-form generation.
 
@@ -484,7 +583,6 @@ def chunked_denoise_process(
         t_start, t_end = chunks[0]
         chunk_feats = slice_features_for_chunk(features, t_start, t_end)
         chunk_dur = t_end - t_start
-        # Map to keys expected by denoise_process_with_generator
         visual = {
             "siglip2_feat": chunk_feats["clip_feat"].to(device),
             "syncformer_feat": chunk_feats["sync_feat"].to(device),
@@ -493,9 +591,16 @@ def chunked_denoise_process(
             "text_feat": chunk_feats["text_feat"].to(device),
             "uncond_text_feat": chunk_feats["uncond_text_feat"].to(device),
         }
+        # Slice init_latents for this chunk if provided
+        chunk_init = None
+        if init_latents is not None:
+            frame_start = int(t_start * audio_frame_rate)
+            frame_end = int(t_end * audio_frame_rate)
+            chunk_init = init_latents[:, :, frame_start:frame_end]
         return denoise_process_with_generator(
             visual, text, chunk_dur, model_dict, cfg,
-            guidance_scale, num_inference_steps, batch_size, sampler, generator
+            guidance_scale, num_inference_steps, batch_size, sampler, generator,
+            init_latents=chunk_init, strength=strength, noise_blend=noise_blend,
         )
 
     # --- Multi-chunk: set up per-chunk schedulers and latents ---
@@ -517,19 +622,48 @@ def chunked_denoise_process(
     chunk_visual_feats = []
     chunk_text_feats = []
 
+    # For a2a: generate one continuous noise tensor so overlap regions share
+    # the same noise across adjacent chunks. Without this, each chunk gets
+    # independent noise in the overlap, breaking crossfade/SaFa coherence.
+    shared_noise = None
+    a2a_start_step = None
+    a2a_sigma = None
+    if init_latents is not None and strength < 1.0:
+        full_latent_len = init_latents.shape[-1]
+        shared_noise = randn_tensor(
+            (1, latent_dim, full_latent_len), device=device, dtype=target_dtype, generator=generator
+        )
+        shared_noise = _blend_reference_noise(
+            shared_noise, init_latents.to(device=device, dtype=target_dtype), noise_blend
+        )
+        a2a_start_step, a2a_sigma = _find_start_step(chunk_schedulers[0].sigmas, strength)
+
     for c_idx, (t_start, t_end) in enumerate(chunks):
         chunk_dur = t_end - t_start
         latent_len = int(chunk_dur * audio_frame_rate)
 
-        latent = prepare_latents_with_generator(
-            chunk_schedulers[c_idx], batch_size, latent_dim, latent_len,
-            target_dtype, device, generator
-        )
+        if shared_noise is not None:
+            frame_start = int(t_start * audio_frame_rate)
+            frame_end = int(t_end * audio_frame_rate)
+            chunk_init = init_latents[:, :, frame_start:frame_end].to(device=device, dtype=target_dtype)
+            chunk_noise = shared_noise[:, :, frame_start:frame_end]
+
+            latent = a2a_sigma * chunk_noise + (1 - a2a_sigma) * chunk_init
+            latent = latent.repeat(batch_size, 1, 1) if latent.shape[0] == 1 else latent
+        else:
+            latent = prepare_latents_with_generator(
+                chunk_schedulers[c_idx], batch_size, latent_dim, latent_len,
+                target_dtype, device, generator
+            )
         chunk_latents.append(latent)
 
         c_feats = slice_features_for_chunk(features, t_start, t_end)
         chunk_visual_feats.append({k: c_feats[k].to(device) for k in ["clip_feat", "sync_feat"]})
         chunk_text_feats.append({k: c_feats[k].to(device) for k in ["text_feat", "uncond_text_feat"]})
+
+    # Truncate timesteps if using audio2audio
+    if a2a_start_step is not None:
+        timesteps = timesteps[a2a_start_step:]
 
     # --- Precompute per-chunk CFG features ---
     chunk_cfg_inputs = []

@@ -5,7 +5,9 @@ import hashlib
 import weakref
 import gc
 import torch
+import torchaudio
 import torch.nn as nn
+import torch.nn.functional as F
 from inspect import cleandoc
 from loguru import logger
 from torchvision.transforms import v2
@@ -91,6 +93,7 @@ from .utils import (
     feature_process_from_tensors,
     compute_chunk_boundaries,
     chunked_denoise_process,
+    encode_audio_to_latents,
     _wrap_fp8_inplace,
     _detect_ckpt_fp8,
     _detect_ckpt_major_precision,
@@ -291,6 +294,14 @@ class FoleyTuneChunkedSampler:
                 "force_offload": ("BOOLEAN", {"default": True}),
             },
             "optional": {
+                "init_audio": ("AUDIO", {"tooltip": "Reference audio for audio2audio. Connect to use img2img-style generation."}),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                             "tooltip": "1.0=full generation from noise, 0.0=keep original. "
+                                        "Uses sigma-based mapping for smooth control across the full range."}),
+                "noise_blend": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                                 "tooltip": "Blend reference audio dynamics into the initial noise. "
+                                            "0.0=pure gaussian, 1.0=preserves temporal rhythm from reference. "
+                                            "Try 0.3-0.5 to keep timing while regenerating timbre."}),
                 "torch_compile_cfg": ("FOLEYTUNE_COMPILE_CFG",),
                 "block_swap_args": ("FOLEYTUNE_BLOCKSWAP",),
             }
@@ -315,6 +326,9 @@ class FoleyTuneChunkedSampler:
         overlap_seconds,
         crossfade_mode,
         force_offload,
+        init_audio=None,
+        denoise=1.0,
+        noise_blend=0.0,
         torch_compile_cfg=None,
         block_swap_args=None,
     ):
@@ -368,6 +382,33 @@ class FoleyTuneChunkedSampler:
         # Ensure DAC is on GPU
         hunyuan_deps["dac_model"].to(device=device, dtype=torch.float32)
 
+        # Encode init audio to DAC latents if provided
+        init_latents = None
+        if init_audio is not None and denoise >= 1.0:
+            logger.info("Audio2Audio: denoise=1.0 means init_audio is ignored (full generation from noise)")
+        if init_audio is not None and denoise < 1.0:
+            init_waveform = init_audio["waveform"]
+            init_sr = init_audio["sample_rate"]
+            # Ensure mono [B, 1, samples]
+            if init_waveform.dim() == 2:
+                init_waveform = init_waveform.unsqueeze(0)
+            if init_waveform.shape[1] > 1:
+                init_waveform = init_waveform[:, :1, :]  # take first channel
+            if init_sr != 48000:
+                init_waveform = torchaudio.functional.resample(init_waveform, init_sr, 48000)
+            init_latents = encode_audio_to_latents(init_waveform, hunyuan_deps["dac_model"], device)
+            # Ensure init_latents match expected duration
+            audio_frame_rate = hunyuan_cfg.model_config.model_kwargs.audio_frame_rate
+            expected_frames = int(duration * audio_frame_rate)
+            if init_latents.shape[-1] != expected_frames:
+                logger.warning(f"Audio2Audio: init_audio latent length {init_latents.shape[-1]} != "
+                               f"expected {expected_frames} frames. Padding/trimming to match.")
+                if init_latents.shape[-1] < expected_frames:
+                    init_latents = F.pad(init_latents, (0, expected_frames - init_latents.shape[-1]))
+                else:
+                    init_latents = init_latents[:, :, :expected_frames]
+            logger.info(f"Audio2Audio: encoded init_audio to latents {init_latents.shape}, denoise={denoise}")
+
         # Run chunked denoising
         decoded_waveform, sample_rate = chunked_denoise_process(
             features=features,
@@ -381,6 +422,9 @@ class FoleyTuneChunkedSampler:
             batch_size=batch_size,
             sampler=sampler,
             generator=rng,
+            init_latents=init_latents,
+            strength=denoise,
+            noise_blend=noise_blend,
         )
 
         waveform_batch = decoded_waveform.float().cpu()
@@ -667,6 +711,330 @@ class FoleyTuneSelectAudioFromBatch:
         return (audio_output,)
 
 # -----------------------------------------------------------------------------------
+# NODE: FoleyTune Inpainter — regenerate a time region of existing audio
+# -----------------------------------------------------------------------------------
+
+class FoleyTuneInpainter:
+    """Regenerate a time region of existing audio while keeping the rest.
+
+    Encodes init_audio through DAC, builds a soft mask from start/end seconds,
+    runs denoising with per-step replacement of known regions.
+    """
+
+    SAMPLER_NAMES = ["euler", "heun-2", "midpoint-2", "kutta-4"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "hunyuan_model": ("FOLEYTUNE_MODEL",),
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
+                "features": ("FOLEYTUNE_FEATURES",),
+                "init_audio": ("AUDIO",),
+                "start_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 60.0, "step": 0.1,
+                                   "tooltip": "Start of region to regenerate (seconds)."}),
+                "end_seconds": ("FLOAT", {"default": 2.0, "min": 0.1, "max": 60.0, "step": 0.1,
+                                 "tooltip": "End of region to regenerate (seconds)."}),
+                "cfg_scale": ("FLOAT", {"default": 4.5, "min": 1.0, "max": 10.0, "step": 0.1}),
+                "steps": ("INT", {"default": 50, "min": 10, "max": 100, "step": 1}),
+                "sampler": (cls.SAMPLER_NAMES, {"default": "euler"}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "fade_frames": ("INT", {"default": 4, "min": 0, "max": 20, "step": 1,
+                                 "tooltip": "Soft mask edge width in latent frames (~20ms each). Prevents DAC boundary clicks."}),
+                "denoise": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 1.0, "step": 0.01,
+                             "tooltip": "Regeneration strength in masked region. 1.0=fully regenerate, "
+                                        "lower values preserve more of the original structure."}),
+                "force_offload": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "torch_compile_cfg": ("FOLEYTUNE_COMPILE_CFG",),
+                "block_swap_args": ("FOLEYTUNE_BLOCKSWAP",),
+            }
+        }
+
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("audio",)
+    FUNCTION = "inpaint"
+    CATEGORY = "FoleyTune"
+    DESCRIPTION = (
+        "Regenerate a specific time region of existing audio while keeping the rest intact. "
+        "Specify start/end seconds for the region to regenerate. Uses per-step latent replacement "
+        "with soft mask edges to prevent boundary artifacts."
+    )
+
+    def inpaint(
+        self,
+        hunyuan_model,
+        hunyuan_deps,
+        features,
+        init_audio,
+        start_seconds,
+        end_seconds,
+        cfg_scale,
+        steps,
+        sampler,
+        seed,
+        fade_frames,
+        denoise,
+        force_offload,
+        torch_compile_cfg=None,
+        block_swap_args=None,
+    ):
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "configs", "hunyuanvideo-foley-xxl.yaml")
+        hunyuan_cfg = load_yaml(config_path)
+
+        rng = torch.Generator(device="cpu").manual_seed(seed)
+        audio_frame_rate = hunyuan_cfg.model_config.model_kwargs.audio_frame_rate
+        duration = features["duration"]
+
+        if start_seconds >= end_seconds:
+            raise ValueError(f"start_seconds ({start_seconds}) must be less than end_seconds ({end_seconds})")
+
+        # Encode init audio
+        init_waveform = init_audio["waveform"]
+        init_sr = init_audio["sample_rate"]
+        if init_waveform.dim() == 2:
+            init_waveform = init_waveform.unsqueeze(0)
+        if init_waveform.shape[1] > 1:
+            init_waveform = init_waveform[:, :1, :]
+        if init_sr != 48000:
+            init_waveform = torchaudio.functional.resample(init_waveform, init_sr, 48000)
+
+        # Apply torch.compile if configured
+        if torch_compile_cfg is not None and not getattr(hunyuan_model, "_blocks_are_compiled", False):
+            try:
+                hunyuan_model = FoleyTuneTorchCompile._apply_torch_compile(
+                    hunyuan_model, torch_compile_cfg
+                )
+            except Exception as e:
+                logger.error(f"TorchCompile failed: {e}")
+
+        # Place model
+        if block_swap_args is not None:
+            hunyuan_model.block_swap(
+                blocks_to_swap=block_swap_args.get("blocks_to_swap", 0),
+                use_non_blocking=block_swap_args.get("use_non_blocking", False),
+                prefetch_blocks=block_swap_args.get("prefetch_blocks", 0),
+                block_swap_debug=block_swap_args.get("block_swap_debug", False),
+            )
+        else:
+            hunyuan_model.to(device)
+
+        model_dict = AttributeDict(dict(hunyuan_deps))
+        model_dict["foley_model"] = hunyuan_model
+        model_dict["device"] = device
+        hunyuan_deps["dac_model"].to(device=device, dtype=torch.float32)
+
+        # DAC encode
+        init_latents = encode_audio_to_latents(init_waveform, hunyuan_deps["dac_model"], device)
+        target_dtype = hunyuan_model.dtype
+        init_latents = init_latents.to(dtype=target_dtype)
+
+        # Ensure latent length matches what the denoiser will create
+        expected_frames = int(duration * audio_frame_rate)
+        if init_latents.shape[-1] != expected_frames:
+            logger.warning(f"Inpainting: DAC latent length {init_latents.shape[-1]} != "
+                           f"expected {expected_frames}. Adjusting.")
+            if init_latents.shape[-1] < expected_frames:
+                init_latents = F.pad(init_latents, (0, expected_frames - init_latents.shape[-1]))
+            else:
+                init_latents = init_latents[:, :, :expected_frames]
+        T_latent = init_latents.shape[-1]
+
+        # Build inpaint mask [1, 1, T] — 1.0 = regenerate, 0.0 = keep
+        frame_start = max(0, int(start_seconds * audio_frame_rate))
+        frame_end = min(T_latent, int(end_seconds * audio_frame_rate))
+        mask = torch.zeros(1, 1, T_latent, device=device, dtype=target_dtype)
+        mask[:, :, frame_start:frame_end] = 1.0
+
+        # Apply soft edges
+        if fade_frames > 0:
+            # Left edge
+            fade_start = max(0, frame_start - fade_frames)
+            for i in range(fade_start, frame_start):
+                alpha = (i - fade_start + 1) / (fade_frames + 1)
+                mask[:, :, i] = alpha
+            # Right edge
+            fade_end = min(T_latent, frame_end + fade_frames)
+            for i in range(frame_end, fade_end):
+                alpha = 1.0 - (i - frame_end + 1) / (fade_frames + 1)
+                mask[:, :, i] = alpha
+
+        logger.info(f"Inpainting: [{start_seconds:.1f}s, {end_seconds:.1f}s] -> "
+                     f"frames [{frame_start}, {frame_end}] / {T_latent}, "
+                     f"fade={fade_frames} frames")
+
+        # Guard: model trained on ~8s chunks, inpainting works on full duration
+        if duration > 16.0:
+            logger.warning(f"Inpainting on {duration:.1f}s audio — quality may degrade beyond ~8s. "
+                           "Consider trimming or using chunked generation instead.")
+
+        # Generate noise for inpainting (consistent across steps)
+        from diffusers.utils.torch_utils import randn_tensor
+        inpaint_noise = randn_tensor(
+            init_latents.shape, device=device, dtype=target_dtype, generator=rng
+        )
+
+        # Prepare features
+        visual = {
+            "siglip2_feat": features["clip_feat"].to(device),
+            "syncformer_feat": features["sync_feat"].to(device),
+        }
+        text = {
+            "text_feat": features["text_feat"].to(device),
+            "uncond_text_feat": features["uncond_text_feat"].to(device),
+        }
+
+        # Run denoising with inpainting + optional partial regeneration
+        audio, sample_rate = denoise_process_with_generator(
+            visual, text, duration, model_dict, hunyuan_cfg,
+            cfg_scale, steps, 1, sampler, rng,
+            init_latents=init_latents,
+            strength=denoise,
+            inpaint_mask=mask,
+            inpaint_original=init_latents,
+            inpaint_noise=inpaint_noise,
+        )
+
+        if force_offload:
+            hunyuan_model.to(offload_device)
+            hunyuan_deps["dac_model"].to(offload_device)
+            mm.soft_empty_cache()
+
+        audio_out = {"waveform": audio.float().cpu(), "sample_rate": sample_rate}
+        return (audio_out,)
+
+# -----------------------------------------------------------------------------------
+# NODE: FoleyTune Feature Blender — mix conditioning from two videos
+# -----------------------------------------------------------------------------------
+
+class FoleyTuneFeatureBlender:
+    """Blend features from two FOLEYTUNE_FEATURES dicts for conditioning mixing.
+
+    Interpolates CLIP, sync, and text features between two sources.
+    Useful for blending visual guidance from different videos.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "features_a": ("FOLEYTUNE_FEATURES",),
+                "features_b": ("FOLEYTUNE_FEATURES",),
+                "blend": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
+                           "tooltip": "0.0=100% A, 1.0=100% B. Interpolates all feature tensors."}),
+            },
+        }
+
+    RETURN_TYPES = ("FOLEYTUNE_FEATURES",)
+    RETURN_NAMES = ("features",)
+    FUNCTION = "blend_features"
+    CATEGORY = "FoleyTune"
+    DESCRIPTION = (
+        "Blend conditioning features from two videos. "
+        "Useful for mixing visual guidance from different sources."
+    )
+
+    def blend_features(self, features_a, features_b, blend):
+        result = {}
+        for key in ("clip_feat", "sync_feat", "text_feat", "uncond_text_feat"):
+            a = features_a[key]
+            b = features_b[key]
+            min_len = min(a.shape[1], b.shape[1])
+            a = a[:, :min_len, :]
+            b = b[:, :min_len, :]
+            result[key] = (1 - blend) * a + blend * b
+        result["duration"] = min(features_a["duration"], features_b["duration"])
+        return (result,)
+
+# -----------------------------------------------------------------------------------
+# NODE: FoleyTune Style Transfer — latent AdaIN between audio
+# -----------------------------------------------------------------------------------
+
+class FoleyTuneStyleTransfer:
+    """Transfer audio style (timbre, room tone) from one audio to another via latent AdaIN.
+
+    Encodes both content and style audio through DAC, transfers channel-wise
+    mean and std from style to content in latent space, then decodes.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "content_audio": ("AUDIO", {"tooltip": "Audio whose structure/timing to keep."}),
+                "style_audio": ("AUDIO", {"tooltip": "Audio whose tonal quality/timbre to transfer."}),
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
+                "strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
+                              "tooltip": "Style transfer strength. 0.0=no change, 1.0=full style transfer."}),
+            },
+        }
+
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("audio",)
+    FUNCTION = "transfer_style"
+    CATEGORY = "FoleyTune"
+    DESCRIPTION = (
+        "Transfer tonal characteristics from style_audio to content_audio "
+        "using Adaptive Instance Normalization (AdaIN) in DAC latent space."
+    )
+
+    def transfer_style(self, content_audio, style_audio, hunyuan_deps, strength):
+        device = mm.get_torch_device()
+        dac = hunyuan_deps["dac_model"]
+        dac.to(device=device, dtype=torch.float32)
+
+        def _prep_wav(audio_dict):
+            wav = audio_dict["waveform"]
+            sr = audio_dict["sample_rate"]
+            if wav.dim() == 2:
+                wav = wav.unsqueeze(0)
+            if wav.shape[1] > 1:
+                wav = wav[:, :1, :]
+            if sr != 48000:
+                wav = torchaudio.functional.resample(wav, sr, 48000)
+            return wav
+
+        content_wav = _prep_wav(content_audio)
+        style_wav = _prep_wav(style_audio)
+
+        z_content = encode_audio_to_latents(content_wav, dac, device)
+        z_style = encode_audio_to_latents(style_wav, dac, device)
+
+        # AdaIN: normalize content, apply style statistics
+        content_mean = z_content.mean(dim=-1, keepdim=True)
+        content_std = z_content.std(dim=-1, keepdim=True) + 1e-6
+        style_mean = z_style.mean(dim=-1, keepdim=True)
+        style_std = z_style.std(dim=-1, keepdim=True) + 1e-6
+
+        z_normalized = (z_content - content_mean) / content_std
+        z_styled = z_normalized * style_std + style_mean
+
+        # Blend with original based on strength
+        z_out = (1 - strength) * z_content + strength * z_styled
+
+        # Decode
+        with torch.inference_mode():
+            dac_weight = next(dac.parameters())
+            audio = dac.decode(z_out.to(device=dac_weight.device, dtype=dac_weight.dtype))
+
+        # DAC always outputs at 48kHz — trim to content length
+        content_samples = content_wav.shape[-1]
+        audio = audio[:, :, :content_samples]
+
+        # Offload DAC to free VRAM
+        offload_device = mm.unet_offload_device()
+        dac.to(offload_device)
+        mm.soft_empty_cache()
+
+        audio_out = {"waveform": audio.float().cpu(), "sample_rate": 48000}
+        return (audio_out,)
+
+# -----------------------------------------------------------------------------------
 # NODE MAPPINGS - This is how ComfyUI discovers the nodes.
 # -----------------------------------------------------------------------------------
 NODE_CLASS_MAPPINGS = {
@@ -677,6 +1045,9 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneTorchCompile": FoleyTuneTorchCompile,
     "FoleyTuneBlockSwap": FoleyTuneBlockSwap,
     "FoleyTuneSelectAudioFromBatch": FoleyTuneSelectAudioFromBatch,
+    "FoleyTuneInpainter": FoleyTuneInpainter,
+    "FoleyTuneFeatureBlender": FoleyTuneFeatureBlender,
+    "FoleyTuneStyleTransfer": FoleyTuneStyleTransfer,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneModelLoader": "FoleyTune Model Loader",
@@ -686,4 +1057,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneTorchCompile": "FoleyTune Torch Compile",
     "FoleyTuneBlockSwap": "FoleyTune BlockSwap Settings",
     "FoleyTuneSelectAudioFromBatch": "FoleyTune Select Audio From Batch",
+    "FoleyTuneInpainter": "FoleyTune Inpainter",
+    "FoleyTuneFeatureBlender": "FoleyTune Feature Blender",
+    "FoleyTuneStyleTransfer": "FoleyTune Style Transfer",
 }

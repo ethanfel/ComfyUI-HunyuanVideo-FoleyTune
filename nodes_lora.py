@@ -1317,7 +1317,30 @@ class FoleyTuneLoRATrainer:
 # --- Node 3: LoRA Loader ----------------------------------------------------
 
 class FoleyTuneLoRALoader:
-    """Load a trained LoRA adapter into a FoleyTune model for inference."""
+    """Load a FoleyTune LoRA from the ComfyUI loras folder."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "hunyuan_model": ("FOLEYTUNE_MODEL",),
+                "lora_name": (folder_paths.get_filename_list("loras"),),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+            }
+        }
+
+    RETURN_TYPES = ("FOLEYTUNE_MODEL", "STRING")
+    RETURN_NAMES = ("model", "prompts")
+    FUNCTION = "load_adapter"
+    CATEGORY = "FoleyTune"
+
+    def load_adapter(self, hunyuan_model, lora_name, strength):
+        adapter_path = folder_paths.get_full_path_or_raise("loras", lora_name)
+        return FoleyTuneLoRALoaderPath._load(hunyuan_model, adapter_path, strength)
+
+
+class FoleyTuneLoRALoaderPath:
+    """Load a FoleyTune LoRA from an absolute path (for training/development)."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1337,7 +1360,10 @@ class FoleyTuneLoRALoader:
     def load_adapter(self, hunyuan_model, adapter_path, strength):
         if not adapter_path or not os.path.exists(adapter_path):
             raise FileNotFoundError(f"Adapter not found: {adapter_path}")
+        return self._load(hunyuan_model, adapter_path, strength)
 
+    @staticmethod
+    def _load(hunyuan_model, adapter_path, strength):
         ckpt = _load_adapter_checkpoint(adapter_path)
 
         # Handle both raw state_dict and wrapped checkpoint formats
@@ -2342,6 +2368,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneBatchFeatureExtractor": FoleyTuneBatchFeatureExtractor,
     "FoleyTuneLoRATrainer": FoleyTuneLoRATrainer,
     "FoleyTuneLoRALoader": FoleyTuneLoRALoader,
+    "FoleyTuneLoRALoaderPath": FoleyTuneLoRALoaderPath,
     "FoleyTuneLoRAScheduler": FoleyTuneLoRAScheduler,
     "FoleyTuneLoRAEvaluator": FoleyTuneLoRAEvaluator,
     "FoleyTuneVAERoundtrip": FoleyTuneVAERoundtrip,
@@ -2353,6 +2380,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneBatchFeatureExtractor": "FoleyTune Batch Feature Extractor",
     "FoleyTuneLoRATrainer": "FoleyTune LoRA Trainer",
     "FoleyTuneLoRALoader": "FoleyTune LoRA Loader",
+    "FoleyTuneLoRALoaderPath": "FoleyTune LoRA Loader (Path)",
     "FoleyTuneLoRAScheduler": "FoleyTune LoRA Scheduler",
     "FoleyTuneLoRAEvaluator": "FoleyTune LoRA Evaluator",
     "FoleyTuneVAERoundtrip": "FoleyTune VAE Roundtrip",

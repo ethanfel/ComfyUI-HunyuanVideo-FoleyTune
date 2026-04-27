@@ -283,27 +283,14 @@ class FoleyTuneChunkedSampler:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "steps": ("INT", {"default": 50, "min": 10, "max": 100, "step": 1}),
                 "cfg_scale": ("FLOAT", {"default": 4.5, "min": 1.0, "max": 10.0, "step": 0.1}),
-                "sampler": (cls.SAMPLER_NAMES, {"default": "euler"}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 6, "step": 1}),
-                "chunk_duration": ("FLOAT", {"default": 8.0, "min": 1.0, "max": 15.0, "step": 0.1,
-                                    "tooltip": "Duration of each chunk in seconds. 8s matches training length."}),
-                "overlap_seconds": ("FLOAT", {"default": 1.6, "min": 0.0, "max": 5.0, "step": 0.1,
-                                     "tooltip": "Overlap between chunks in seconds. 1.6s = 20% of 8s chunk."}),
-                "crossfade_mode": (cls.CROSSFADE_MODES, {"default": "safa",
-                                    "tooltip": "safa: binary swap during denoising (best). latent: blend before DAC. waveform: blend after DAC."}),
                 "force_offload": ("BOOLEAN", {"default": True}),
             },
             "optional": {
+                "sampler_options": ("FOLEYTUNE_SAMPLER_OPTIONS",),
                 "init_audio": ("AUDIO", {"tooltip": "Reference audio for audio2audio. Connect to use img2img-style generation."}),
                 "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
                              "tooltip": "1.0=full generation from noise, 0.0=keep original. "
                                         "Uses sigma-based mapping for smooth control across the full range."}),
-                "noise_blend": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                                 "tooltip": "Blend reference audio dynamics into the initial noise. "
-                                            "0.0=pure gaussian, 1.0=preserves temporal rhythm from reference. "
-                                            "Try 0.3-0.5 to keep timing while regenerating timbre."}),
-                "torch_compile_cfg": ("FOLEYTUNE_COMPILE_CFG",),
-                "block_swap_args": ("FOLEYTUNE_BLOCKSWAP",),
             }
         }
 
@@ -320,18 +307,21 @@ class FoleyTuneChunkedSampler:
         seed,
         steps,
         cfg_scale,
-        sampler,
-        batch_size,
-        chunk_duration,
-        overlap_seconds,
-        crossfade_mode,
         force_offload,
+        sampler_options=None,
         init_audio=None,
         denoise=1.0,
-        noise_blend=0.0,
-        torch_compile_cfg=None,
-        block_swap_args=None,
     ):
+        opts = sampler_options or {}
+        sampler = opts.get("sampler", "euler")
+        batch_size = opts.get("batch_size", 1)
+        chunk_duration = opts.get("chunk_duration", 8.0)
+        overlap_seconds = opts.get("overlap_seconds", 1.6)
+        crossfade_mode = opts.get("crossfade_mode", "safa")
+        noise_blend = opts.get("noise_blend", 0.0)
+        torch_compile_cfg = opts.get("torch_compile_cfg")
+        block_swap_args = opts.get("block_swap_args")
+
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
@@ -1034,6 +1024,56 @@ class FoleyTuneStyleTransfer:
         audio_out = {"waveform": audio.float().cpu(), "sample_rate": 48000}
         return (audio_out,)
 
+class FoleyTuneSamplerOptions:
+    """Optional settings for the FoleyTune Chunked Sampler.
+
+    When not connected, the sampler uses sensible defaults (euler, batch=1,
+    8s chunks, 1.6s overlap, safa crossfade, full denoise, no noise blend).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "sampler": (FoleyTuneChunkedSampler.SAMPLER_NAMES, {"default": "euler"}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 6, "step": 1}),
+                "chunk_duration": ("FLOAT", {"default": 8.0, "min": 1.0, "max": 15.0, "step": 0.1,
+                                    "tooltip": "Duration of each chunk in seconds. 8s matches training length."}),
+                "overlap_seconds": ("FLOAT", {"default": 1.6, "min": 0.0, "max": 5.0, "step": 0.1,
+                                     "tooltip": "Overlap between chunks in seconds. 1.6s = 20% of 8s chunk."}),
+                "crossfade_mode": (FoleyTuneChunkedSampler.CROSSFADE_MODES, {"default": "safa",
+                                    "tooltip": "safa: binary swap during denoising (best). latent: blend before DAC. waveform: blend after DAC."}),
+                "noise_blend": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                                 "tooltip": "Blend reference audio dynamics into the initial noise. "
+                                            "0.0=pure gaussian, 1.0=preserves temporal rhythm from reference. "
+                                            "Try 0.3-0.5 to keep timing while regenerating timbre."}),
+            },
+            "optional": {
+                "torch_compile_cfg": ("FOLEYTUNE_COMPILE_CFG",),
+                "block_swap_args": ("FOLEYTUNE_BLOCKSWAP",),
+            },
+        }
+
+    RETURN_TYPES = ("FOLEYTUNE_SAMPLER_OPTIONS",)
+    RETURN_NAMES = ("sampler_options",)
+    FUNCTION = "build"
+    CATEGORY = "FoleyTune"
+
+    def build(self, sampler, batch_size, chunk_duration, overlap_seconds,
+              crossfade_mode, noise_blend,
+              torch_compile_cfg=None, block_swap_args=None):
+        return ({
+            "sampler": sampler,
+            "batch_size": batch_size,
+            "chunk_duration": chunk_duration,
+            "overlap_seconds": overlap_seconds,
+            "crossfade_mode": crossfade_mode,
+            "noise_blend": noise_blend,
+            "torch_compile_cfg": torch_compile_cfg,
+            "block_swap_args": block_swap_args,
+        },)
+
+
 # -----------------------------------------------------------------------------------
 # NODE MAPPINGS - This is how ComfyUI discovers the nodes.
 # -----------------------------------------------------------------------------------
@@ -1048,6 +1088,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneInpainter": FoleyTuneInpainter,
     "FoleyTuneFeatureBlender": FoleyTuneFeatureBlender,
     "FoleyTuneStyleTransfer": FoleyTuneStyleTransfer,
+    "FoleyTuneSamplerOptions": FoleyTuneSamplerOptions,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneModelLoader": "FoleyTune Model Loader",
@@ -1060,4 +1101,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneInpainter": "FoleyTune Inpainter",
     "FoleyTuneFeatureBlender": "FoleyTune Feature Blender",
     "FoleyTuneStyleTransfer": "FoleyTune Style Transfer",
+    "FoleyTuneSamplerOptions": "FoleyTune Sampler Options",
 }

@@ -1,8 +1,8 @@
 {
   "id": "a3bce590-f31e-4952-96f3-7ffa47c05d09",
   "revision": 0,
-  "last_node_id": 74,
-  "last_link_id": 118,
+  "last_node_id": 80,
+  "last_link_id": 132,
   "nodes": [
     {
       "id": 18,
@@ -128,141 +128,6 @@
       ]
     },
     {
-      "id": 24,
-      "type": "FoleyTuneLoRATrainer",
-      "pos": [
-        2080,
-        608
-      ],
-      "size": [
-        416,
-        992
-      ],
-      "flags": {},
-      "order": 12,
-      "mode": 2,
-      "inputs": [
-        {
-          "name": "hunyuan_model",
-          "type": "FOLEYTUNE_MODEL",
-          "link": 28
-        },
-        {
-          "name": "hunyuan_deps",
-          "type": "FOLEYTUNE_DEPS",
-          "link": 29
-        }
-      ],
-      "outputs": [
-        {
-          "name": "model",
-          "type": "FOLEYTUNE_MODEL",
-          "links": null
-        },
-        {
-          "name": "loss_curve",
-          "type": "IMAGE",
-          "links": null
-        }
-      ],
-      "properties": {
-        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-Foley",
-        "ver": "5f0a2b303bd4ba25011cda963006f00c4a73dac5",
-        "Node name for S&R": "FoleyTuneLoRATrainer",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        "",
-        "",
-        "all_attn_mlp",
-        128,
-        128,
-        0.0001,
-        15000,
-        8,
-        1,
-        100,
-        500,
-        "curriculum",
-        "bf16",
-        267,
-        "randomize",
-        1,
-        0.6,
-        "standard",
-        false,
-        0,
-        1,
-        "constant",
-        0,
-        0,
-        false,
-        "",
-        "",
-        "",
-        false,
-        0,
-        1,
-        "adamw",
-        1,
-        0,
-        0,
-        false,
-        "",
-        ""
-      ]
-    },
-    {
-      "id": 2,
-      "type": "FoleyTuneDependenciesLoader",
-      "pos": [
-        -64,
-        288
-      ],
-      "size": [
-        448,
-        96
-      ],
-      "flags": {},
-      "order": 1,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "FOLEYTUNE_DEPS",
-          "type": "FOLEYTUNE_DEPS",
-          "links": [
-            2,
-            16,
-            29,
-            31,
-            42
-          ]
-        }
-      ],
-      "properties": {
-        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-Foley",
-        "ver": "4a2ba7774ef3863e6e373ae56f0170a5841eb8a9",
-        "Node name for S&R": "FoleyTuneDependenciesLoader",
-        "ue_properties": {
-          "widget_ue_connectable": {
-            "vae_name": true,
-            "synchformer_name": true
-          },
-          "version": "7.8",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        "vae_128d_48k.pth",
-        "synchformer_state_dict.pth"
-      ]
-    },
-    {
       "id": 6,
       "type": "FoleyTuneDatasetLUFSNormalizer",
       "pos": [
@@ -371,7 +236,13 @@
           "link": 80
         }
       ],
-      "outputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
       "properties": {
         "cnr_id": "comfy-core",
         "ver": "0.18.1",
@@ -386,52 +257,6 @@
         null,
         null,
         null
-      ]
-    },
-    {
-      "id": 1,
-      "type": "FoleyTuneModelLoader",
-      "pos": [
-        -64,
-        96
-      ],
-      "size": [
-        448,
-        128
-      ],
-      "flags": {},
-      "order": 2,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "FOLEYTUNE_MODEL",
-          "type": "FOLEYTUNE_MODEL",
-          "links": [
-            28,
-            30,
-            83
-          ]
-        }
-      ],
-      "properties": {
-        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-Foley",
-        "ver": "4a2ba7774ef3863e6e373ae56f0170a5841eb8a9",
-        "Node name for S&R": "FoleyTuneModelLoader",
-        "ue_properties": {
-          "widget_ue_connectable": {
-            "model_name": true,
-            "precision": true,
-            "quantization": true
-          },
-          "version": "7.8",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        "hunyuanvideo_foley.pth",
-        "bf16",
-        "none"
       ]
     },
     {
@@ -504,7 +329,7 @@
           "type": "FOLEYTUNE_DEPS",
           "links": [
             48,
-            64
+            130
           ]
         }
       ],
@@ -530,7 +355,7 @@
         26
       ],
       "flags": {},
-      "order": 16,
+      "order": 15,
       "mode": 0,
       "inputs": [
         {
@@ -568,7 +393,7 @@
         320
       ],
       "flags": {},
-      "order": 3,
+      "order": 1,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -600,7 +425,7 @@
         320
       ],
       "flags": {},
-      "order": 4,
+      "order": 2,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -632,7 +457,7 @@
         320
       ],
       "flags": {},
-      "order": 5,
+      "order": 3,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -781,7 +606,13 @@
           "link": 33
         }
       ],
-      "outputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
       "properties": {
         "cnr_id": "comfy-core",
         "ver": "0.18.1",
@@ -878,7 +709,13 @@
           "link": 34
         }
       ],
-      "outputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
       "properties": {
         "cnr_id": "comfy-core",
         "ver": "0.18.1",
@@ -944,45 +781,6 @@
       ]
     },
     {
-      "id": 54,
-      "type": "PrimitiveString",
-      "pos": [
-        -64,
-        608
-      ],
-      "size": [
-        512,
-        64
-      ],
-      "flags": {},
-      "order": 6,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "STRING",
-          "type": "STRING",
-          "links": [
-            98
-          ]
-        }
-      ],
-      "title": "Input Unfiltered Dataset Folder",
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.18.1",
-        "Node name for S&R": "PrimitiveString",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        "/media/unraid/davinci/Foley/AD/blowjob/mp4_v2"
-      ]
-    },
-    {
       "id": 68,
       "type": "FoleyTuneVideoQualityFilter",
       "pos": [
@@ -994,7 +792,7 @@
         512
       ],
       "flags": {},
-      "order": 15,
+      "order": 16,
       "mode": 2,
       "inputs": [
         {
@@ -1128,168 +926,6 @@
       ]
     },
     {
-      "id": 30,
-      "type": "PrimitiveString",
-      "pos": [
-        -64,
-        480
-      ],
-      "size": [
-        512,
-        64
-      ],
-      "flags": {},
-      "order": 7,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "STRING",
-          "type": "STRING",
-          "links": [
-            37,
-            52
-          ]
-        }
-      ],
-      "title": "Prompt",
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.18.1",
-        "Node name for S&R": "PrimitiveString",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        "blowjob, wet sucking and gagging, rhythmic oral sounds"
-      ]
-    },
-    {
-      "id": 55,
-      "type": "PrimitiveString",
-      "pos": [
-        -64,
-        736
-      ],
-      "size": [
-        512,
-        64
-      ],
-      "flags": {},
-      "order": 8,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "STRING",
-          "type": "STRING",
-          "links": [
-            87
-          ]
-        }
-      ],
-      "title": "Output Filtered Dataset Folder",
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.18.1",
-        "Node name for S&R": "PrimitiveString",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        "/media/unraid/davinci/Foley/AD/blowjob/features_v4"
-      ]
-    },
-    {
-      "id": 37,
-      "type": "FoleyTuneFeatureExtractor",
-      "pos": [
-        2688,
-        1088
-      ],
-      "size": [
-        416,
-        288
-      ],
-      "flags": {},
-      "order": 24,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "hunyuan_deps",
-          "type": "FOLEYTUNE_DEPS",
-          "link": 48
-        },
-        {
-          "name": "image",
-          "type": "IMAGE",
-          "link": 114
-        },
-        {
-          "name": "prompt",
-          "type": "STRING",
-          "widget": {
-            "name": "prompt"
-          },
-          "link": 116
-        },
-        {
-          "name": "frame_rate",
-          "type": "FLOAT",
-          "widget": {
-            "name": "frame_rate"
-          },
-          "link": 45
-        },
-        {
-          "name": "duration",
-          "type": "FLOAT",
-          "widget": {
-            "name": "duration"
-          },
-          "link": 46
-        }
-      ],
-      "outputs": [
-        {
-          "name": "npz_path",
-          "type": "STRING",
-          "links": null
-        },
-        {
-          "name": "features",
-          "type": "FOLEYTUNE_FEATURES",
-          "links": [
-            65
-          ]
-        }
-      ],
-      "properties": {
-        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-Foley",
-        "ver": "5f0a2b303bd4ba25011cda963006f00c4a73dac5",
-        "Node name for S&R": "FoleyTuneFeatureExtractor",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        "blowjob, wet sucking and gagging, rhythmic oral sounds",
-        "",
-        25,
-        8,
-        "",
-        "clip"
-      ]
-    },
-    {
       "id": 33,
       "type": "PreviewAny",
       "pos": [
@@ -1310,7 +946,13 @@
           "link": 101
         }
       ],
-      "outputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
       "properties": {
         "cnr_id": "comfy-core",
         "ver": "0.18.1",
@@ -1328,15 +970,340 @@
       ]
     },
     {
-      "id": 40,
-      "type": "VHS_VideoCombine",
+      "id": 24,
+      "type": "FoleyTuneLoRATrainer",
       "pos": [
-        3168,
-        1120
+        2080,
+        608
       ],
       "size": [
         416,
-        937.5999999999999
+        992
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 2,
+      "inputs": [
+        {
+          "name": "hunyuan_model",
+          "type": "FOLEYTUNE_MODEL",
+          "link": 28
+        },
+        {
+          "name": "hunyuan_deps",
+          "type": "FOLEYTUNE_DEPS",
+          "link": 29
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "FOLEYTUNE_MODEL",
+          "links": null
+        },
+        {
+          "name": "loss_curve",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-Foley",
+        "ver": "5f0a2b303bd4ba25011cda963006f00c4a73dac5",
+        "Node name for S&R": "FoleyTuneLoRATrainer",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        "",
+        "",
+        "all_attn_mlp",
+        128,
+        128,
+        0.0001,
+        15000,
+        8,
+        1,
+        100,
+        500,
+        "curriculum",
+        "bf16",
+        1304,
+        "randomize",
+        1,
+        0.6,
+        "standard",
+        false,
+        0,
+        1,
+        "constant",
+        0,
+        0,
+        false,
+        "",
+        "",
+        "",
+        false,
+        0,
+        1,
+        "adamw",
+        1,
+        0,
+        0,
+        false,
+        "",
+        ""
+      ]
+    },
+    {
+      "id": 2,
+      "type": "FoleyTuneDependenciesLoader",
+      "pos": [
+        -64,
+        288
+      ],
+      "size": [
+        448,
+        96
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "FOLEYTUNE_DEPS",
+          "type": "FOLEYTUNE_DEPS",
+          "links": [
+            2,
+            16,
+            29,
+            31,
+            42
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-Foley",
+        "ver": "4a2ba7774ef3863e6e373ae56f0170a5841eb8a9",
+        "Node name for S&R": "FoleyTuneDependenciesLoader",
+        "ue_properties": {
+          "widget_ue_connectable": {
+            "vae_name": true,
+            "synchformer_name": true
+          },
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "vae_128d_48k.pth",
+        "synchformer_state_dict.pth"
+      ]
+    },
+    {
+      "id": 1,
+      "type": "FoleyTuneModelLoader",
+      "pos": [
+        -64,
+        96
+      ],
+      "size": [
+        448,
+        128
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "FOLEYTUNE_MODEL",
+          "type": "FOLEYTUNE_MODEL",
+          "links": [
+            28,
+            30,
+            124
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-Foley",
+        "ver": "4a2ba7774ef3863e6e373ae56f0170a5841eb8a9",
+        "Node name for S&R": "FoleyTuneModelLoader",
+        "ue_properties": {
+          "widget_ue_connectable": {
+            "model_name": true,
+            "precision": true,
+            "quantization": true
+          },
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "hunyuanvideo_foley.pth",
+        "bf16",
+        "none"
+      ]
+    },
+    {
+      "id": 20,
+      "type": "FoleyTuneLoRAScheduler",
+      "pos": [
+        2112,
+        128
+      ],
+      "size": [
+        384,
+        320
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 2,
+      "inputs": [
+        {
+          "name": "hunyuan_model",
+          "type": "FOLEYTUNE_MODEL",
+          "link": 30
+        },
+        {
+          "name": "hunyuan_deps",
+          "type": "FOLEYTUNE_DEPS",
+          "link": 31
+        }
+      ],
+      "outputs": [
+        {
+          "name": "summary_path",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "comparison_curves",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-Foley",
+        "ver": "4a2ba7774ef3863e6e373ae56f0170a5841eb8a9",
+        "Node name for S&R": "FoleyTuneLoRAScheduler",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        "/media/unraid/davinci/Foley/AD/blowjob/features_v4/sweep_v11.json",
+        "all"
+      ]
+    },
+    {
+      "id": 79,
+      "type": "easy showAnything",
+      "pos": [
+        3264,
+        128
+      ],
+      "size": [
+        352,
+        128
+      ],
+      "flags": {},
+      "order": 21,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "anything",
+          "shape": 7,
+          "type": "*",
+          "link": 128
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "*",
+          "links": null
+        }
+      ],
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {}
+        },
+        "cnr_id": "comfyui-easy-use",
+        "ver": "1.3.6",
+        "Node name for S&R": "easy showAnything"
+      }
+    },
+    {
+      "id": 78,
+      "type": "FoleyTuneLoRALoaderPath",
+      "pos": [
+        2656,
+        128
+      ],
+      "size": [
+        544,
+        128
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "hunyuan_model",
+          "type": "FOLEYTUNE_MODEL",
+          "link": 124
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "FOLEYTUNE_MODEL",
+          "links": [
+            129
+          ]
+        },
+        {
+          "name": "prompts",
+          "type": "STRING",
+          "links": [
+            127,
+            128
+          ]
+        }
+      ],
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {}
+        },
+        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-FoleyTune",
+        "ver": "ffb2946d0ae8a5f5d3fae20d0547bcb5dbcc4d1e",
+        "Node name for S&R": "FoleyTuneLoRALoaderPath"
+      },
+      "widgets_values": [
+        "",
+        1
+      ]
+    },
+    {
+      "id": 40,
+      "type": "VHS_VideoCombine",
+      "pos": [
+        3200,
+        1088
+      ],
+      "size": [
+        416,
+        987.6923076923076
       ],
       "flags": {},
       "order": 29,
@@ -1351,7 +1318,7 @@
           "name": "audio",
           "shape": 7,
           "type": "AUDIO",
-          "link": 79
+          "link": 132
         },
         {
           "name": "meta_batch",
@@ -1406,79 +1373,390 @@
           "hidden": false,
           "paused": false,
           "params": {
-            "filename": "vid_00264-audio.mp4",
+            "filename": "vid_00296-audio.mp4",
             "subfolder": "FoleyTune",
             "type": "output",
             "format": "video/h264-mp4",
-            "frame_rate": 64,
-            "workflow": "vid_00264.png",
-            "fullpath": "/media/unraid/comfyui/output/FoleyTune/vid_00264-audio.mp4"
+            "frame_rate": 60,
+            "workflow": "vid_00296.png",
+            "fullpath": "/media/unraid/comfyui/output/FoleyTune/vid_00296-audio.mp4"
           }
         }
       }
     },
     {
-      "id": 12,
-      "type": "FoleyTuneLoRALoader",
+      "id": 30,
+      "type": "PrimitiveString",
       "pos": [
-        2656,
-        128
+        -64,
+        480
       ],
       "size": [
         512,
-        128
+        64
       ],
       "flags": {},
-      "order": 14,
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            37,
+            52
+          ]
+        }
+      ],
+      "title": "Prompt",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.18.1",
+        "Node name for S&R": "PrimitiveString",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        ""
+      ]
+    },
+    {
+      "id": 54,
+      "type": "PrimitiveString",
+      "pos": [
+        -64,
+        608
+      ],
+      "size": [
+        512,
+        64
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            98
+          ]
+        }
+      ],
+      "title": "Input Unfiltered Dataset Folder",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.18.1",
+        "Node name for S&R": "PrimitiveString",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        ""
+      ]
+    },
+    {
+      "id": 55,
+      "type": "PrimitiveString",
+      "pos": [
+        -64,
+        736
+      ],
+      "size": [
+        512,
+        64
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            87
+          ]
+        }
+      ],
+      "title": "Output Filtered Dataset Folder",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.18.1",
+        "Node name for S&R": "PrimitiveString",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": [
+        ""
+      ]
+    },
+    {
+      "id": 35,
+      "type": "VHS_LoadVideo",
+      "pos": [
+        2688,
+        320
+      ],
+      "size": [
+        256,
+        705
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "meta_batch",
+          "shape": 7,
+          "type": "VHS_BatchManager",
+          "link": null
+        },
+        {
+          "name": "vae",
+          "shape": 7,
+          "type": "VAE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            114,
+            115
+          ]
+        },
+        {
+          "name": "frame_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": []
+        },
+        {
+          "name": "video_info",
+          "type": "VHS_VIDEOINFO",
+          "links": [
+            113
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-videohelpersuite",
+        "ver": "1.7.9",
+        "Node name for S&R": "VHS_LoadVideo",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
+        }
+      },
+      "widgets_values": {
+        "video": "221548_1__00001_.mp4",
+        "force_rate": 0,
+        "custom_width": 0,
+        "custom_height": 0,
+        "frame_load_cap": 0,
+        "skip_first_frames": 0,
+        "select_every_nth": 1,
+        "format": "AnimateDiff",
+        "videopreview": {
+          "hidden": false,
+          "paused": false,
+          "params": {
+            "filename": "221548_1__00001_.mp4",
+            "type": "input",
+            "format": "video/mp4",
+            "force_rate": 0,
+            "custom_width": 0,
+            "custom_height": 0,
+            "frame_load_cap": 0,
+            "skip_first_frames": 0,
+            "select_every_nth": 1
+          }
+        }
+      }
+    },
+    {
+      "id": 80,
+      "type": "FoleyTuneChunkedSampler",
+      "pos": [
+        2688,
+        1536
+      ],
+      "size": [
+        416,
+        288
+      ],
+      "flags": {},
+      "order": 27,
       "mode": 0,
       "inputs": [
         {
           "name": "hunyuan_model",
           "type": "FOLEYTUNE_MODEL",
-          "link": 83
+          "link": 129
+        },
+        {
+          "name": "hunyuan_deps",
+          "type": "FOLEYTUNE_DEPS",
+          "link": 130
+        },
+        {
+          "name": "features",
+          "type": "FOLEYTUNE_FEATURES",
+          "link": 131
+        },
+        {
+          "name": "sampler_options",
+          "shape": 7,
+          "type": "FOLEYTUNE_SAMPLER_OPTIONS",
+          "link": null
+        },
+        {
+          "name": "init_audio",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": null
         }
       ],
       "outputs": [
         {
-          "name": "model",
-          "type": "FOLEYTUNE_MODEL",
+          "name": "audio_first",
+          "type": "AUDIO",
           "links": [
-            63
+            132
           ]
         },
         {
-          "name": "prompts",
+          "name": "audio_batch",
+          "type": "AUDIO",
+          "links": null
+        }
+      ],
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {}
+        },
+        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-FoleyTune",
+        "ver": "ffb2946d0ae8a5f5d3fae20d0547bcb5dbcc4d1e",
+        "Node name for S&R": "FoleyTuneChunkedSampler"
+      },
+      "widgets_values": [
+        300065757959583,
+        "randomize",
+        50,
+        5,
+        1,
+        true
+      ]
+    },
+    {
+      "id": 37,
+      "type": "FoleyTuneFeatureExtractor",
+      "pos": [
+        2688,
+        1120
+      ],
+      "size": [
+        416,
+        288
+      ],
+      "flags": {},
+      "order": 24,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "hunyuan_deps",
+          "type": "FOLEYTUNE_DEPS",
+          "link": 48
+        },
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 114
+        },
+        {
+          "name": "prompt",
           "type": "STRING",
+          "widget": {
+            "name": "prompt"
+          },
+          "link": 127
+        },
+        {
+          "name": "frame_rate",
+          "type": "FLOAT",
+          "widget": {
+            "name": "frame_rate"
+          },
+          "link": 45
+        },
+        {
+          "name": "duration",
+          "type": "FLOAT",
+          "widget": {
+            "name": "duration"
+          },
+          "link": 46
+        }
+      ],
+      "outputs": [
+        {
+          "name": "npz_path",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "features",
+          "type": "FOLEYTUNE_FEATURES",
           "links": [
-            109,
-            116
+            131
           ]
         }
       ],
       "properties": {
         "aux_id": "ethanfel/ComfyUI-HunyuanVideo-Foley",
-        "ver": "4a2ba7774ef3863e6e373ae56f0170a5841eb8a9",
-        "Node name for S&R": "FoleyTuneLoRALoader",
+        "ver": "5f0a2b303bd4ba25011cda963006f00c4a73dac5",
+        "Node name for S&R": "FoleyTuneFeatureExtractor",
         "ue_properties": {
-          "widget_ue_connectable": {
-            "adapter_path": true,
-            "strength": true
-          },
-          "version": "7.8",
-          "input_ue_unconnectable": {}
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {},
+          "version": "7.8"
         }
       },
       "widgets_values": [
-        "/media/unraid/davinci/Foley/AD/blowjob/best_loras/rank3_sigma08_13k_PBC0642_TV182.pt",
-        1
+        "blowjob, wet sucking and gagging, rhythmic oral sounds",
+        "",
+        25,
+        8,
+        "",
+        "clip"
       ]
     },
     {
       "id": 36,
       "type": "VHS_VideoInfo",
       "pos": [
-        3200,
-        320
+        3264,
+        352
       ],
       "size": [
         256,
@@ -1562,273 +1840,6 @@
         }
       },
       "widgets_values": {}
-    },
-    {
-      "id": 72,
-      "type": "easy showAnything",
-      "pos": [
-        3264,
-        128
-      ],
-      "size": [
-        352,
-        128
-      ],
-      "flags": {},
-      "order": 21,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "anything",
-          "shape": 7,
-          "type": "*",
-          "link": 109
-        }
-      ],
-      "outputs": [
-        {
-          "name": "output",
-          "type": "*",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-easy-use",
-        "ver": "1.3.6",
-        "Node name for S&R": "easy showAnything",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        "blowjob, wet sucking and gagging, rhythmic oral sounds"
-      ]
-    },
-    {
-      "id": 35,
-      "type": "VHS_LoadVideo",
-      "pos": [
-        2880,
-        320
-      ],
-      "size": [
-        256,
-        675
-      ],
-      "flags": {},
-      "order": 9,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "meta_batch",
-          "shape": 7,
-          "type": "VHS_BatchManager",
-          "link": null
-        },
-        {
-          "name": "vae",
-          "shape": 7,
-          "type": "VAE",
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            114,
-            115
-          ]
-        },
-        {
-          "name": "frame_count",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "links": null
-        },
-        {
-          "name": "video_info",
-          "type": "VHS_VIDEOINFO",
-          "links": [
-            113
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-videohelpersuite",
-        "ver": "1.7.9",
-        "Node name for S&R": "VHS_LoadVideo",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": {
-        "video": "wanvideo_20260406_00002.mp4",
-        "force_rate": 0,
-        "custom_width": 0,
-        "custom_height": 0,
-        "frame_load_cap": 0,
-        "skip_first_frames": 0,
-        "select_every_nth": 1,
-        "format": "AnimateDiff",
-        "videopreview": {
-          "hidden": false,
-          "paused": false,
-          "params": {
-            "filename": "wanvideo_20260406_00002.mp4",
-            "type": "input",
-            "format": "video/mp4",
-            "force_rate": 0,
-            "custom_width": 0,
-            "custom_height": 0,
-            "frame_load_cap": 0,
-            "skip_first_frames": 0,
-            "select_every_nth": 1
-          }
-        }
-      }
-    },
-    {
-      "id": 43,
-      "type": "FoleyTuneChunkedSampler",
-      "pos": [
-        2688,
-        1440
-      ],
-      "size": [
-        416,
-        384
-      ],
-      "flags": {},
-      "order": 27,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "hunyuan_model",
-          "type": "FOLEYTUNE_MODEL",
-          "link": 63
-        },
-        {
-          "name": "hunyuan_deps",
-          "type": "FOLEYTUNE_DEPS",
-          "link": 64
-        },
-        {
-          "name": "features",
-          "type": "FOLEYTUNE_FEATURES",
-          "link": 65
-        },
-        {
-          "name": "torch_compile_cfg",
-          "shape": 7,
-          "type": "FOLEYTUNE_COMPILE_CFG",
-          "link": null
-        },
-        {
-          "name": "block_swap_args",
-          "shape": 7,
-          "type": "FOLEYTUNE_BLOCKSWAP",
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "name": "audio_first",
-          "type": "AUDIO",
-          "links": [
-            79
-          ]
-        },
-        {
-          "name": "audio_batch",
-          "type": "AUDIO",
-          "links": []
-        }
-      ],
-      "properties": {
-        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-FoleyTune",
-        "ver": "2609cefb4f367d119a38807f76e4976f035775ce",
-        "Node name for S&R": "FoleyTuneChunkedSampler",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        122115003928790,
-        "randomize",
-        50,
-        5,
-        "euler",
-        1,
-        8,
-        1.6,
-        "safa",
-        false
-      ]
-    },
-    {
-      "id": 20,
-      "type": "FoleyTuneLoRAScheduler",
-      "pos": [
-        2112,
-        128
-      ],
-      "size": [
-        384,
-        320
-      ],
-      "flags": {},
-      "order": 13,
-      "mode": 2,
-      "inputs": [
-        {
-          "name": "hunyuan_model",
-          "type": "FOLEYTUNE_MODEL",
-          "link": 30
-        },
-        {
-          "name": "hunyuan_deps",
-          "type": "FOLEYTUNE_DEPS",
-          "link": 31
-        }
-      ],
-      "outputs": [
-        {
-          "name": "summary_path",
-          "type": "STRING",
-          "links": null
-        },
-        {
-          "name": "comparison_curves",
-          "type": "IMAGE",
-          "links": null
-        }
-      ],
-      "properties": {
-        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-Foley",
-        "ver": "4a2ba7774ef3863e6e373ae56f0170a5841eb8a9",
-        "Node name for S&R": "FoleyTuneLoRAScheduler",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": [
-        "/media/unraid/davinci/Foley/AD/blowjob/features_v4/sweep_v10.json",
-        "all"
-      ]
     }
   ],
   "links": [
@@ -2001,52 +2012,12 @@
       "FLOAT"
     ],
     [
-      63,
-      12,
-      0,
-      43,
-      0,
-      "FOLEYTUNE_MODEL"
-    ],
-    [
-      64,
-      38,
-      0,
-      43,
-      1,
-      "FOLEYTUNE_DEPS"
-    ],
-    [
-      65,
-      37,
-      1,
-      43,
-      2,
-      "FOLEYTUNE_FEATURES"
-    ],
-    [
-      79,
-      43,
-      0,
-      40,
-      1,
-      "AUDIO"
-    ],
-    [
       80,
       10,
       0,
       50,
       0,
       "STRING"
-    ],
-    [
-      83,
-      1,
-      0,
-      12,
-      0,
-      "FOLEYTUNE_MODEL"
     ],
     [
       87,
@@ -2089,14 +2060,6 @@
       "STRING"
     ],
     [
-      109,
-      12,
-      1,
-      72,
-      0,
-      "STRING"
-    ],
-    [
       113,
       35,
       3,
@@ -2121,14 +2084,6 @@
       "IMAGE"
     ],
     [
-      116,
-      12,
-      1,
-      37,
-      2,
-      "STRING"
-    ],
-    [
       117,
       4,
       0,
@@ -2143,6 +2098,62 @@
       8,
       0,
       "FOLEYTUNE_AUDIO_DATASET"
+    ],
+    [
+      124,
+      1,
+      0,
+      78,
+      0,
+      "FOLEYTUNE_MODEL"
+    ],
+    [
+      127,
+      78,
+      1,
+      37,
+      2,
+      "STRING"
+    ],
+    [
+      128,
+      78,
+      1,
+      79,
+      0,
+      "STRING"
+    ],
+    [
+      129,
+      78,
+      0,
+      80,
+      0,
+      "FOLEYTUNE_MODEL"
+    ],
+    [
+      130,
+      38,
+      0,
+      80,
+      1,
+      "FOLEYTUNE_DEPS"
+    ],
+    [
+      131,
+      37,
+      1,
+      80,
+      2,
+      "FOLEYTUNE_FEATURES"
+    ],
+    [
+      132,
+      80,
+      0,
+      40,
+      1,
+      "AUDIO"
     ]
   ],
   "groups": [
@@ -2178,8 +2189,8 @@
       "bounding": [
         2048,
         512,
-        500,
-        960
+        480,
+        1120
       ],
       "color": "#6a1b9a",
       "font_size": 24,
@@ -2213,7 +2224,7 @@
     },
     {
       "id": 6,
-      "title": "Step 2 — LoRA Training Scheduler",
+      "title": "Step 2 — LoRA Training Json (recommanded)",
       "bounding": [
         2048,
         32,
@@ -2228,15 +2239,15 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.3029169783096769,
+      "scale": 0.3665295437547128,
       "offset": [
-        5230.850220856984,
-        1736.0442584351356
+        4730.889512958984,
+        892.3876884105871
       ]
     },
     "ue_links": [],
     "links_added_by_ue": [],
-    "frontendVersion": "1.42.10",
+    "frontendVersion": "1.42.15",
     "VHS_latentpreview": true,
     "VHS_latentpreviewrate": 0,
     "VHS_MetadataImage": true,

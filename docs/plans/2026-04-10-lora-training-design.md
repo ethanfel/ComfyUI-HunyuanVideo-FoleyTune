@@ -1142,3 +1142,76 @@ Goal: improve TV while maintaining the PBC/SC/MCD gains from v8. Testing curricu
 29. **sigma=0.5 is too narrow** — over-constraining timesteps hurts PBC; the model needs some extreme timesteps
 30. **TV threshold is not a hard perceptual limit** — TV=1.51 sounds better than TV=1.69 when SC/MCD/PBC are all stronger; perceptual quality is a function of the full metric profile, not TV alone
 31. **Perceptual quality correlates best with low SC + high PBC** — these capture spectral fidelity and frequency tracking; TV is a secondary indicator at this dataset scale
+
+---
+
+### v10 Sweep — Sigma Fine-Tuning (April 2026)
+
+Goal: bracket sigma=0.7 with 0.6 and 0.8 to find the optimal value, and test whether extending the best run beyond 13k keeps improving.
+
+**Base config:** r64, alpha=64, Prodigy, 13k steps, curriculum_switch=0.5, logit_normal_sigma=0.7.
+
+#### Results
+
+| Experiment | Best PBC | At step | SC | MCD | TV | Key change |
+|---|---|---|---|---|---|---|
+| **v10_sigma07_16k** | **0.661** | 15k | **1.058** | **6.12** | 1.51 | **sigma=0.7 extended to 16k** |
+| v10_sigma08 | 0.642 | 13k | 1.236 | 7.25 | **1.82** | sigma=0.8 |
+| v10_sigma08_16k | 0.624 | 16k | 1.268 | 7.40 | 1.47 | sigma=0.8 extended — overfit |
+| v10_sigma06 | 0.550 | 13k | 1.310 | 7.55 | 1.39 | sigma=0.6 — worse on everything |
+
+#### Analysis
+
+**sigma=0.7 extended to 16k is the all-time best.** PBC=0.661 (+181% vs v5), SC=1.058, MCD=6.12. Resumed from v9_sigma07 at 13k, PBC kept climbing for another 2k steps. The run was still improving at 15k but plateaued by 16k.
+
+**sigma=0.8 is the best TV/PBC balance.** TV=1.82 is the highest in the top 5, with competitive PBC=0.642. At 13k steps, sigma=0.8 produces richer temporal dynamics — the wider timestep distribution preserves more audio variation. However, extending to 16k caused overfitting: TV collapsed to 1.47 and PBC dropped to 0.624.
+
+**sigma=0.6 is worse than 0.7 on all metrics.** PBC=0.550, SC=1.310, TV=1.39 — the timestep distribution is too narrow, same pattern as sigma=0.5 in v9.
+
+**Extending sigma=0.8 hurts, extending sigma=0.7 helps.** sigma=0.7 has a tighter optimization landscape that benefits from longer training. sigma=0.8's wider distribution means the model is still exploring at 13k — more steps push it into overfitting rather than refinement.
+
+#### Top 5 Checkpoints (Published)
+
+| Rank | Experiment | Step | PBC | SC | MCD | TV |
+|------|-----------|------|-------|-------|------|------|
+| 1 | v10_sigma07_16k | 15k | 0.661 | 1.058 | 6.12 | 1.51 |
+| 2 | v9_curriculum04 | 12k | 0.644 | 1.143 | 6.05 | 1.53 |
+| 3 | v10_sigma08 | 13k | 0.642 | 1.236 | 7.25 | 1.82 |
+| 4 | v9_sigma07 | 13k | 0.635 | 1.067 | 6.06 | 1.51 |
+| 5 | v8_r64_curriculum05 | 12k | 0.592 | 1.254 | 6.81 | 1.69 |
+
+Published as safetensors to [ethanfel/FoleyTune-LoRAs](https://huggingface.co/ethanfel/FoleyTune-LoRAs) on Hugging Face.
+
+#### Final Best Configuration
+
+```json
+{
+  "target": "all_attn_mlp",
+  "rank": 64,
+  "alpha": 64,
+  "lr": 5e-05,
+  "steps": 13000,
+  "schedule_type": "cosine",
+  "timestep_mode": "uniform",
+  "visual_dropout_prob": 0.5,
+  "warmup_steps": 100,
+  "batch_size": 8,
+  "seed": 42,
+  "optimizer_type": "prodigy",
+  "curriculum_switch": 0.5,
+  "logit_normal_sigma": 0.7
+}
+```
+
+**Best checkpoint:** `v10_sigma07_16k/adapter_step15000.pt`
+- PBC: 0.661, SC: 1.058, MCD: 6.12, TV: 1.51
+- +181% PBC over v5 best (0.235)
+- All-time best SC and PBC
+
+#### Updated Takeaways
+
+32. **sigma=0.7 is optimal** — bracketing with 0.6 and 0.8 confirms 0.7 gives the best spectral quality
+33. **sigma=0.8 maximizes TV** (1.82) with competitive PBC — use when temporal dynamics matter more than peak spectral fidelity
+34. **Extended training (15k) helps sigma=0.7 but hurts sigma=0.8** — tighter timestep distributions benefit from longer refinement; wider distributions overfit with more steps
+35. **12-15k steps is the convergence window** on 299 clips — sigma=0.7 peaked at 15k, sigma=0.8 at 13k
+36. **More data is the remaining big lever** — the PBC/TV tradeoff is a dataset ceiling at 299 clips

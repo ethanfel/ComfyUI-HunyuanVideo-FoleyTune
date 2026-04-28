@@ -316,7 +316,6 @@ class FoleyTuneChunkedSampler:
         sampler = opts.get("sampler", "euler")
         batch_size = opts.get("batch_size", 1)
         chunk_duration = opts.get("chunk_duration", 8.0)
-        overlap_seconds = opts.get("overlap_seconds", 1.6)
         crossfade_mode = opts.get("crossfade_mode", "safa")
         noise_blend = opts.get("noise_blend", 0.0)
         torch_compile_cfg = opts.get("torch_compile_cfg")
@@ -338,9 +337,10 @@ class FoleyTuneChunkedSampler:
         duration = features["duration"]
 
         # Compute chunk boundaries
-        chunks = compute_chunk_boundaries(duration, chunk_duration, overlap_seconds)
+        min_overlap = chunk_duration * 0.2
+        chunks = compute_chunk_boundaries(duration, chunk_duration, min_overlap)
         logger.info(f"Chunked generation: {len(chunks)} chunks for {duration:.1f}s "
-                     f"(chunk={chunk_duration}s, overlap={overlap_seconds}s, mode={crossfade_mode})")
+                     f"(chunk={chunk_duration}s, mode={crossfade_mode})")
         for i, (ts, te) in enumerate(chunks):
             logger.info(f"  Chunk {i}: [{ts:.1f}, {te:.1f}]s ({te-ts:.1f}s)")
 
@@ -1038,8 +1038,6 @@ class FoleyTuneSamplerOptions:
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 6, "step": 1}),
                 "chunk_duration": ("FLOAT", {"default": 8.0, "min": 1.0, "max": 15.0, "step": 0.1,
                                     "tooltip": "Duration of each chunk in seconds. 8s matches training length."}),
-                "overlap_seconds": ("FLOAT", {"default": 1.6, "min": 0.0, "max": 5.0, "step": 0.1,
-                                     "tooltip": "Overlap between chunks in seconds. 1.6s = 20% of 8s chunk."}),
                 "crossfade_mode": (FoleyTuneChunkedSampler.CROSSFADE_MODES, {"default": "safa",
                                     "tooltip": "safa: binary swap during denoising (best). latent: blend before DAC. waveform: blend after DAC."}),
                 "noise_blend": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
@@ -1058,14 +1056,13 @@ class FoleyTuneSamplerOptions:
     FUNCTION = "build"
     CATEGORY = "FoleyTune"
 
-    def build(self, sampler, batch_size, chunk_duration, overlap_seconds,
+    def build(self, sampler, batch_size, chunk_duration,
               crossfade_mode, noise_blend,
               torch_compile_cfg=None, block_swap_args=None):
         return ({
             "sampler": sampler,
             "batch_size": batch_size,
             "chunk_duration": chunk_duration,
-            "overlap_seconds": overlap_seconds,
             "crossfade_mode": crossfade_mode,
             "noise_blend": noise_blend,
             "torch_compile_cfg": torch_compile_cfg,

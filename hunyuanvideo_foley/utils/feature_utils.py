@@ -61,25 +61,24 @@ def get_frames_av(
     return output_frames, vid_len_in_s
 
 @torch.inference_mode()
-def encode_video_with_siglip2(x: torch.Tensor, model_dict, batch_size: int = 32):
+def encode_video_with_siglip2(x: torch.Tensor, model_dict, batch_size: int = -1):
     b, t, c, h, w = x.shape
     if batch_size < 0:
         batch_size = b * t
-    device = model_dict.device
     x = rearrange(x, "b t c h w -> (b t) c h w")
     outputs = []
     for i in range(0, b * t, batch_size):
-        batch = x[i : i + batch_size].to(device, non_blocking=True)
-        output = model_dict.siglip2_model.get_image_features(pixel_values=batch)
+        output = model_dict.siglip2_model.get_image_features(pixel_values=x[i : i + batch_size])
+        # Transformers 5.0+ returns BaseModelOutputWithPooling instead of tensor
         if hasattr(output, 'pooler_output'):
             output = output.pooler_output
-        outputs.append(output.cpu())
+        outputs.append(output)
     res = torch.cat(outputs, dim=0)
     res = rearrange(res, "(b t) d -> b t d", b=b)
-    return res.to(device)
+    return res
 
 @torch.inference_mode()
-def encode_video_with_sync(x: torch.Tensor, model_dict, batch_size: int = 16):
+def encode_video_with_sync(x: torch.Tensor, model_dict, batch_size: int = -1):
     """
     The input video of x is best to be in fps of 24 of greater than 24.
     Input:
@@ -88,7 +87,6 @@ def encode_video_with_sync(x: torch.Tensor, model_dict, batch_size: int = 16):
     """
     b, t, c, h, w = x.shape
     assert c == 3 and h == 224 and w == 224
-    device = model_dict.device
 
     segment_size = 16
     step_size = 8
@@ -96,35 +94,35 @@ def encode_video_with_sync(x: torch.Tensor, model_dict, batch_size: int = 16):
     segments = []
     for i in range(num_segments):
         segments.append(x[:, i * step_size : i * step_size + segment_size])
-    x = torch.stack(segments, dim=1)  # keep on CPU
+    x = torch.stack(segments, dim=1).cuda()  # (B, num_segments, segment_size, 3, 224, 224)
 
+    outputs = []
     if batch_size < 0:
         batch_size = b * num_segments
     x = rearrange(x, "b s t c h w -> (b s) 1 t c h w")
-    outputs = []
     for i in range(0, b * num_segments, batch_size):
-        batch = x[i : i + batch_size].to(device, non_blocking=True)
-        with torch.autocast(device_type=device.type, enabled=True, dtype=torch.half):
-            outputs.append(model_dict.syncformer_model(batch).cpu())
+        with torch.autocast(device_type="cuda", enabled=True, dtype=torch.half):
+            outputs.append(model_dict.syncformer_model(x[i : i + batch_size]))
     x = torch.cat(outputs, dim=0)  # [b * num_segments, 1, 8, 768]
     x = rearrange(x, "(b s) 1 t d -> b (s t) d", b=b)
-    return x.to(device)
+    return x
 
 
 @torch.inference_mode()
 def encode_video_features(video_path, model_dict):
     visual_features = {}
-    # siglip2 visual features — keep on CPU, encode batches to GPU internally
+    # siglip2 visual features
     frames, ori_vid_len_in_s = get_frames_av(video_path, FPS_VISUAL["siglip2"])
     images = [Image.fromarray(frame).convert('RGB') for frame in frames]
     images = [model_dict.siglip2_preprocess(image) for image in images]  # [T, C, H, W]
-    clip_frames = torch.stack(images).unsqueeze(0)
-    visual_features['siglip2_feat'] = encode_video_with_siglip2(clip_frames, model_dict)
+    clip_frames = torch.stack(images).to(model_dict.device).unsqueeze(0)
+    visual_features['siglip2_feat'] = encode_video_with_siglip2(clip_frames, model_dict).to(model_dict.device)
 
-    # synchformer visual features — keep on CPU, encode batches to GPU internally
+    # synchformer visual features
     frames, ori_vid_len_in_s = get_frames_av(video_path, FPS_VISUAL["synchformer"])
     images = torch.from_numpy(frames).permute(0, 3, 1, 2)  # [T, C, H, W]
     sync_frames = model_dict.syncformer_preprocess(images).unsqueeze(0)  # [1, T, 3, 224, 224]
+    # [1, num_segments * 8, channel_dim], e.g. [1, 240, 768] for 10s video
     visual_features['syncformer_feat'] = encode_video_with_sync(sync_frames, model_dict)
 
     vid_len_in_s = sync_frames.shape[1] / FPS_VISUAL["synchformer"]

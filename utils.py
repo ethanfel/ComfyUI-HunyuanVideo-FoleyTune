@@ -365,20 +365,29 @@ def feature_process_from_tensors(frames_8fps, frames_25fps, prompt, neg_prompt, 
     """
     visual_features = {}
 
-    # Process each encoder sequentially, freeing intermediates to limit peak RAM
-    processed_8fps = torch.stack([deps.siglip2_preprocess(frame) for frame in frames_8fps])
-    visual_features['siglip2_feat'] = encode_video_with_siglip2(processed_8fps.unsqueeze(0), deps)
-    del processed_8fps
+    # Process SigLIP2 features (Content analysis) at 8 FPS
+    processed_8fps = torch.stack([deps.siglip2_preprocess(frame) for frame in frames_8fps])  # CPU tensors
+    # Process Synchformer features (Timing/Sync analysis) at 25 FPS
+    processed_25fps = torch.stack([deps.syncformer_preprocess(frame) for frame in frames_25fps])  # CPU tensors
 
-    processed_25fps = torch.stack([deps.syncformer_preprocess(frame) for frame in frames_25fps])
-    visual_features['syncformer_feat'] = encode_video_with_sync(processed_25fps.unsqueeze(0), deps)
-    del processed_25fps
+    # Move just-in-time to device for encoding to minimize residency
+    processed_8fps_dev = processed_8fps.unsqueeze(0).to(deps.device, non_blocking=True)
+    visual_features['siglip2_feat'] = encode_video_with_siglip2(processed_8fps_dev, deps)
 
+    processed_25fps_dev = processed_25fps.unsqueeze(0).to(deps.device, non_blocking=True)
+    visual_features['syncformer_feat'] = encode_video_with_sync(processed_25fps_dev, deps)
+
+    # Audio length is determined by the duration of the sync stream (25 FPS)
     audio_len_in_s = frames_25fps.shape[0] / 25.0
 
+    # Process Text features for both positive and negative prompts
     prompts = [neg_prompt, prompt]
     text_feat_res, _ = encode_text_feat(prompts, deps)
+
     text_feats = {'text_feat': text_feat_res[1:], 'uncond_text_feat': text_feat_res[:1]}
+
+    # Free CPU preprocessing tensors proactively (they can be large)
+    del processed_8fps, processed_25fps, processed_8fps_dev, processed_25fps_dev
 
     return visual_features, text_feats, audio_len_in_s
 

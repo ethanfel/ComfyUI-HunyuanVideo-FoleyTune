@@ -300,52 +300,41 @@ class FoleyTuneFeatureExtractor:
         npz_path = cache_dir / f"{name}_{idx:03d}.npz"
 
         # -- Extract visual features --
-        # image is [B, H, W, C] float32 in [0,1] from ComfyUI
-        # Convert to [1, T, C, H, W] uint8 for preprocessing
-        frames_bhwc = image  # [T, H, W, C]
-        frames_tchw = frames_bhwc.permute(0, 3, 1, 2)  # [T, C, H, W]
-        frames_uint8 = (frames_tchw * 255).clamp(0, 255).to(torch.uint8)
+        # image is [T, H, W, C] float32 in [0,1] from ComfyUI
+        # Preprocessing pipelines accept float32 directly (ToDtype is a no-op),
+        # so we skip the full-resolution uint8 copy that would double RAM usage.
+        frames_tchw = image.permute(0, 3, 1, 2)  # [T, C, H, W] float32, view (no copy)
+        total_frames = frames_tchw.shape[0]
 
-        # Resample frames to target FPS for each extractor
-        total_frames = frames_uint8.shape[0]
-
-        # Compute duration from video frames if not specified
         if duration <= 0:
             duration = total_frames / frame_rate
             logger.warning(f"Auto-detected duration={duration:.2f}s from {total_frames} frames at {frame_rate}fps. "
                            f"Set duration explicitly if this is wrong (e.g. mismatched fps).")
 
-        # SigLIP2: 8fps, 512x512
-        siglip2_fps = 8
-        n_siglip2_frames = max(1, int(duration * siglip2_fps))
-        siglip2_indices = torch.linspace(0, total_frames - 1, n_siglip2_frames).long()
-        siglip2_frames = frames_uint8[siglip2_indices]
-
-        # Apply SigLIP2 preprocessing
+        # SigLIP2: 8fps, subsample then preprocess (resize to 512x512)
+        siglip2_indices = torch.linspace(0, total_frames - 1, max(1, int(duration * 8))).long()
         siglip2_processed = torch.stack([
-            hunyuan_deps.siglip2_preprocess(f) for f in siglip2_frames
-        ]).unsqueeze(0)  # [1, T, C, H, W]
+            hunyuan_deps.siglip2_preprocess(frames_tchw[i]) for i in siglip2_indices
+        ]).unsqueeze(0)
 
         hunyuan_deps.siglip2_model.to(device)
         clip_features = encode_video_with_siglip2(
             siglip2_processed.to(device), hunyuan_deps
         ).cpu()
+        del siglip2_processed
         hunyuan_deps.siglip2_model.to(offload_device)
 
-        # Synchformer: 25fps, 224x224
-        sync_fps = 25
-        n_sync_frames = max(16, int(duration * sync_fps))
-        sync_indices = torch.linspace(0, total_frames - 1, n_sync_frames).long()
-        sync_frames = frames_uint8[sync_indices]
-
+        # Synchformer: 25fps, subsample then preprocess (resize to 224x224)
+        sync_indices = torch.linspace(0, total_frames - 1, max(16, int(duration * 25))).long()
         sync_processed = torch.stack([
-            hunyuan_deps.syncformer_preprocess(f) for f in sync_frames
-        ]).unsqueeze(0)  # [1, T, C, H, W]
+            hunyuan_deps.syncformer_preprocess(frames_tchw[i]) for i in sync_indices
+        ]).unsqueeze(0)
 
         hunyuan_deps.syncformer_model.to(device)
         sync_features = encode_video_with_sync(
             sync_processed.to(device), hunyuan_deps
         ).cpu()
+        del sync_processed
         hunyuan_deps.syncformer_model.to(offload_device)
 
         # CLAP text embedding -- must use last_hidden_state [B, seq_len, 768], NOT text_embeds (pooled)

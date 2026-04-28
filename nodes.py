@@ -403,7 +403,6 @@ class FoleyTuneChunkedSampler:
         decoded_waveform, sample_rate = chunked_denoise_process(
             features=features,
             chunks=chunks,
-            overlap_seconds=overlap_seconds,
             crossfade_mode=crossfade_mode,
             model_dict=model_dict_for_process,
             cfg=hunyuan_cfg,

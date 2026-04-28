@@ -1,4 +1,5 @@
 # utils.py
+import math
 import os
 import torch
 import torch.nn as nn
@@ -398,37 +399,29 @@ def feature_process_from_tensors(frames_8fps, frames_25fps, prompt, neg_prompt, 
 def compute_chunk_boundaries(duration: float, chunk_duration: float, overlap_seconds: float):
     """Compute chunk time boundaries with overlap for long-form generation.
 
+    All chunks are exactly chunk_duration long (except single-chunk clips shorter
+    than chunk_duration). This prevents the model from operating on short last
+    chunks that are far from its training distribution.
+
     Returns list of (t_start, t_end) tuples in seconds.
     """
-    # Clamp overlap to half the chunk duration
     if overlap_seconds >= chunk_duration:
         logger.warning(f"overlap_seconds ({overlap_seconds}) >= chunk_duration ({chunk_duration}), "
                        f"clamping to {chunk_duration * 0.5}")
         overlap_seconds = chunk_duration * 0.5
 
-    # Single chunk — no splitting needed
     if duration <= chunk_duration:
         return [(0.0, duration)]
 
-    stride = chunk_duration - overlap_seconds
-    chunks = []
-    t_start = 0.0
-    while t_start < duration:
-        t_end = min(t_start + chunk_duration, duration)
-        chunks.append((t_start, t_end))
-        if t_end >= duration:
-            break
-        t_start += stride
+    max_stride = chunk_duration - overlap_seconds
+    n_chunks = math.ceil((duration - chunk_duration) / max_stride) + 1
+    stride = (duration - chunk_duration) / (n_chunks - 1)
 
-    # Merge tiny last chunk into previous to avoid wasting a full forward pass
-    # on a chunk that's mostly overlap with little unique content
-    if len(chunks) >= 2:
-        last_dur = chunks[-1][1] - chunks[-1][0]
-        if last_dur < overlap_seconds + 0.5:
-            # Extend previous chunk to cover the remainder
-            prev_start = chunks[-2][0]
-            chunks[-2] = (prev_start, duration)
-            chunks.pop()
+    chunks = []
+    for i in range(n_chunks):
+        t_start = i * stride
+        t_end = t_start + chunk_duration
+        chunks.append((round(t_start, 6), round(min(t_end, duration), 6)))
 
     return chunks
 
@@ -540,7 +533,6 @@ def equal_power_crossfade(left, right, overlap_len, dim=-1):
 def chunked_denoise_process(
     features,
     chunks,
-    overlap_seconds,
     crossfade_mode,
     model_dict,
     cfg,
@@ -555,10 +547,12 @@ def chunked_denoise_process(
 ):
     """Chunked denoising with overlap stitching for long-form generation.
 
+    Overlap between adjacent chunks is computed from chunk positions, so all
+    chunks can be exactly chunk_duration long (the model's training length).
+
     Args:
         features: FOLEYTUNE_FEATURES dict (full video features)
         chunks: list of (t_start, t_end) tuples from compute_chunk_boundaries
-        overlap_seconds: overlap duration in seconds
         crossfade_mode: "safa", "latent", or "waveform"
         model_dict: dict with foley_model, dac_model, device
         cfg: model config (loaded YAML)
@@ -575,7 +569,10 @@ def chunked_denoise_process(
     device = model_dict.device
     audio_frame_rate = cfg.model_config.model_kwargs.audio_frame_rate
     latent_dim = cfg.model_config.model_kwargs.audio_vae_latent_dim
-    overlap_frames = int(overlap_seconds * audio_frame_rate)
+    pair_overlap_frames = [
+        int((chunks[i][1] - chunks[i + 1][0]) * audio_frame_rate)
+        for i in range(len(chunks) - 1)
+    ]
     sample_rate = model_dict.dac_model.sample_rate
 
     # Single chunk — delegate to standard denoise
@@ -746,29 +743,25 @@ def chunked_denoise_process(
                 pbar.update(1)
 
             # SaFa swap after all chunks are updated this step
-            if crossfade_mode == "safa" and overlap_frames > 0:
+            if crossfade_mode == "safa":
                 for c_idx in range(len(chunks) - 1):
-                    safa_binary_swap(
-                        chunk_latents[c_idx], chunk_latents[c_idx + 1],
-                        overlap_frames, step_idx
-                    )
+                    ovl = pair_overlap_frames[c_idx]
+                    if ovl > 0:
+                        safa_binary_swap(
+                            chunk_latents[c_idx], chunk_latents[c_idx + 1],
+                            ovl, step_idx
+                        )
 
     # --- Stitch results ---
     if crossfade_mode == "safa":
-        # Assemble: take non-overlap from each chunk, overlap already consistent
         parts = []
-        overlap_left = overlap_frames // 2
-        overlap_right = overlap_frames - overlap_left  # ceiling half
         for c_idx in range(len(chunks)):
             lat = chunk_latents[c_idx]
-            if overlap_frames == 0:
-                parts.append(lat)
-            elif c_idx == 0:
-                parts.append(lat[:, :, :-overlap_right])
-            elif c_idx == len(chunks) - 1:
-                parts.append(lat[:, :, overlap_left:])
-            else:
-                parts.append(lat[:, :, overlap_left:-overlap_right])
+            left_trim = pair_overlap_frames[c_idx - 1] // 2 if c_idx > 0 else 0
+            right_ovl = pair_overlap_frames[c_idx] if c_idx < len(chunks) - 1 else 0
+            right_trim = right_ovl - right_ovl // 2 if right_ovl > 0 else 0
+            s = lat[:, :, left_trim:(lat.shape[-1] - right_trim) if right_trim else lat.shape[-1]]
+            parts.append(s)
         full_latent = torch.cat(parts, dim=-1)
 
         with torch.inference_mode():
@@ -780,11 +773,10 @@ def chunked_denoise_process(
         return audio, sample_rate
 
     elif crossfade_mode == "latent":
-        # Equal-power crossfade on latents, then single DAC decode
         full_latent = chunk_latents[0]
         for c_idx in range(1, len(chunks)):
             full_latent = equal_power_crossfade(
-                full_latent, chunk_latents[c_idx], overlap_frames, dim=-1
+                full_latent, chunk_latents[c_idx], pair_overlap_frames[c_idx - 1], dim=-1
             )
 
         with torch.inference_mode():
@@ -796,8 +788,6 @@ def chunked_denoise_process(
         return audio, sample_rate
 
     else:  # waveform
-        # DAC decode each chunk, then equal-power crossfade on audio
-        overlap_samples = int(overlap_seconds * sample_rate)
         with torch.inference_mode():
             dac_weight = next(model_dict.dac_model.parameters())
             chunk_audios = []
@@ -807,8 +797,9 @@ def chunked_denoise_process(
 
         full_audio = chunk_audios[0]
         for c_idx in range(1, len(chunk_audios)):
+            ovl_samples = int((chunks[c_idx - 1][1] - chunks[c_idx][0]) * sample_rate)
             full_audio = equal_power_crossfade(
-                full_audio, chunk_audios[c_idx], overlap_samples, dim=-1
+                full_audio, chunk_audios[c_idx], ovl_samples, dim=-1
             )
         total_duration = features["duration"]
         full_audio = full_audio[:, :, :int(total_duration * sample_rate)]

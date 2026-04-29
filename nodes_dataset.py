@@ -2075,7 +2075,7 @@ class FoleyTuneDatasetSaver:
                                "pass to produce the clip list for labeling.",
                 }),
                 "prompt": ("STRING", {
-                    "default": "",
+                    "default": "natural ambient sound effects matching the video scene",
                     "tooltip": "Global prompt written to dataset.json. If empty, uses "
                                "the prompt from the first training clip.",
                 }),

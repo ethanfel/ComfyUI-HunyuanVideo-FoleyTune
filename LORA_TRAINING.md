@@ -308,28 +308,28 @@ Controls which transformer layers get LoRA adapters. More layers = more capacity
 |---|---|---|
 | 16 | Fine details on a known sound | ~2.4M |
 | 32 | Good balance for small datasets | ~4.8M |
-| 64 | Moderate capacity | ~9.6M |
-| 128 | **Recommended** — proven best across all sweeps | ~19.2M |
+| 64 | **Recommended** — proven best across all sweeps | ~9.6M |
+| 128 | Higher capacity, diminishing returns | ~19.2M |
 
-**Default:** 128. Foley's 128D latent space benefits from high rank. Sweep testing showed rank 128 with curriculum timestep sampling consistently outperformed rank 64 across all metrics.
+**Default:** 64. Sweep testing (v7-v10) showed rank 64 consistently outperformed rank 128 across all metrics with the prodigy optimizer. In v7, rank 64 (PBC=0.590) beat rank 128 (PBC=0.323) and rank 96 (PBC=0.518). Higher rank increases VRAM without improving quality.
 
 #### Learning rate
 
-`1e-4` constant is the recommended default. If training is unstable (loss spikes in the first 200 steps), try `5e-5`. Half LR (5e-5) reaches the same destination at double the compute — no advantage.
+`5e-5` with the **prodigy** optimizer and **cosine** schedule is the recommended default. Prodigy is an adaptive optimizer that auto-tunes per-parameter learning rates, eliminating the need for manual LR tuning. Combined with cosine decay, it produced the top 5 adapters across all sweeps (PBC 0.592-0.661).
 
 Warmup (default 100 steps) ramps the LR from 0 to avoid instability at the start.
 
-> **Cosine decay hurts.** Sweep testing showed cosine LR decays too fast — the model stops learning by step 6k, wasting the remaining steps at near-zero LR. Use `constant` schedule.
+> **Why prodigy + cosine?** Earlier sweeps used AdamW with constant LR (`1e-4`), but prodigy with cosine schedule consistently produced better spectral convergence and per-band correlation. The cosine decay works well with prodigy because prodigy's adaptive rates prevent the premature convergence that constant-LR cosine schedules caused with AdamW.
 
 #### Batch size
 
-| Batch size | VRAM (bf16, rank 128, all_attn_mlp) | Notes |
+| Batch size | VRAM (bf16, rank 64, all_attn_mlp) | Notes |
 |---|---|---|
-| 1 | ~22 GB | Noisy gradients, slow |
-| 4 | ~25 GB | Reasonable starting point |
-| 8 | ~30 GB | **Recommended** — stable gradients |
-| 16 | ~45 GB | Better convergence on larger datasets |
-| 32 | ~70 GB | Best gradient quality — fits on 96 GB |
+| 1 | ~18 GB | Noisy gradients, slow |
+| 4 | ~21 GB | Reasonable starting point |
+| 8 | ~25 GB | **Recommended** — stable gradients |
+| 16 | ~38 GB | Better convergence on larger datasets |
+| 32 | ~60 GB | Best gradient quality — fits on 96 GB |
 
 Higher batch size gives smoother loss curves and faster convergence. With 96 GB, prefer larger batches over more steps.
 
@@ -350,27 +350,25 @@ Controls how training timesteps are sampled. Flow matching trains by interpolati
 
 | Mode | Description | When to use |
 |---|---|---|
-| `uniform` | All timesteps equally | Safe baseline |
+| `uniform` | All timesteps equally | **Recommended** — best results across all sweeps with prodigy |
 | `logit_normal` | Concentrates near t=0.5 via `sigmoid(N(0, sigma))` | Good default, 0.2-0.3 dB lower loss floor |
-| `curriculum` | logit_normal first, then switches to uniform | **Recommended** — best results across all sweeps |
+| `curriculum` | logit_normal first, then switches to uniform | Alternative — useful with AdamW |
 
-**Default:** `curriculum` with `curriculum_switch=0.6`.
+**Default:** `uniform` with `logit_normal_sigma=0.7`.
 
-Curriculum sampling starts with logit_normal (focusing on "easy" mid-range timesteps) then switches to uniform at 60% of total steps (exposing the model to all timesteps for fine detail). This prevents the mild overfitting that hits constant-distribution approaches in long training runs.
-
-In sweep testing, curriculum was the first config to break SC < 1.0 and was still improving at 10k steps while constant LR had already peaked and started regressing.
+All five top-ranked adapters (PBC 0.592-0.661) used uniform timestep sampling with the prodigy optimizer. The `logit_normal_sigma` parameter still affects the sampling distribution shape. In v9-v10 sweeps, sigma=0.7 (PBC=0.661) outperformed sigma=1.0 (PBC=0.592) and sigma=0.8 (PBC=0.642).
 
 #### Advanced options
 
 | Parameter | Default | Description |
 |---|---|---|
-| `alpha` | 128 | LoRA scaling factor. 1:1 ratio with rank is the HunyuanVideo convention |
+| `alpha` | 64 | LoRA scaling factor. 1:1 ratio with rank is the HunyuanVideo convention |
 | `grad_accum` | 1 | Gradient accumulation steps. Use when batch size alone doesn't fit |
 | `init_mode` | `standard` | `standard` (Kaiming A, zero B) or `pissa` (SVD-based) |
 | `use_rslora` | false | Rank-stabilized scaling: `alpha/sqrt(rank)` instead of `alpha/rank` |
 | `lora_dropout` | 0.0 | Dropout on the LoRA path. 0.05-0.1 helps on small datasets (<20 clips) |
 | `lora_plus_ratio` | 1.0 | B-matrix LR multiplier (see warning below) |
-| `schedule_type` | `constant` | LR schedule after warmup. Use `constant` (see warning below) |
+| `schedule_type` | `cosine` | LR schedule after warmup. Cosine decay works well with prodigy |
 | `latent_mixup_alpha` | 0.0 | Beta-distribution latent interpolation for augmentation |
 | `latent_noise_sigma` | 0.0 | Additive Gaussian noise on target latents for regularization |
 | `precision` | `bf16` | `bf16` (Ampere+), `fp16` (older GPUs), `fp32` (debug only) |
@@ -379,7 +377,7 @@ In sweep testing, curriculum was the first config to break SC < 1.0 and was stil
 
 > **LoRA+ warning:** Setting `lora_plus_ratio=16.0` enables LoRA+ (higher LR for B matrices). Sweep testing showed this overfits on small-to-medium datasets — loss drops below the noise floor (~0.5), producing mechanical sound on some inputs and pure noise on others. Standard LR (ratio 1.0) generalizes better.
 
-> **Cosine schedule warning:** `schedule_type=cosine` decays the learning rate to zero. Testing showed this wastes the final ~40% of training steps at near-zero LR. Use `constant`.
+> **Constant schedule note:** Earlier testing with AdamW showed cosine decayed too fast, but with prodigy's adaptive rates, `cosine` works well — prodigy adjusts per-parameter LR internally, preventing premature convergence. All top-5 adapters used `cosine`.
 
 ---
 
@@ -461,12 +459,12 @@ Use `Foley LoRA Scheduler` to run multiple experiments from a JSON configuration
   "data_dir": "dataset/gunshots",
   "output_root": "lora_output/rank_sweep",
   "eval_npz": "/path/to/validation_clip.npz",
-  "base": { "rank": 128, "lr": 1e-4, "steps": 15000, "target": "all_attn_mlp",
-            "timestep_mode": "curriculum", "curriculum_switch": 0.6 },
+  "base": { "rank": 64, "lr": 5e-5, "steps": 13000, "target": "all_attn_mlp",
+            "optimizer_type": "prodigy", "schedule_type": "cosine" },
   "experiments": [
-    {"id": "baseline_r128"},
-    {"id": "r64", "rank": 64},
-    {"id": "r128_20k", "steps": 20000}
+    {"id": "baseline"},
+    {"id": "sigma08", "logit_normal_sigma": 0.8},
+    {"id": "cur04", "curriculum_switch": 0.4}
   ]
 }
 ```
@@ -546,9 +544,9 @@ lora_output/my_sound/
     "state_dict": { "triple_blocks.0.audio_self_attn_qkv.lora_A": ..., ... },
     "meta": {
         "target": "all_attn_mlp",
-        "rank": 128,
-        "alpha": 128.0,
-        "steps": 15000,
+        "rank": 64,
+        "alpha": 64.0,
+        "steps": 13000,
         "init_mode": "standard",
         "use_rslora": false,
         ...
@@ -576,17 +574,17 @@ The fp16 VAE and Synchformer lose precision that matters during training. With s
 
 ## VRAM estimates
 
-**Minimum VRAM for training: ~13 GB** with bf16 model (batch_size=1, gradient checkpointing, rank 128), or **~8 GB** with the fp8 model. GPUs with less than 10 GB cannot train this model.
+**Minimum VRAM for training: ~12 GB** with bf16 model (batch_size=1, gradient checkpointing, rank 64), or **~8 GB** with the fp8 model. GPUs with less than 10 GB cannot train this model.
 
 
 | Config | Estimated VRAM | Target GPU |
 |---|---|---|
-| fp8 + rank 128 + batch 1 + grad_accum 8 + grad ckpt | ~8 GB | 10-12 GB (3060 12GB) |
-| bf16 + rank 128 + batch 1 + grad_accum 8 + grad ckpt | ~13 GB | 16 GB+ (minimum for bf16) |
-| bf16 + rank 128 + batch 8 + grad ckpt | ~15 GB | 24 GB (4090, A5000) |
-| bf16 + rank 128 + batch 8, no offload | ~18-20 GB | 24+ GB (4090, A5000) |
-| bf16 + rank 128 + batch 16, no offload | ~45 GB | 48+ GB |
-| bf16 + rank 128 + batch 32, no offload | ~70 GB | 96 GB |
+| fp8 + rank 64 + batch 1 + grad_accum 8 + grad ckpt | ~8 GB | 10-12 GB (3060 12GB) |
+| bf16 + rank 64 + batch 1 + grad_accum 8 + grad ckpt | ~12 GB | 16 GB+ (minimum for bf16) |
+| bf16 + rank 64 + batch 8 + grad ckpt | ~14 GB | 24 GB (4090, A5000) |
+| bf16 + rank 64 + batch 8, no offload | ~16-18 GB | 24+ GB (4090, A5000) |
+| bf16 + rank 64 + batch 16, no offload | ~38 GB | 48+ GB |
+| bf16 + rank 64 + batch 32, no offload | ~60 GB | 96 GB |
 
 High-VRAM systems (48+ GB) need no offloading at all.
 
@@ -601,31 +599,32 @@ Use `batch_size: 1` with `grad_accum: 8` for effective batch 8, plus gradient ch
   "output_root": "/path/to/output",
   "base": {
     "target": "all_attn_mlp",
-    "rank": 128,
-    "alpha": 128,
-    "lr": 1e-4,
-    "steps": 15000,
+    "rank": 64,
+    "alpha": 64,
+    "lr": 5e-5,
+    "steps": 13000,
     "batch_size": 1,
     "grad_accum": 8,
     "warmup_steps": 100,
     "save_every": 1000,
-    "timestep_mode": "curriculum",
+    "timestep_mode": "uniform",
     "precision": "bf16",
     "seed": 42,
-    "logit_normal_sigma": 1.0,
-    "curriculum_switch": 0.6,
+    "logit_normal_sigma": 0.7,
+    "curriculum_switch": 0.5,
     "init_mode": "standard",
     "use_rslora": false,
     "lora_dropout": 0.0,
     "lora_plus_ratio": 1.0,
-    "schedule_type": "constant",
+    "schedule_type": "cosine",
+    "optimizer_type": "prodigy",
     "latent_mixup_alpha": 0.0,
     "latent_noise_sigma": 0.0,
     "gradient_checkpointing": true,
     "resume_from": ""
   },
   "experiments": [
-    {"id": "baseline_r128"}
+    {"id": "baseline"}
   ]
 }
 ```
@@ -634,28 +633,30 @@ Key settings:
 - **`gradient_checkpointing: true`** — saves ~3-5 GB VRAM by recomputing activations (~25% slower)
 - **`batch_size: 1` + `grad_accum: 8`** — same gradient quality as batch 8, fits in VRAM
 
-If you still run out of VRAM, lower `rank` to 64.
+If you still run out of VRAM, lower `rank` to 32.
 
 ---
 
 ## Recommended defaults
 
-Optimized based on five rounds of sweep testing:
+Optimized based on ten rounds of sweep testing (v1-v10), validated by the top 5 ranked adapters:
 
 | Parameter | Value | Rationale |
 |---|---|---|
 | target | `all_attn_mlp` | Maximum adaptation capacity (234 layers) |
-| rank | 128 | Best across all sweeps for 128D latent space |
-| alpha | 128 | 1:1 ratio with rank (HunyuanVideo convention) |
-| lr | 1e-4 | Proven across AudioLDM and SelVA |
-| schedule_type | `constant` | Cosine decays too fast, wastes later steps |
+| rank | 64 | Best across all sweeps — rank 128 allows prodigy LR overshoot (v7) |
+| alpha | 64 | 1:1 ratio with rank (HunyuanVideo convention) |
+| optimizer_type | `prodigy` | Adaptive LR — +61% PBC over AdamW (v6), auto-tunes per-parameter rates |
+| lr | 5e-5 | Base LR for prodigy (prodigy adapts internally) |
+| schedule_type | `cosine` | Works well with prodigy's adaptive rates |
 | batch_size | 8 | Good gradient quality without excess |
-| timestep_mode | `curriculum` | Best config — first to break SC < 1.0, no late-stage regression |
-| curriculum_switch | 0.6 | Transition from logit_normal to uniform at 60% |
-| steps | 15000 | Select best checkpoint by metrics + listening |
+| timestep_mode | `uniform` | All 5 best adapters used uniform with prodigy |
+| logit_normal_sigma | 0.7 | Best sigma from v9-v10 sweeps (PBC=0.661) |
+| steps | 13000 | Best checkpoints at 12k-13k; perceptual quality degrades after 14k |
 | precision | bf16 | Full quality, Ampere+ standard |
 | warmup_steps | 100 | Stable start |
-| save_every | 500 | Regular checkpoints + eval samples |
+| save_every | 1000 | Regular checkpoints + eval samples |
+| visual_dropout_prob | 0.5 | Proven default — decouples visual identity from audio |
 
 ---
 

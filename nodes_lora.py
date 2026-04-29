@@ -1444,7 +1444,6 @@ class FoleyTuneLoRAScheduler:
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
-    # Default training params — tuned from sweep results (v5–v10)
     _PARAM_DEFAULTS = {
         "target": "all_attn_mlp", "rank": 64, "alpha": 64.0,
         "lr": 5e-5, "steps": 13000, "batch_size": 8, "grad_accum": 1,

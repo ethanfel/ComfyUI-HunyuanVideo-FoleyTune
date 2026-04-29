@@ -2168,32 +2168,37 @@ class FoleyTuneDatasetSaver:
             "output_root": str(out_path.parent / "output"),
             "base": {
                 "target": "all_attn_mlp",
-                "rank": 128,
-                "alpha": 128,
-                "lr": 1e-4,
-                "steps": 15000,
+                "rank": 64,
+                "alpha": 64,
+                "lr": 5e-5,
+                "steps": 13000,
                 "batch_size": 8,
                 "grad_accum": 1,
                 "warmup_steps": 100,
                 "save_every": 1000,
-                "timestep_mode": "curriculum",
+                "timestep_mode": "uniform",
                 "precision": "bf16",
                 "seed": 42,
-                "logit_normal_sigma": 1.0,
-                "curriculum_switch": 0.6,
+                "logit_normal_sigma": 0.7,
+                "curriculum_switch": 0.5,
                 "init_mode": "standard",
                 "use_rslora": False,
                 "lora_dropout": 0.0,
                 "lora_plus_ratio": 1.0,
-                "schedule_type": "constant",
+                "schedule_type": "cosine",
                 "latent_mixup_alpha": 0.0,
                 "latent_noise_sigma": 0.0,
-                "visual_dropout_prob": 0.0,
+                "noise_offset": 0.0,
+                "min_snr_gamma": 0.0,
+                "cos_sim_weight": 0.0,
+                "t_min": 0.0,
+                "t_max": 1.0,
+                "visual_dropout_prob": 0.5,
                 "gradient_checkpointing": False,
                 "blocks_to_swap": 0,
                 "resume_from": "",
             },
-            "experiments": [],  # filled after merge
+            "experiments": [],  # filled below
         }
         ds_json_path = out_path / "dataset.json"
         ds_json = {"train": train_names}
@@ -2203,7 +2208,33 @@ class FoleyTuneDatasetSaver:
             ds_json["val"] = val_name
             sweep_json["eval_npz"] = str(out_path / f"{val_name}.npz")
         total_train = len(ds_json.get("train", []))
-        sweep_json["experiments"] = [{"id": f"{sweep_name}_{total_train}clip"}]
+        tag = f"{sweep_name}_{total_train}clip"
+        sweep_json["experiments"] = [
+            {
+                "id": f"{tag}_sigma07_cur05",
+                "description": "Best overall — sigma=0.7, curriculum=0.5 (PBC=0.661)",
+                "logit_normal_sigma": 0.7,
+                "curriculum_switch": 0.5,
+            },
+            {
+                "id": f"{tag}_sigma08_cur05",
+                "description": "Best TV — sigma=0.8, curriculum=0.5 (PBC=0.642, TV=1.82)",
+                "logit_normal_sigma": 0.8,
+                "curriculum_switch": 0.5,
+            },
+            {
+                "id": f"{tag}_sigma07_cur04",
+                "description": "Earlier curriculum — sigma=0.7, curriculum=0.4 (PBC=0.644)",
+                "logit_normal_sigma": 0.7,
+                "curriculum_switch": 0.4,
+            },
+            {
+                "id": f"{tag}_baseline_cur05",
+                "description": "Baseline — default sigma=1.0, curriculum=0.5 (PBC=0.592)",
+                "logit_normal_sigma": 1.0,
+                "curriculum_switch": 0.5,
+            },
+        ]
         with open(ds_json_path, "w") as f:
             json.dump(ds_json, f, indent=2)
 

@@ -6,6 +6,7 @@ import gc
 import copy
 import json
 import time
+import signal
 import hashlib
 from pathlib import Path
 
@@ -264,15 +265,18 @@ class FoleyTuneFeatureExtractor:
         return {
             "required": {
                 "hunyuan_deps": ("FOLEYTUNE_DEPS",),
-                "image": ("IMAGE",),
                 "prompt": ("STRING", {"default": "", "multiline": True}),
                 "negative_prompt": ("STRING", {"default": "", "multiline": True}),
-                "frame_rate": ("FLOAT", {"default": 25.0, "min": 1.0, "max": 60.0, "step": 0.1}),
-                "duration": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 3600.0, "step": 0.1,
-                              "tooltip": "Clip duration in seconds. For chunked generation, set to full video length."}),
                 "cache_dir": ("STRING", {"default": ""}),
                 "name": ("STRING", {"default": "clip",
                           "tooltip": "Base name for auto-incremented files (e.g. clip -> clip_001.npz)"}),
+            },
+            "optional": {
+                "image": ("IMAGE",),
+                "video_features": ("FOLEYTUNE_VIDEO_FEATURES",),
+                "frame_rate": ("FLOAT", {"default": 25.0, "min": 1.0, "max": 60.0, "step": 0.1}),
+                "duration": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 3600.0, "step": 0.1,
+                              "tooltip": "Clip duration in seconds. For chunked generation, set to full video length."}),
             },
         }
 
@@ -282,8 +286,9 @@ class FoleyTuneFeatureExtractor:
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
-    def extract_features(self, hunyuan_deps, image, prompt, negative_prompt, frame_rate,
-                         duration, cache_dir, name):
+    def extract_features(self, hunyuan_deps, prompt, negative_prompt,
+                         cache_dir, name, image=None, video_features=None,
+                         frame_rate=25.0, duration=8.0):
         from hunyuanvideo_foley.utils.feature_utils import (
             encode_video_with_siglip2, encode_video_with_sync, encode_text_feat,
         )
@@ -299,43 +304,51 @@ class FoleyTuneFeatureExtractor:
             idx += 1
         npz_path = cache_dir / f"{name}_{idx:03d}.npz"
 
-        # -- Extract visual features --
-        # image is [T, H, W, C] float32 in [0,1] from ComfyUI
-        # Preprocessing pipelines accept float32 directly (ToDtype is a no-op),
-        # so we skip the full-resolution uint8 copy that would double RAM usage.
-        frames_tchw = image.permute(0, 3, 1, 2)  # [T, C, H, W] float32, view (no copy)
-        total_frames = frames_tchw.shape[0]
+        if video_features is not None:
+            clip_features = video_features["clip_feat"]
+            sync_features = video_features["sync_feat"]
+            duration = video_features["duration"]
+            frame_rate = video_features["fps"]
+        elif image is not None:
+            # -- Extract visual features --
+            # image is [T, H, W, C] float32 in [0,1] from ComfyUI
+            # Preprocessing pipelines accept float32 directly (ToDtype is a no-op),
+            # so we skip the full-resolution uint8 copy that would double RAM usage.
+            frames_tchw = image.permute(0, 3, 1, 2)  # [T, C, H, W] float32, view (no copy)
+            total_frames = frames_tchw.shape[0]
 
-        if duration <= 0:
-            duration = total_frames / frame_rate
-            logger.warning(f"Auto-detected duration={duration:.2f}s from {total_frames} frames at {frame_rate}fps. "
-                           f"Set duration explicitly if this is wrong (e.g. mismatched fps).")
+            if duration <= 0:
+                duration = total_frames / frame_rate
+                logger.warning(f"Auto-detected duration={duration:.2f}s from {total_frames} frames at {frame_rate}fps. "
+                               f"Set duration explicitly if this is wrong (e.g. mismatched fps).")
 
-        # SigLIP2: 8fps, subsample then preprocess (resize to 512x512)
-        siglip2_indices = torch.linspace(0, total_frames - 1, max(1, int(duration * 8))).long()
-        siglip2_processed = torch.stack([
-            hunyuan_deps.siglip2_preprocess(frames_tchw[i]) for i in siglip2_indices
-        ]).unsqueeze(0)
+            # SigLIP2: 8fps, subsample then preprocess (resize to 512x512)
+            siglip2_indices = torch.linspace(0, total_frames - 1, max(1, int(duration * 8))).long()
+            siglip2_processed = torch.stack([
+                hunyuan_deps.siglip2_preprocess(frames_tchw[i]) for i in siglip2_indices
+            ]).unsqueeze(0)
 
-        hunyuan_deps.siglip2_model.to(device)
-        clip_features = encode_video_with_siglip2(
-            siglip2_processed.to(device), hunyuan_deps
-        ).cpu()
-        del siglip2_processed
-        hunyuan_deps.siglip2_model.to(offload_device)
+            hunyuan_deps.siglip2_model.to(device)
+            clip_features = encode_video_with_siglip2(
+                siglip2_processed.to(device), hunyuan_deps
+            ).cpu()
+            del siglip2_processed
+            hunyuan_deps.siglip2_model.to(offload_device)
 
-        # Synchformer: 25fps, subsample then preprocess (resize to 224x224)
-        sync_indices = torch.linspace(0, total_frames - 1, max(16, int(duration * 25))).long()
-        sync_processed = torch.stack([
-            hunyuan_deps.syncformer_preprocess(frames_tchw[i]) for i in sync_indices
-        ]).unsqueeze(0)
+            # Synchformer: 25fps, subsample then preprocess (resize to 224x224)
+            sync_indices = torch.linspace(0, total_frames - 1, max(16, int(duration * 25))).long()
+            sync_processed = torch.stack([
+                hunyuan_deps.syncformer_preprocess(frames_tchw[i]) for i in sync_indices
+            ]).unsqueeze(0)
 
-        hunyuan_deps.syncformer_model.to(device)
-        sync_features = encode_video_with_sync(
-            sync_processed.to(device), hunyuan_deps
-        ).cpu()
-        del sync_processed
-        hunyuan_deps.syncformer_model.to(offload_device)
+            hunyuan_deps.syncformer_model.to(device)
+            sync_features = encode_video_with_sync(
+                sync_processed.to(device), hunyuan_deps
+            ).cpu()
+            del sync_processed
+            hunyuan_deps.syncformer_model.to(offload_device)
+        else:
+            raise ValueError("Either 'image' or 'video_features' must be provided")
 
         # CLAP text embedding -- must use last_hidden_state [B, seq_len, 768], NOT text_embeds (pooled)
         hunyuan_deps.clap_model.to(device)
@@ -1642,6 +1655,21 @@ class FoleyTuneLoRAScheduler:
         # Collect loss histories for comparison chart
         all_loss_histories = {}
 
+        # SIGUSR1 handler: skip current experiment and move to next
+        _skip_flag_path = output_root / "skip_current.flag"
+        _prev_sigusr1 = signal.getsignal(signal.SIGUSR1)
+
+        def _sigusr1_skip(signum, frame):
+            _skip_flag_path.touch()
+            logger.info("SIGUSR1 received — skipping to next experiment")
+
+        signal.signal(signal.SIGUSR1, _sigusr1_skip)
+        logger.info(
+            f"Sweep PID {os.getpid()} | "
+            f"Skip to next experiment: kill -USR1 {os.getpid()}  or  "
+            f"touch {_skip_flag_path}"
+        )
+
         for exp in experiments:
             exp_id = exp.get("id", f"exp_{len(results)}")
             # Reload sweep JSON to pick up on-disk edits between experiments
@@ -2110,6 +2138,8 @@ class FoleyTuneLoRAScheduler:
             }
             with open(summary_path, "w") as f:
                 json.dump(summary, f, indent=2, default=str)
+
+        signal.signal(signal.SIGUSR1, _prev_sigusr1)
 
         # Generate comparison chart and save to temp for inline preview
         curve_data = [{"id": eid, "loss_history": lh} for eid, lh in all_loss_histories.items()]

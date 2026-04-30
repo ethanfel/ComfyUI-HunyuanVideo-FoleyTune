@@ -1189,8 +1189,12 @@ class FoleyTuneLoRATrainer:
             if (step + 1) % log_interval == 0:
                 avg_loss = np.mean(losses[-log_interval:])
                 elapsed = time.time() - t_start
+                _lr_display = scheduler.get_last_lr()[0]
+                _d_val = optimizer.param_groups[0].get('d')
+                if _d_val is not None:
+                    _lr_display = _d_val * scheduler.get_last_lr()[0]
                 logger.info(f"Step {step+1}/{steps} | loss: {avg_loss:.4f} | "
-                           f"lr: {scheduler.get_last_lr()[0]:.2e} | "
+                           f"lr: {_lr_display:.2e} | "
                            f"elapsed: {elapsed:.0f}s")
 
                 preview_img = _draw_loss_curve(
@@ -1927,8 +1931,12 @@ class FoleyTuneLoRAScheduler:
                         if (step + 1) % 50 == 0:
                             avg_loss = np.mean(losses[-50:])
                             elapsed = time.time() - t_start
+                            _lr_display = lr_sched.get_last_lr()[0]
+                            _d_val = optimizer.param_groups[0].get('d')
+                            if _d_val is not None:
+                                _lr_display = _d_val * lr_sched.get_last_lr()[0]
                             logger.info(f"[{exp_id}] Step {step+1}/{config['steps']} | "
-                                       f"loss: {avg_loss:.4f} | lr: {lr_sched.get_last_lr()[0]:.2e} | "
+                                       f"loss: {avg_loss:.4f} | lr: {_lr_display:.2e} | "
                                        f"elapsed: {elapsed:.0f}s")
 
                             preview_img = _draw_loss_curve(

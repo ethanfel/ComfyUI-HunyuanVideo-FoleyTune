@@ -820,7 +820,7 @@ class FoleyTuneLoRATrainer:
                     "default": 1.0, "min": 0.8, "max": 1.0, "step": 0.01,
                     "tooltip": "Maximum timestep for sampling. Avoids near-noise timesteps. 0.95 recommended.",
                 }),
-                "optimizer_type": (["adamw", "prodigy"], {"default": "adamw"}),
+                "optimizer_type": (["adamw", "prodigy", "prodigy_plus"], {"default": "adamw"}),
                 "prodigy_d_coef": ("FLOAT", {
                     "default": 1.0, "min": 0.01, "max": 10.0, "step": 0.01,
                     "tooltip": "Prodigy d_coef: scales the learned step size. Lower values (e.g. 0.5) reduce effective lr. Only used with Prodigy optimizer.",
@@ -990,6 +990,14 @@ class FoleyTuneLoRATrainer:
             optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
                                 d_coef=prodigy_d_coef, growth_rate=_growth, decouple=True)
             logger.info(f"Using Prodigy optimizer (d_coef={prodigy_d_coef}, growth_rate={_growth}, decouple=True, wd=0.01)")
+        elif optimizer_type == "prodigy_plus":
+            from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
+            for pg in param_groups:
+                pg.pop("lr", None)
+            optimizer = ProdigyPlusScheduleFree(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
+                                               d_coef=prodigy_d_coef)
+            optimizer.train()
+            logger.info(f"Using Prodigy+ Schedule-Free (d_coef={prodigy_d_coef}, wd=0.01)")
         else:
             optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 
@@ -1214,6 +1222,11 @@ class FoleyTuneLoRATrainer:
                                 ema_state=ema_state)
                 _draw_loss_curve(losses, start_step=start_step, smoothed=_smooth_losses(losses)).save(str(output_path / "loss.png"))
 
+                # Switch schedule-free optimizer to eval mode (averaged weights)
+                _sf_opt = hasattr(optimizer, 'eval') and hasattr(optimizer, 'train')
+                if _sf_opt:
+                    optimizer.eval()
+
                 # Swap in EMA weights for eval (better sample quality)
                 if ema_state is not None:
                     _live_params = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
@@ -1268,6 +1281,8 @@ class FoleyTuneLoRATrainer:
                             p.data.copy_(_live_params[n])
 
                 model.train()
+                if _sf_opt:
+                    optimizer.train()
 
         # Save metrics history
         if metrics_history:
@@ -1708,7 +1723,8 @@ class FoleyTuneLoRAScheduler:
                     else:
                         param_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": _lr}]
 
-                    if config.get("optimizer_type", "adamw") == "prodigy":
+                    _opt_type = config.get("optimizer_type", "adamw")
+                    if _opt_type == "prodigy":
                         from prodigyopt import Prodigy
                         for pg in param_groups:
                             pg.pop("lr", None)
@@ -1718,6 +1734,15 @@ class FoleyTuneLoRAScheduler:
                         optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
                                             d_coef=_d_coef, growth_rate=_growth, decouple=True)
                         logger.info(f"[{exp_id}] Using Prodigy optimizer (d_coef={_d_coef}, growth_rate={_growth}, decouple=True, wd=0.01)")
+                    elif _opt_type == "prodigy_plus":
+                        from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
+                        for pg in param_groups:
+                            pg.pop("lr", None)
+                        _d_coef = config.get("prodigy_d_coef", 1.0)
+                        optimizer = ProdigyPlusScheduleFree(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
+                                                           d_coef=_d_coef)
+                        optimizer.train()
+                        logger.info(f"[{exp_id}] Using Prodigy+ Schedule-Free (d_coef={_d_coef}, wd=0.01)")
                     else:
                         optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 
@@ -1955,6 +1980,11 @@ class FoleyTuneLoRAScheduler:
                             save_checkpoint(model, optimizer, lr_sched, step + 1, meta, ckpt_path,
                                             ema_state=ema_state)
 
+                            # Switch schedule-free optimizer to eval mode (averaged weights)
+                            _sf_opt = hasattr(optimizer, 'eval') and hasattr(optimizer, 'train')
+                            if _sf_opt:
+                                optimizer.eval()
+
                             # Swap in EMA weights for eval
                             if ema_state is not None:
                                 _live_params = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
@@ -2005,6 +2035,8 @@ class FoleyTuneLoRAScheduler:
                                         p.data.copy_(_live_params[n])
 
                             model.train()
+                            if _sf_opt:
+                                optimizer.train()
 
                             logger.info(f"[{exp_id}] Step {step+1}: "
                                        f"loss={step_metrics['loss']:.4f}  "

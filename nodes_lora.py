@@ -267,6 +267,9 @@ class FoleyTuneFeatureExtractor:
                 "hunyuan_deps": ("FOLEYTUNE_DEPS",),
                 "prompt": ("STRING", {"default": "", "multiline": True}),
                 "negative_prompt": ("STRING", {"default": "", "multiline": True}),
+                "frame_rate": ("FLOAT", {"default": 25.0, "min": 1.0, "max": 60.0, "step": 0.1}),
+                "duration": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 3600.0, "step": 0.1,
+                              "tooltip": "Clip duration in seconds. For chunked generation, set to full video length."}),
                 "cache_dir": ("STRING", {"default": ""}),
                 "name": ("STRING", {"default": "clip",
                           "tooltip": "Base name for auto-incremented files (e.g. clip -> clip_001.npz)"}),
@@ -274,9 +277,6 @@ class FoleyTuneFeatureExtractor:
             "optional": {
                 "image": ("IMAGE",),
                 "video_features": ("FOLEYTUNE_VIDEO_FEATURES",),
-                "frame_rate": ("FLOAT", {"default": 25.0, "min": 1.0, "max": 60.0, "step": 0.1}),
-                "duration": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 3600.0, "step": 0.1,
-                              "tooltip": "Clip duration in seconds. For chunked generation, set to full video length."}),
             },
         }
 
@@ -287,8 +287,8 @@ class FoleyTuneFeatureExtractor:
     OUTPUT_NODE = True
 
     def extract_features(self, hunyuan_deps, prompt, negative_prompt,
-                         cache_dir, name, image=None, video_features=None,
-                         frame_rate=25.0, duration=8.0):
+                         frame_rate, duration, cache_dir, name,
+                         image=None, video_features=None):
         from hunyuanvideo_foley.utils.feature_utils import (
             encode_video_with_siglip2, encode_video_with_sync, encode_text_feat,
         )

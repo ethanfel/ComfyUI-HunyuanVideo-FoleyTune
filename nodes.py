@@ -1331,7 +1331,7 @@ class FoleyTuneVideoCombiner:
             "required": {
                 "video_features": ("FOLEYTUNE_VIDEO_FEATURES",),
                 "audio": ("AUDIO",),
-                "output_path": ("STRING", {"default": "", "placeholder": "/path/to/output.mp4"}),
+                "filename_prefix": ("STRING", {"default": "FoleyTune"}),
             },
             "optional": {
                 "audio_codec": (["aac", "flac", "pcm_s16le"], {"default": "aac"}),
@@ -1344,7 +1344,8 @@ class FoleyTuneVideoCombiner:
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
-    def combine(self, video_features, audio, output_path, audio_codec="aac"):
+    def combine(self, video_features, audio, filename_prefix="FoleyTune", audio_codec="aac"):
+        import re
         import tempfile
         import soundfile as sf
 
@@ -1352,11 +1353,25 @@ class FoleyTuneVideoCombiner:
         if not os.path.isfile(source_video):
             raise FileNotFoundError(f"Source video not found: {source_video}")
 
-        if not output_path:
-            base, ext = os.path.splitext(source_video)
-            output_path = f"{base}_foley{ext}"
+        src_ext = os.path.splitext(source_video)[1] or ".mp4"
+        output_dir = folder_paths.get_output_directory()
+        full_output_folder, filename, _, _, _ = folder_paths.get_save_image_path(
+            filename_prefix, output_dir)
+        os.makedirs(full_output_folder, exist_ok=True)
 
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        # Auto-increment counter (same pattern as VHS)
+        max_counter = 0
+        matcher = re.compile(rf"{re.escape(filename)}_(\d+)\..+", re.IGNORECASE)
+        for existing_file in os.listdir(full_output_folder):
+            match = matcher.fullmatch(existing_file)
+            if match:
+                file_counter = int(match.group(1))
+                if file_counter > max_counter:
+                    max_counter = file_counter
+        counter = max_counter + 1
+
+        output_filename = f"{filename}_{counter:05}{src_ext}"
+        output_path = os.path.join(full_output_folder, output_filename)
 
         waveform = audio["waveform"][0].cpu().numpy()
         sample_rate = audio["sample_rate"]
@@ -1387,18 +1402,11 @@ class FoleyTuneVideoCombiner:
 
         logger.info(f"Muxed audio onto video: {output_path}")
 
-        # Symlink to temp for preview (zero-cost, no copy)
-        temp_dir = folder_paths.get_temp_directory()
-        os.makedirs(temp_dir, exist_ok=True)
-        temp_name = f"foleytune_combined_{os.path.basename(output_path)}"
-        temp_path = os.path.join(temp_dir, temp_name)
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
-        os.symlink(os.path.abspath(output_path), temp_path)
-
-        ext = os.path.splitext(output_path)[1] or ".mp4"
-        return {"ui": {"gifs": [{"filename": temp_name, "subfolder": "", "type": "temp",
-                                  "format": f"video/{ext.lstrip('.')}"}]},
+        subfolder = os.path.relpath(full_output_folder, output_dir)
+        if subfolder == ".":
+            subfolder = ""
+        return {"ui": {"gifs": [{"filename": output_filename, "subfolder": subfolder,
+                                  "type": "output", "format": f"video/{src_ext.lstrip('.')}"}]},
                 "result": (str(output_path),)}
 
 # -----------------------------------------------------------------------------------

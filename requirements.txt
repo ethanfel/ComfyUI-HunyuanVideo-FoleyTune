@@ -32,3 +32,4 @@ praat-parselmouth
 # LoRA training (loss curves, eval charts, optimizers)
 matplotlib
 prodigyopt
+prodigy-plus-schedule-free

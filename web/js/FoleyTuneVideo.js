@@ -52,7 +52,7 @@ function addUploadWidget(nodeType) {
 
         const fileInput = document.createElement("input");
         fileInput.type = "file";
-        fileInput.accept = VIDEO_EXTENSIONS.map((e) => "video/" + e).join(",");
+        fileInput.accept = "video/*,image/gif";
         fileInput.style.display = "none";
         document.body.appendChild(fileInput);
 

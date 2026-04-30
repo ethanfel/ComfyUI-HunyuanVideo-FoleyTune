@@ -117,11 +117,19 @@ def _ffprobe_video_info(video_path: str) -> dict:
         str(video_path),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe failed on {video_path}: {result.stderr}")
     info = json.loads(result.stdout)
-    vs = next(s for s in info["streams"] if s["codec_type"] == "video")
+    vs = next((s for s in info["streams"] if s["codec_type"] == "video"), None)
+    if vs is None:
+        raise RuntimeError(f"No video stream found in {video_path}")
     fps_parts = vs.get("r_frame_rate", "25/1").split("/")
     fps = float(fps_parts[0]) / float(fps_parts[1]) if len(fps_parts) == 2 else float(fps_parts[0])
     duration = float(info["format"].get("duration", 0))
+    if duration <= 0:
+        duration = float(vs.get("duration", 0))
+    if duration <= 0:
+        raise RuntimeError(f"Cannot determine duration of {video_path}")
     return {
         "fps": fps,
         "duration": duration,
@@ -184,6 +192,8 @@ def _extract_video_features(video_path: str, hunyuan_deps, start_time: float = 0
     info = _ffprobe_video_info(video_path)
     if duration <= 0:
         duration = info["duration"] - start_time
+    if duration <= 0:
+        raise ValueError(f"Invalid duration {duration:.2f}s (start_time={start_time}s exceeds video length {info['duration']:.2f}s)")
 
     # SigLIP2: decode at 512x512 (stretch), 8fps
     siglip2_frames = _ffmpeg_decode_frames(video_path, 512, 8.0, start_time, duration,
@@ -1229,10 +1239,11 @@ class FoleyTuneVideoLoader:
         temp_dir = folder_paths.get_temp_directory()
         os.makedirs(temp_dir, exist_ok=True)
         ext = os.path.splitext(video_path)[1] or ".mp4"
-        temp_name = f"foleytune_preview_{os.path.basename(video_path)}"
+        temp_name = f"foleytune_preview_{hashlib.md5(video_path.encode()).hexdigest()[:8]}_{os.path.basename(video_path)}"
         temp_path = os.path.join(temp_dir, temp_name)
-        if not os.path.exists(temp_path):
-            os.symlink(os.path.abspath(video_path), temp_path)
+        if os.path.islink(temp_path) or os.path.exists(temp_path):
+            os.unlink(temp_path)
+        os.symlink(os.path.abspath(video_path), temp_path)
 
         return {"ui": {"gifs": [{"filename": temp_name, "subfolder": "", "type": "temp",
                                   "format": f"video/{ext.lstrip('.')}"}]},
@@ -1288,8 +1299,9 @@ class FoleyTuneVideoLoaderUpload:
         ext = os.path.splitext(video)[1] or ".mp4"
         temp_name = f"foleytune_preview_{video}"
         temp_path = os.path.join(temp_dir, temp_name)
-        if not os.path.exists(temp_path):
-            os.symlink(os.path.abspath(video_path), temp_path)
+        if os.path.islink(temp_path) or os.path.exists(temp_path):
+            os.unlink(temp_path)
+        os.symlink(os.path.abspath(video_path), temp_path)
 
         return {"ui": {"gifs": [{"filename": temp_name, "subfolder": "", "type": "temp",
                                   "format": f"video/{ext.lstrip('.')}"}]},
@@ -1346,7 +1358,7 @@ class FoleyTuneVideoCombiner:
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
-        waveform = audio["waveform"].squeeze(0).cpu().numpy()
+        waveform = audio["waveform"][0].cpu().numpy()
         sample_rate = audio["sample_rate"]
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:

@@ -13,16 +13,23 @@
 ### Task 1: Add `_ffmpeg_decode_frames()` helper function
 
 **Files:**
-- Modify: `nodes.py` (add after imports, before first class ~line 105)
+- Modify: `nodes.py` (add new imports at top, add helpers after imports before first class ~line 105)
 
-**Step 1: Write the helper function**
+**Step 1: Add missing imports to the top of `nodes.py`**
 
-Add a utility function that decodes video frames at a target resolution and fps via ffmpeg subprocess, yielding batches of numpy arrays. This avoids loading the entire video into RAM.
-
+Add after `import os` (line 2):
 ```python
+import json
 import subprocess
 import shutil
+import numpy as np
+```
 
+**Step 2: Write the helper functions**
+
+Add after the imports block, before the first class definition:
+
+```python
 _VIDEO_EXTENSIONS = {'webm', 'mp4', 'mkv', 'gif', 'mov', 'avi', 'flv', 'wmv'}
 
 def _ffprobe_video_info(video_path: str) -> dict:
@@ -35,8 +42,7 @@ def _ffprobe_video_info(video_path: str) -> dict:
         str(video_path),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    import json as _json
-    info = _json.loads(result.stdout)
+    info = json.loads(result.stdout)
     vs = next(s for s in info["streams"] if s["codec_type"] == "video")
     fps_parts = vs.get("r_frame_rate", "25/1").split("/")
     fps = float(fps_parts[0]) / float(fps_parts[1]) if len(fps_parts) == 2 else float(fps_parts[0])
@@ -50,8 +56,13 @@ def _ffprobe_video_info(video_path: str) -> dict:
 
 
 def _ffmpeg_decode_frames(video_path: str, target_size: int, target_fps: float,
-                          start_time: float = 0.0, duration: float = 0.0) -> np.ndarray:
+                          start_time: float = 0.0, duration: float = 0.0,
+                          resize_mode: str = "stretch") -> torch.Tensor:
     """Decode video frames at target resolution/fps via ffmpeg pipe.
+    
+    Args:
+        resize_mode: "stretch" forces both dims to target_size (SigLIP2).
+                     "crop" resizes shortest edge to target_size then center-crops (Synchformer).
     
     Returns [T, C, H, W] float32 tensor normalized to [-1, 1].
     """
@@ -62,12 +73,14 @@ def _ffmpeg_decode_frames(video_path: str, target_size: int, target_fps: float,
     cmd += ["-i", str(video_path)]
     if duration > 0:
         cmd += ["-t", str(duration)]
-    cmd += [
-        "-vf", f"scale={target_size}:{target_size}:flags=bicubic,fps={target_fps}",
-        "-pix_fmt", "rgb24",
-        "-f", "rawvideo",
-        "-",
-    ]
+
+    if resize_mode == "crop":
+        vf = (f"scale={target_size}:{target_size}:force_original_aspect_ratio=increase:flags=bicubic,"
+              f"crop={target_size}:{target_size},fps={target_fps}")
+    else:
+        vf = f"scale={target_size}:{target_size}:flags=bicubic,fps={target_fps}"
+
+    cmd += ["-vf", vf, "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
     result = subprocess.run(cmd, capture_output=True, timeout=300)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg decode failed: {result.stderr.decode()}")
@@ -78,7 +91,6 @@ def _ffmpeg_decode_frames(video_path: str, target_size: int, target_fps: float,
     if n_frames == 0:
         raise RuntimeError(f"No frames decoded from {video_path}")
     frames = raw[:n_frames * frame_size].reshape(n_frames, target_size, target_size, 3)
-    # [T, H, W, C] uint8 -> [T, C, H, W] float32 normalized [-1, 1]
     tensor = torch.from_numpy(frames.copy()).permute(0, 3, 1, 2).float() / 255.0
     tensor = (tensor - 0.5) / 0.5  # normalize to [-1, 1] matching preprocess transforms
     return tensor
@@ -87,14 +99,16 @@ def _ffmpeg_decode_frames(video_path: str, target_size: int, target_fps: float,
 **Why normalize manually instead of using `deps.siglip2_preprocess` / `deps.syncformer_preprocess`:**
 Both preprocessing pipelines do: Resize → ToTensor (scales 0-255→0-1) → Normalize(mean=0.5, std=0.5) → maps to [-1,1]. Since ffmpeg already handles the resize, we just need the normalization step. This avoids per-frame Python-level transform overhead.
 
-**Note on Synchformer:** The syncformer preprocess uses `v2.Resize(224)` + `v2.CenterCrop(224)` (resize shortest edge to 224 then center-crop). Since we're forcing both dimensions to 224 with ffmpeg's `scale=224:224`, this handles non-square videos by stretching rather than cropping. This is fine for feature extraction — the sync model is robust to minor aspect ratio differences. If exact behavior matching is needed later, use `scale=224:-1,crop=224:224` in the ffmpeg filter chain.
+**Resize modes match the original pipelines exactly:**
+- SigLIP2 uses `transforms.Resize((512, 512))` — tuple = force both dims = stretch → `resize_mode="stretch"`
+- Synchformer uses `v2.Resize(224)` + `v2.CenterCrop(224)` — resize shortest edge then center-crop → `resize_mode="crop"` which maps to ffmpeg `force_original_aspect_ratio=increase,crop=`
 
-**Step 2: Verify ffmpeg is available**
+**Step 3: Verify ffmpeg is available**
 
 Run: `python -c "import shutil; print(shutil.which('ffmpeg')); print(shutil.which('ffprobe'))"`
 Expected: paths to both binaries (already available since VHS depends on them)
 
-**Step 3: Commit**
+**Step 4: Commit**
 
 ```bash
 git add nodes.py
@@ -127,8 +141,9 @@ def _extract_video_features(video_path: str, hunyuan_deps, start_time: float = 0
     if duration <= 0:
         duration = info["duration"] - start_time
     
-    # SigLIP2: decode at 512x512, 8fps
-    siglip2_frames = _ffmpeg_decode_frames(video_path, 512, 8.0, start_time, duration)
+    # SigLIP2: decode at 512x512 (stretch), 8fps
+    siglip2_frames = _ffmpeg_decode_frames(video_path, 512, 8.0, start_time, duration,
+                                           resize_mode="stretch")
     siglip2_batch = siglip2_frames.unsqueeze(0)  # [1, T, C, H, W]
     
     hunyuan_deps.siglip2_model.to(device)
@@ -136,8 +151,14 @@ def _extract_video_features(video_path: str, hunyuan_deps, start_time: float = 0
     del siglip2_frames, siglip2_batch
     hunyuan_deps.siglip2_model.to(offload_device)
     
-    # Synchformer: decode at 224x224, 25fps
-    sync_frames = _ffmpeg_decode_frames(video_path, 224, 25.0, start_time, duration)
+    # Synchformer: decode at 224x224 (resize shortest edge + center-crop), 25fps
+    sync_frames = _ffmpeg_decode_frames(video_path, 224, 25.0, start_time, duration,
+                                        resize_mode="crop")
+    # Synchformer requires at least 16 frames (segment_size=16).
+    # Pad by repeating last frame if video is too short.
+    if sync_frames.shape[0] < 16:
+        pad = sync_frames[-1:].expand(16 - sync_frames.shape[0], -1, -1, -1)
+        sync_frames = torch.cat([sync_frames, pad], dim=0)
     sync_batch = sync_frames.unsqueeze(0)  # [1, T, C, H, W]
     
     hunyuan_deps.syncformer_model.to(device)
@@ -199,21 +220,21 @@ class FoleyTuneVideoLoader:
     RETURN_NAMES = ("video_features", "duration")
     FUNCTION = "load_video"
     CATEGORY = "FoleyTune"
+    OUTPUT_NODE = True
 
     def load_video(self, hunyuan_deps, video_path, start_time=0.0, duration=0.0):
         if not video_path or not os.path.isfile(video_path):
             raise FileNotFoundError(f"Video not found: {video_path}")
         features = _extract_video_features(video_path, hunyuan_deps, start_time, duration)
 
-        # Copy video to temp dir for inline preview
+        # Symlink video to temp dir for inline preview (zero-cost, no copy)
         temp_dir = folder_paths.get_temp_directory()
         os.makedirs(temp_dir, exist_ok=True)
         ext = os.path.splitext(video_path)[1] or ".mp4"
         temp_name = f"foleytune_preview_{os.path.basename(video_path)}"
         temp_path = os.path.join(temp_dir, temp_name)
         if not os.path.exists(temp_path):
-            import shutil as _shutil
-            _shutil.copy2(video_path, temp_path)
+            os.symlink(os.path.abspath(video_path), temp_path)
 
         return {"ui": {"gifs": [{"filename": temp_name, "subfolder": "", "type": "temp",
                                   "format": f"video/{ext.lstrip('.')}"}]},
@@ -238,9 +259,7 @@ Add to `NODE_DISPLAY_NAME_MAPPINGS`:
 "FoleyTuneVideoLoader": "FoleyTune Video Loader",
 ```
 
-**Step 3: Set `OUTPUT_NODE = True`** on the class so the UI return works.
-
-**Step 4: Commit**
+**Step 3: Commit**
 
 ```bash
 git add nodes.py
@@ -292,15 +311,14 @@ class FoleyTuneVideoLoaderUpload:
         video_path = folder_paths.get_annotated_filepath(video)
         features = _extract_video_features(video_path, hunyuan_deps, start_time, duration)
 
-        # Copy to temp dir for preview
+        # Symlink to temp dir for preview (zero-cost, no copy)
         temp_dir = folder_paths.get_temp_directory()
         os.makedirs(temp_dir, exist_ok=True)
         ext = os.path.splitext(video)[1] or ".mp4"
         temp_name = f"foleytune_preview_{video}"
         temp_path = os.path.join(temp_dir, temp_name)
         if not os.path.exists(temp_path):
-            import shutil as _shutil
-            _shutil.copy2(video_path, temp_path)
+            os.symlink(os.path.abspath(video_path), temp_path)
 
         return {"ui": {"gifs": [{"filename": temp_name, "subfolder": "", "type": "temp",
                                   "format": f"video/{ext.lstrip('.')}"}]},
@@ -412,13 +430,14 @@ class FoleyTuneVideoCombiner:
         
         logger.info(f"Muxed audio onto video: {output_path}")
         
-        # Copy to temp for preview
+        # Symlink to temp for preview (zero-cost, no copy)
         temp_dir = folder_paths.get_temp_directory()
         os.makedirs(temp_dir, exist_ok=True)
         temp_name = f"foleytune_combined_{os.path.basename(output_path)}"
         temp_path = os.path.join(temp_dir, temp_name)
-        import shutil as _shutil
-        _shutil.copy2(output_path, temp_path)
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+        os.symlink(os.path.abspath(output_path), temp_path)
         
         ext = os.path.splitext(output_path)[1] or ".mp4"
         return {"ui": {"gifs": [{"filename": temp_name, "subfolder": "", "type": "temp",

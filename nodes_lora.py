@@ -1004,11 +1004,12 @@ class FoleyTuneLoRATrainer:
         # -- LR Scheduler --
         # scheduler.step() is called once per grad_accum training steps,
         # so scale the internal counter back to training steps
+        _sched_type = "constant" if optimizer_type == "prodigy_plus" else schedule_type
         def lr_lambda(sched_step):
             actual_step = sched_step * grad_accum
             if actual_step < warmup_steps:
                 return actual_step / max(warmup_steps, 1)
-            if schedule_type == "cosine":
+            if _sched_type == "cosine":
                 progress = (actual_step - warmup_steps) / max(steps - warmup_steps, 1)
                 return 0.5 * (1 + np.cos(np.pi * progress))
             return 1.0
@@ -1290,6 +1291,9 @@ class FoleyTuneLoRATrainer:
                 json.dump(metrics_history, f, indent=2)
 
         # -- Save final --
+        _sf_final = hasattr(optimizer, 'eval') and hasattr(optimizer, 'train')
+        if _sf_final:
+            optimizer.eval()
         if ema_state is not None:
             for n, p in model.named_parameters():
                 if p.requires_grad and n in ema_state:
@@ -1747,11 +1751,12 @@ class FoleyTuneLoRAScheduler:
                         optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 
                     _ga = config["grad_accum"]
+                    _sched_type = "constant" if _opt_type == "prodigy_plus" else config["schedule_type"]
                     def lr_lambda(sched_step):
                         actual_step = sched_step * _ga
                         if actual_step < config["warmup_steps"]:
                             return actual_step / max(config["warmup_steps"], 1)
-                        if config["schedule_type"] == "cosine":
+                        if _sched_type == "cosine":
                             progress = (actual_step - config["warmup_steps"]) / max(config["steps"] - config["warmup_steps"], 1)
                             return 0.5 * (1 + np.cos(np.pi * progress))
                         return 1.0
@@ -2051,6 +2056,9 @@ class FoleyTuneLoRAScheduler:
                             if p.requires_grad and n in ema_state:
                                 p.data.copy_(ema_state[n])
 
+                    _sf_final = hasattr(optimizer, 'eval') and hasattr(optimizer, 'train')
+                    if _sf_final:
+                        optimizer.eval()
                     meta = {**config, "steps_completed": config["steps"], "prompts": prompts_list}
                     final_path = exp_dir / "adapter_final.pt"
                     save_checkpoint(model, optimizer, lr_sched, config["steps"], meta, final_path, final=True)

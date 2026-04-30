@@ -1193,6 +1193,203 @@ class FoleyTuneSamplerOptions:
 
 
 # -----------------------------------------------------------------------------------
+# NODE: FoleyTune Video Loader (path-based)
+# -----------------------------------------------------------------------------------
+
+class FoleyTuneVideoLoader:
+    """Load video from file path and extract visual features via ffmpeg."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
+                "video_path": ("STRING", {"default": "", "placeholder": "/path/to/video.mp4"}),
+            },
+            "optional": {
+                "start_time": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 0.1,
+                               "tooltip": "Start time in seconds"}),
+                "duration": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 0.1,
+                             "tooltip": "Duration in seconds (0 = full video)"}),
+            },
+        }
+
+    RETURN_TYPES = ("FOLEYTUNE_VIDEO_FEATURES", "FLOAT")
+    RETURN_NAMES = ("video_features", "duration")
+    FUNCTION = "load_video"
+    CATEGORY = "FoleyTune"
+    OUTPUT_NODE = True
+
+    def load_video(self, hunyuan_deps, video_path, start_time=0.0, duration=0.0):
+        if not video_path or not os.path.isfile(video_path):
+            raise FileNotFoundError(f"Video not found: {video_path}")
+        features = _extract_video_features(video_path, hunyuan_deps, start_time, duration)
+
+        # Symlink video to temp dir for inline preview (zero-cost, no copy)
+        temp_dir = folder_paths.get_temp_directory()
+        os.makedirs(temp_dir, exist_ok=True)
+        ext = os.path.splitext(video_path)[1] or ".mp4"
+        temp_name = f"foleytune_preview_{os.path.basename(video_path)}"
+        temp_path = os.path.join(temp_dir, temp_name)
+        if not os.path.exists(temp_path):
+            os.symlink(os.path.abspath(video_path), temp_path)
+
+        return {"ui": {"gifs": [{"filename": temp_name, "subfolder": "", "type": "temp",
+                                  "format": f"video/{ext.lstrip('.')}"}]},
+                "result": (features, features["duration"])}
+
+    @classmethod
+    def IS_CHANGED(cls, video_path, **kwargs):
+        if not video_path or not os.path.isfile(video_path):
+            return ""
+        return os.path.getmtime(video_path)
+
+# -----------------------------------------------------------------------------------
+# NODE: FoleyTune Video Loader (Upload / combo)
+# -----------------------------------------------------------------------------------
+
+class FoleyTuneVideoLoaderUpload:
+    """Load video from ComfyUI input directory with upload support."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        input_dir = folder_paths.get_input_directory()
+        files = []
+        for f in sorted(os.listdir(input_dir)):
+            if os.path.isfile(os.path.join(input_dir, f)):
+                ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
+                if ext in _VIDEO_EXTENSIONS:
+                    files.append(f)
+        return {
+            "required": {
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
+                "video": (files,),
+            },
+            "optional": {
+                "start_time": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 0.1}),
+                "duration": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 0.1,
+                             "tooltip": "Duration in seconds (0 = full video)"}),
+            },
+        }
+
+    RETURN_TYPES = ("FOLEYTUNE_VIDEO_FEATURES", "FLOAT")
+    RETURN_NAMES = ("video_features", "duration")
+    FUNCTION = "load_video"
+    CATEGORY = "FoleyTune"
+    OUTPUT_NODE = True
+
+    def load_video(self, hunyuan_deps, video, start_time=0.0, duration=0.0):
+        video_path = folder_paths.get_annotated_filepath(video)
+        features = _extract_video_features(video_path, hunyuan_deps, start_time, duration)
+
+        # Symlink to temp dir for preview (zero-cost, no copy)
+        temp_dir = folder_paths.get_temp_directory()
+        os.makedirs(temp_dir, exist_ok=True)
+        ext = os.path.splitext(video)[1] or ".mp4"
+        temp_name = f"foleytune_preview_{video}"
+        temp_path = os.path.join(temp_dir, temp_name)
+        if not os.path.exists(temp_path):
+            os.symlink(os.path.abspath(video_path), temp_path)
+
+        return {"ui": {"gifs": [{"filename": temp_name, "subfolder": "", "type": "temp",
+                                  "format": f"video/{ext.lstrip('.')}"}]},
+                "result": (features, features["duration"])}
+
+    @classmethod
+    def IS_CHANGED(cls, video, **kwargs):
+        image_path = folder_paths.get_annotated_filepath(video)
+        return os.path.getmtime(image_path)
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, video, **kwargs):
+        if not folder_paths.exists_annotated_filepath(video):
+            return f"Invalid video file: {video}"
+        return True
+
+# -----------------------------------------------------------------------------------
+# NODE: FoleyTune Video Combiner — mux audio onto video
+# -----------------------------------------------------------------------------------
+
+class FoleyTuneVideoCombiner:
+    """Mux generated audio onto source video without re-encoding video."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video_features": ("FOLEYTUNE_VIDEO_FEATURES",),
+                "audio": ("AUDIO",),
+                "output_path": ("STRING", {"default": "", "placeholder": "/path/to/output.mp4"}),
+            },
+            "optional": {
+                "audio_codec": (["aac", "flac", "pcm_s16le"], {"default": "aac"}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("output_path",)
+    FUNCTION = "combine"
+    CATEGORY = "FoleyTune"
+    OUTPUT_NODE = True
+
+    def combine(self, video_features, audio, output_path, audio_codec="aac"):
+        import tempfile
+        import soundfile as sf
+
+        source_video = video_features["video_path"]
+        if not os.path.isfile(source_video):
+            raise FileNotFoundError(f"Source video not found: {source_video}")
+
+        if not output_path:
+            base, ext = os.path.splitext(source_video)
+            output_path = f"{base}_foley{ext}"
+
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+        waveform = audio["waveform"].squeeze(0).cpu().numpy()
+        sample_rate = audio["sample_rate"]
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_wav = tmp.name
+        try:
+            sf.write(tmp_wav, waveform.T, sample_rate)
+
+            ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+            cmd = [
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(source_video),
+                "-i", tmp_wav,
+                "-c:v", "copy",
+                "-c:a", audio_codec,
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-shortest",
+                str(output_path),
+            ]
+            result = subprocess.run(cmd, capture_output=True, timeout=120)
+            if result.returncode != 0:
+                raise RuntimeError(f"ffmpeg mux failed: {result.stderr.decode()}")
+        finally:
+            if os.path.exists(tmp_wav):
+                os.unlink(tmp_wav)
+
+        logger.info(f"Muxed audio onto video: {output_path}")
+
+        # Symlink to temp for preview (zero-cost, no copy)
+        temp_dir = folder_paths.get_temp_directory()
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_name = f"foleytune_combined_{os.path.basename(output_path)}"
+        temp_path = os.path.join(temp_dir, temp_name)
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+        os.symlink(os.path.abspath(output_path), temp_path)
+
+        ext = os.path.splitext(output_path)[1] or ".mp4"
+        return {"ui": {"gifs": [{"filename": temp_name, "subfolder": "", "type": "temp",
+                                  "format": f"video/{ext.lstrip('.')}"}]},
+                "result": (str(output_path),)}
+
+# -----------------------------------------------------------------------------------
 # NODE MAPPINGS - This is how ComfyUI discovers the nodes.
 # -----------------------------------------------------------------------------------
 NODE_CLASS_MAPPINGS = {
@@ -1207,6 +1404,9 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneFeatureBlender": FoleyTuneFeatureBlender,
     "FoleyTuneStyleTransfer": FoleyTuneStyleTransfer,
     "FoleyTuneSamplerOptions": FoleyTuneSamplerOptions,
+    "FoleyTuneVideoLoader": FoleyTuneVideoLoader,
+    "FoleyTuneVideoLoaderUpload": FoleyTuneVideoLoaderUpload,
+    "FoleyTuneVideoCombiner": FoleyTuneVideoCombiner,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneModelLoader": "FoleyTune Model Loader",
@@ -1220,4 +1420,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneFeatureBlender": "FoleyTune Feature Blender",
     "FoleyTuneStyleTransfer": "FoleyTune Style Transfer",
     "FoleyTuneSamplerOptions": "FoleyTune Sampler Options",
+    "FoleyTuneVideoLoader": "FoleyTune Video Loader",
+    "FoleyTuneVideoLoaderUpload": "FoleyTune Video Loader (Upload)",
+    "FoleyTuneVideoCombiner": "FoleyTune Video Combiner",
 }

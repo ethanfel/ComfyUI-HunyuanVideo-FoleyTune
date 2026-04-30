@@ -1,5 +1,9 @@
 import sys
 import os
+import json
+import subprocess
+import shutil
+import numpy as np
 import time
 import hashlib
 import weakref
@@ -100,6 +104,124 @@ from .utils import (
     _CudaFactoriesDuringCompile,
     load_dac_any
 )
+
+_VIDEO_EXTENSIONS = {'webm', 'mp4', 'mkv', 'gif', 'mov', 'avi', 'flv', 'wmv'}
+
+def _ffprobe_video_info(video_path: str) -> dict:
+    """Get video duration, fps, width, height via ffprobe."""
+    cmd = [
+        shutil.which("ffprobe") or "ffprobe",
+        "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams", "-show_format",
+        str(video_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    info = json.loads(result.stdout)
+    vs = next(s for s in info["streams"] if s["codec_type"] == "video")
+    fps_parts = vs.get("r_frame_rate", "25/1").split("/")
+    fps = float(fps_parts[0]) / float(fps_parts[1]) if len(fps_parts) == 2 else float(fps_parts[0])
+    duration = float(info["format"].get("duration", 0))
+    return {
+        "fps": fps,
+        "duration": duration,
+        "width": int(vs["width"]),
+        "height": int(vs["height"]),
+    }
+
+
+def _ffmpeg_decode_frames(video_path: str, target_size: int, target_fps: float,
+                          start_time: float = 0.0, duration: float = 0.0,
+                          resize_mode: str = "stretch") -> torch.Tensor:
+    """Decode video frames at target resolution/fps via ffmpeg pipe.
+
+    Args:
+        resize_mode: "stretch" forces both dims to target_size (SigLIP2).
+                     "crop" resizes shortest edge to target_size then center-crops (Synchformer).
+
+    Returns [T, C, H, W] float32 tensor normalized to [-1, 1].
+    """
+    ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error"]
+    if start_time > 0:
+        cmd += ["-ss", str(start_time)]
+    cmd += ["-i", str(video_path)]
+    if duration > 0:
+        cmd += ["-t", str(duration)]
+
+    if resize_mode == "crop":
+        vf = (f"scale={target_size}:{target_size}:force_original_aspect_ratio=increase:flags=bicubic,"
+              f"crop={target_size}:{target_size},fps={target_fps}")
+    else:
+        vf = f"scale={target_size}:{target_size}:flags=bicubic,fps={target_fps}"
+
+    cmd += ["-vf", vf, "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
+    result = subprocess.run(cmd, capture_output=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg decode failed: {result.stderr.decode()}")
+
+    raw = np.frombuffer(result.stdout, dtype=np.uint8)
+    frame_size = target_size * target_size * 3
+    n_frames = len(raw) // frame_size
+    if n_frames == 0:
+        raise RuntimeError(f"No frames decoded from {video_path}")
+    frames = raw[:n_frames * frame_size].reshape(n_frames, target_size, target_size, 3)
+    tensor = torch.from_numpy(frames.copy()).permute(0, 3, 1, 2).float() / 255.0
+    tensor = (tensor - 0.5) / 0.5
+    return tensor
+
+
+def _extract_video_features(video_path: str, hunyuan_deps, start_time: float = 0.0,
+                            duration: float = 0.0) -> dict:
+    """Decode video and extract SigLIP2 + Synchformer features without full-res tensors."""
+    from hunyuanvideo_foley.utils.feature_utils import (
+        encode_video_with_siglip2, encode_video_with_sync,
+    )
+
+    device = mm.get_torch_device()
+    offload_device = mm.unet_offload_device()
+
+    info = _ffprobe_video_info(video_path)
+    if duration <= 0:
+        duration = info["duration"] - start_time
+
+    # SigLIP2: decode at 512x512 (stretch), 8fps
+    siglip2_frames = _ffmpeg_decode_frames(video_path, 512, 8.0, start_time, duration,
+                                           resize_mode="stretch")
+    siglip2_batch = siglip2_frames.unsqueeze(0)  # [1, T, C, H, W]
+
+    hunyuan_deps.siglip2_model.to(device)
+    clip_feat = encode_video_with_siglip2(siglip2_batch.to(device), hunyuan_deps).cpu()
+    del siglip2_frames, siglip2_batch
+    hunyuan_deps.siglip2_model.to(offload_device)
+
+    # Synchformer: decode at 224x224 (resize shortest edge + center-crop), 25fps
+    sync_frames = _ffmpeg_decode_frames(video_path, 224, 25.0, start_time, duration,
+                                        resize_mode="crop")
+    # Synchformer requires at least 16 frames (segment_size=16).
+    # Pad by repeating last frame if video is too short.
+    if sync_frames.shape[0] < 16:
+        pad = sync_frames[-1:].expand(16 - sync_frames.shape[0], -1, -1, -1)
+        sync_frames = torch.cat([sync_frames, pad], dim=0)
+    sync_batch = sync_frames.unsqueeze(0)  # [1, T, C, H, W]
+
+    hunyuan_deps.syncformer_model.to(device)
+    sync_feat = encode_video_with_sync(sync_batch.to(device), hunyuan_deps).cpu()
+    del sync_frames, sync_batch
+    hunyuan_deps.syncformer_model.to(offload_device)
+
+    torch.cuda.empty_cache()
+
+    logger.info(f"Extracted features: clip={clip_feat.shape}, sync={sync_feat.shape}, "
+                f"duration={duration:.2f}s from {video_path}")
+
+    return {
+        "clip_feat": clip_feat,      # [1, T_clip, 768]
+        "sync_feat": sync_feat,      # [1, T_sync, 768]
+        "video_path": str(video_path),
+        "duration": duration,
+        "fps": info["fps"],
+    }
 
 # -----------------------------------------------------------------------------------
 # NODE 1: FoleyTune Model Loader (refactored: pure load)

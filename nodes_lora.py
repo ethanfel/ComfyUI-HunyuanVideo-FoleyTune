@@ -988,8 +988,8 @@ class FoleyTuneLoRATrainer:
                 pg.pop("lr", None)
             _growth = float("inf") if prodigy_growth_rate <= 0 else prodigy_growth_rate
             optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
-                                d_coef=prodigy_d_coef, growth_rate=_growth)
-            logger.info(f"Using Prodigy optimizer (d_coef={prodigy_d_coef}, growth_rate={_growth})")
+                                d_coef=prodigy_d_coef, growth_rate=_growth, decouple=True)
+            logger.info(f"Using Prodigy optimizer (d_coef={prodigy_d_coef}, growth_rate={_growth}, decouple=True, wd=0.01)")
         else:
             optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 
@@ -1621,6 +1621,17 @@ class FoleyTuneLoRAScheduler:
 
         for exp in experiments:
             exp_id = exp.get("id", f"exp_{len(results)}")
+            # Reload sweep JSON to pick up on-disk edits between experiments
+            try:
+                with open(sweep_json) as _sf:
+                    _live = json.load(_sf)
+                _live_by_id = {e.get("id"): e for e in _live.get("experiments", [])}
+                if exp_id in _live_by_id:
+                    exp = _live_by_id[exp_id]
+                    base_config = _live.get("base", base_config)
+                    logger.info(f"Reloaded config for {exp_id} from disk")
+            except Exception:
+                pass
 
             if exp_id in completed_ids:
                 # Check if new config requests more steps than completed run
@@ -1701,8 +1712,8 @@ class FoleyTuneLoRAScheduler:
                         _growth = config.get("prodigy_growth_rate", 0.0)
                         _growth = float("inf") if _growth <= 0 else _growth
                         optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
-                                            d_coef=_d_coef, growth_rate=_growth)
-                        logger.info(f"[{exp_id}] Using Prodigy optimizer (d_coef={_d_coef}, growth_rate={_growth})")
+                                            d_coef=_d_coef, growth_rate=_growth, decouple=True)
+                        logger.info(f"[{exp_id}] Using Prodigy optimizer (d_coef={_d_coef}, growth_rate={_growth}, decouple=True, wd=0.01)")
                     else:
                         optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 

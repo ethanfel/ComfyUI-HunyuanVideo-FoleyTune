@@ -28,6 +28,15 @@ function addVideoPreview(nodeType) {
             hideOnZoom: false,
         });
 
+        requestAnimationFrame(() => {
+            const container = videoEl.parentElement;
+            if (container) {
+                container.style.border = "none";
+                container.style.outline = "none";
+                container.style.background = "transparent";
+            }
+        });
+
         node._ftVideoPreview = { videoEl, previewWidget };
 
         // Update preview after execution

@@ -1275,7 +1275,12 @@ class FoleyTuneLoRATrainer:
                            f"LSD={step_metrics.get('log_spectral_distance_db', 0):.2f}dB  "
                            f"MCD={step_metrics.get('mel_cepstral_distortion', 0):.2f}  "
                            f"HF={step_metrics.get('hf_energy_ratio', 0):.3f}  "
-                           f"SC={step_metrics.get('spectral_convergence', 0):.3f}")
+                           f"SC={step_metrics.get('spectral_convergence', 0):.3f}  "
+                           f"PBC={step_metrics.get('per_band_correlation', 0):.3f}  "
+                           f"SF={step_metrics.get('spectral_flatness', 0):.4f}  "
+                           f"TV={step_metrics.get('temporal_variance', 0):.3f}  "
+                           f"C={step_metrics.get('spectral_centroid_hz', 0):.0f}Hz  "
+                           f"R={step_metrics.get('spectral_rolloff_hz', 0):.0f}Hz")
 
                 # Generate val sample if a val clip was loaded
                 if val_entry is not None:
@@ -2077,7 +2082,12 @@ class FoleyTuneLoRAScheduler:
                                        f"LSD={step_metrics.get('log_spectral_distance_db', 0):.2f}dB  "
                                        f"MCD={step_metrics.get('mel_cepstral_distortion', 0):.2f}  "
                                        f"HF={step_metrics.get('hf_energy_ratio', 0):.3f}  "
-                                       f"SC={step_metrics.get('spectral_convergence', 0):.3f}")
+                                       f"SC={step_metrics.get('spectral_convergence', 0):.3f}  "
+                                       f"PBC={step_metrics.get('per_band_correlation', 0):.3f}  "
+                                       f"SF={step_metrics.get('spectral_flatness', 0):.4f}  "
+                                       f"TV={step_metrics.get('temporal_variance', 0):.3f}  "
+                                       f"C={step_metrics.get('spectral_centroid_hz', 0):.0f}Hz  "
+                                       f"R={step_metrics.get('spectral_rolloff_hz', 0):.0f}Hz")
 
                     # Save final (with EMA weights if enabled)
                     if ema_state is not None:

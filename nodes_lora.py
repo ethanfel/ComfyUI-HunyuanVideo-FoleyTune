@@ -1663,18 +1663,24 @@ class FoleyTuneLoRAScheduler:
 
         # SIGUSR1 handler: skip current experiment and move to next
         _skip_flag_path = output_root / "skip_current.flag"
-        _prev_sigusr1 = signal.getsignal(signal.SIGUSR1)
+        _prev_sigusr1 = None
 
         def _sigusr1_skip(signum, frame):
             _skip_flag_path.touch()
             logger.info("SIGUSR1 received — skipping to next experiment")
 
-        signal.signal(signal.SIGUSR1, _sigusr1_skip)
-        logger.info(
-            f"Sweep PID {os.getpid()} | "
-            f"Skip to next experiment: kill -USR1 {os.getpid()}  or  "
-            f"touch {_skip_flag_path}"
-        )
+        try:
+            _prev_sigusr1 = signal.getsignal(signal.SIGUSR1)
+            signal.signal(signal.SIGUSR1, _sigusr1_skip)
+            logger.info(
+                f"Sweep PID {os.getpid()} | "
+                f"Skip to next experiment: kill -USR1 {os.getpid()}  or  "
+                f"touch {_skip_flag_path}"
+            )
+        except ValueError:
+            logger.info(
+                f"Skip to next experiment: touch {_skip_flag_path}"
+            )
 
         for exp in experiments:
             exp_id = exp.get("id", f"exp_{len(results)}")
@@ -2150,7 +2156,11 @@ class FoleyTuneLoRAScheduler:
             with open(summary_path, "w") as f:
                 json.dump(summary, f, indent=2, default=str)
 
-        signal.signal(signal.SIGUSR1, _prev_sigusr1)
+        if _prev_sigusr1 is not None:
+            try:
+                signal.signal(signal.SIGUSR1, _prev_sigusr1)
+            except ValueError:
+                pass
 
         # Generate comparison chart and save to temp for inline preview
         curve_data = [{"id": eid, "loss_history": lh} for eid, lh in all_loss_histories.items()]

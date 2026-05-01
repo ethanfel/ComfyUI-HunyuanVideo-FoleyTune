@@ -446,18 +446,24 @@ def slice_features_for_chunk(features: dict, t_start: float, t_end: float):
         clip_feat = features["clip_feat"][:, -1:, :]
 
     # Synchformer: segment_size=16, step_size=8, at 25fps
-    # Each segment spans 16/25 = 0.64s, stride = 8/25 = 0.32s
-    # Segment i covers time [i*0.32, i*0.32 + 0.64] seconds
+    # Segment i covers frames [i*8, i*8+16], i.e. time [i*0.32, i*0.32+0.64]s
     # Each segment produces 8 output tokens
-    seg_stride_s = 8.0 / 25.0   # 0.32s per segment stride
+    # For an 8s chunk (200 frames): (200-16)//8+1 = 24 segments = 192 tokens
+    # The naive formula seg_end = int(t_end/stride) overcounts because it ignores
+    # the segment_size=16 window — use the same formula as encode_video_with_sync.
+    sync_fps = 25.0
+    seg_size = 16
+    step_size = 8
     total_sync_tokens = features["sync_feat"].shape[1]
-    seg_start = max(0, int(t_start / seg_stride_s))
-    seg_end = max(seg_start + 1, int(t_end / seg_stride_s))
-    # Convert segment indices to token indices (8 tokens per segment)
+    frame_start = int(t_start * sync_fps)
+    frame_end = int(t_end * sync_fps)
+    chunk_frames = frame_end - frame_start
+    n_segs = max(1, (chunk_frames - seg_size) // step_size + 1)
+    seg_start = max(0, frame_start // step_size)
+    seg_end = min(seg_start + n_segs, total_sync_tokens // 8)
     tok_start = seg_start * 8
-    tok_end = min(seg_end * 8, total_sync_tokens)  # clamp to actual token count
+    tok_end = seg_end * 8
     sync_feat = features["sync_feat"][:, tok_start:tok_end, :]
-    # Ensure at least 8 tokens (one segment)
     if sync_feat.shape[1] == 0:
         sync_feat = features["sync_feat"][:, -8:, :]
 

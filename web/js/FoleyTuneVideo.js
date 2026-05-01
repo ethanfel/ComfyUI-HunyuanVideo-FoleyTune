@@ -18,6 +18,8 @@ function addVideoPreview(nodeType) {
         videoEl.style.verticalAlign = "top";
         videoEl.style.objectFit = "contain";
         videoEl.style.background = "transparent";
+        videoEl.style.border = "none";
+        videoEl.style.outline = "none";
         videoEl.onmouseenter = () => { videoEl.muted = false; };
         videoEl.onmouseleave = () => { videoEl.muted = true; };
 

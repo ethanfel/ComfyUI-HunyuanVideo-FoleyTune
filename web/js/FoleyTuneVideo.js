@@ -15,6 +15,8 @@ function addVideoPreview(nodeType) {
         videoEl.muted = true;
         videoEl.style.width = "100%";
         videoEl.style.display = "none";
+        videoEl.onmouseenter = () => { videoEl.muted = false; };
+        videoEl.onmouseleave = () => { videoEl.muted = true; };
 
         const previewWidget = this.addDOMWidget("video_preview", "preview", videoEl, {
             serialize: false,

@@ -1224,8 +1224,8 @@ class FoleyTuneVideoLoader:
             },
         }
 
-    RETURN_TYPES = ("FOLEYTUNE_VIDEO_FEATURES", "FLOAT")
-    RETURN_NAMES = ("video_features", "duration")
+    RETURN_TYPES = ("FOLEYTUNE_VIDEO_FEATURES",)
+    RETURN_NAMES = ("video_features",)
     FUNCTION = "load_video"
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
@@ -1247,7 +1247,7 @@ class FoleyTuneVideoLoader:
 
         return {"ui": {"gifs": [{"filename": temp_name, "subfolder": "", "type": "temp",
                                   "format": f"video/{ext.lstrip('.')}"}]},
-                "result": (features, features["duration"])}
+                "result": (features,)}
 
     @classmethod
     def IS_CHANGED(cls, video_path, **kwargs):
@@ -1283,8 +1283,8 @@ class FoleyTuneVideoLoaderUpload:
             },
         }
 
-    RETURN_TYPES = ("FOLEYTUNE_VIDEO_FEATURES", "FLOAT")
-    RETURN_NAMES = ("video_features", "duration")
+    RETURN_TYPES = ("FOLEYTUNE_VIDEO_FEATURES",)
+    RETURN_NAMES = ("video_features",)
     FUNCTION = "load_video"
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
@@ -1305,7 +1305,7 @@ class FoleyTuneVideoLoaderUpload:
 
         return {"ui": {"gifs": [{"filename": temp_name, "subfolder": "", "type": "temp",
                                   "format": f"video/{ext.lstrip('.')}"}]},
-                "result": (features, features["duration"])}
+                "result": (features,)}
 
     @classmethod
     def IS_CHANGED(cls, video, **kwargs):
@@ -1335,6 +1335,7 @@ class FoleyTuneVideoCombiner:
             },
             "optional": {
                 "audio_codec": (["aac", "flac", "pcm_s16le"], {"default": "aac"}),
+                "save_output": ("BOOLEAN", {"default": True}),
             },
         }
 
@@ -1344,7 +1345,8 @@ class FoleyTuneVideoCombiner:
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
-    def combine(self, video_features, audio, filename_prefix="FoleyTune", audio_codec="aac"):
+    def combine(self, video_features, audio, filename_prefix="FoleyTune",
+                audio_codec="aac", save_output=True):
         import re
         import tempfile
         import soundfile as sf
@@ -1354,7 +1356,14 @@ class FoleyTuneVideoCombiner:
             raise FileNotFoundError(f"Source video not found: {source_video}")
 
         src_ext = os.path.splitext(source_video)[1] or ".mp4"
-        output_dir = folder_paths.get_output_directory()
+
+        if save_output:
+            output_dir = folder_paths.get_output_directory()
+            output_type = "output"
+        else:
+            output_dir = folder_paths.get_temp_directory()
+            output_type = "temp"
+
         full_output_folder, filename, _, _, _ = folder_paths.get_save_image_path(
             filename_prefix, output_dir)
         os.makedirs(full_output_folder, exist_ok=True)
@@ -1406,7 +1415,7 @@ class FoleyTuneVideoCombiner:
         if subfolder == ".":
             subfolder = ""
         return {"ui": {"gifs": [{"filename": output_filename, "subfolder": subfolder,
-                                  "type": "output", "format": f"video/{src_ext.lstrip('.')}"}]},
+                                  "type": output_type, "format": f"video/{src_ext.lstrip('.')}"}]},
                 "result": (str(output_path),)}
 
 # -----------------------------------------------------------------------------------

@@ -378,12 +378,13 @@ class FoleyTuneDependenciesLoader:
         ])
 
         # Load models from Hugging Face
-        deps['siglip2_model'] = AutoModel.from_pretrained("google/siglip2-base-patch16-512").to(offload_device).eval()
+        deps['siglip2_model'] = AutoModel.from_pretrained("google/siglip2-base-patch16-512", low_cpu_mem_usage=True).to(offload_device).eval()
         deps['clap_tokenizer'] = AutoTokenizer.from_pretrained("laion/larger_clap_general")
-        deps['clap_model'] = ClapTextModelWithProjection.from_pretrained("laion/larger_clap_general").to(offload_device).eval()
+        deps['clap_model'] = ClapTextModelWithProjection.from_pretrained("laion/larger_clap_general", low_cpu_mem_usage=True).to(offload_device).eval()
 
         deps['device'] = device
 
+        gc.collect()
         logger.info("Loaded all HunyuanVideoFoley dependencies.")
         return (AttributeDict(deps),)
 

@@ -15,6 +15,9 @@ function addVideoPreview(nodeType) {
         videoEl.muted = true;
         videoEl.style.width = "100%";
         videoEl.style.display = "none";
+        videoEl.style.verticalAlign = "top";
+        videoEl.style.objectFit = "contain";
+        videoEl.style.background = "transparent";
         videoEl.onmouseenter = () => { videoEl.muted = false; };
         videoEl.onmouseleave = () => { videoEl.muted = true; };
 

@@ -826,6 +826,10 @@ class FoleyTuneLoRATrainer:
                     "default": False,
                     "tooltip": "Weight velocity MSE by per-channel variance from dataset. Upweights perceptually important latent dimensions.",
                 }),
+                "temporal_variance_weight": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Weight for temporal variance loss. Penalises predictions flatter than the target along the time axis, preserving motion-to-sound sync. 0.1 recommended. 0 = disabled.",
+                }),
                 "t_min": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 0.2, "step": 0.01,
                     "tooltip": "Minimum timestep for sampling. Avoids near-clean timesteps. 0.05 recommended.",
@@ -875,6 +879,7 @@ class FoleyTuneLoRATrainer:
               latent_mixup_alpha=0.0, latent_noise_sigma=0.0,
               noise_offset=0.0, min_snr_gamma=0.0, ema_decay=0.0,
               cos_sim_weight=0.0, channel_loss_weight=False,
+              temporal_variance_weight=0.0,
               t_min=0.0, t_max=1.0, optimizer_type="adamw",
               visual_dropout_prob=0.0,
               gradient_checkpointing=False,
@@ -897,6 +902,7 @@ class FoleyTuneLoRATrainer:
             latent_mixup_alpha, latent_noise_sigma,
             noise_offset, min_snr_gamma, ema_decay,
             cos_sim_weight, channel_loss_weight,
+            temporal_variance_weight,
             t_min, t_max, optimizer_type,
             visual_dropout_prob,
             gradient_checkpointing, resume_from,
@@ -911,6 +917,7 @@ class FoleyTuneLoRATrainer:
                      latent_mixup_alpha, latent_noise_sigma,
                      noise_offset, min_snr_gamma, ema_decay,
                      cos_sim_weight, channel_loss_weight,
+                     temporal_variance_weight,
                      t_min, t_max, optimizer_type,
                      visual_dropout_prob,
                      gradient_checkpointing, resume_from,
@@ -1036,9 +1043,13 @@ class FoleyTuneLoRATrainer:
         if resume_from and os.path.exists(resume_from):
             ckpt = torch.load(resume_from, map_location="cpu", weights_only=False)
             load_lora(model, ckpt["state_dict"])
-            if "optimizer" in ckpt:
+            _ckpt_opt = ckpt.get("meta", {}).get("optimizer_type", "adamw")
+            _opt_match = (_ckpt_opt == optimizer_type)
+            if not _opt_match:
+                logger.info(f"Optimizer mismatch (ckpt={_ckpt_opt}, current={optimizer_type}) — loading weights only, fresh optimizer")
+            if _opt_match and "optimizer" in ckpt:
                 optimizer.load_state_dict(ckpt["optimizer"])
-            if "scheduler" in ckpt:
+            if _opt_match and "scheduler" in ckpt:
                 scheduler.load_state_dict(ckpt["scheduler"])
             start_step = ckpt.get("step", 0)
             _resumed_ema = ckpt.get("ema_state", None)
@@ -1074,6 +1085,7 @@ class FoleyTuneLoRATrainer:
             "ema_decay": ema_decay,
             "cos_sim_weight": cos_sim_weight,
             "channel_loss_weight": channel_loss_weight,
+            "temporal_variance_weight": temporal_variance_weight,
             "t_min": t_min, "t_max": t_max,
             "optimizer_type": optimizer_type,
             "gradient_checkpointing": gradient_checkpointing,
@@ -1188,6 +1200,7 @@ class FoleyTuneLoRATrainer:
                 min_snr_gamma=min_snr_gamma,
                 cos_sim_weight=cos_sim_weight,
                 channel_weights=channel_weights,
+                temporal_variance_weight=temporal_variance_weight,
             )
             loss = loss / grad_accum
             loss.backward()
@@ -1496,7 +1509,7 @@ class FoleyTuneLoRAScheduler:
         "lora_plus_ratio": 1.0, "schedule_type": "cosine",
         "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
         "noise_offset": 0.0, "min_snr_gamma": 0.0, "ema_decay": 0.0,
-        "cos_sim_weight": 0.0, "channel_loss_weight": False,
+        "cos_sim_weight": 0.0, "channel_loss_weight": False, "temporal_variance_weight": 0.0,
         "t_min": 0.0, "t_max": 1.0, "optimizer_type": "prodigy",
         "prodigy_d_coef": 1.0, "prodigy_growth_rate": 0.0,
         "visual_dropout_prob": 0.5,
@@ -1810,9 +1823,13 @@ class FoleyTuneLoRAScheduler:
                     if resume_path and os.path.exists(resume_path):
                         ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
                         load_lora(model, ckpt["state_dict"])
-                        if "optimizer" in ckpt:
+                        _ckpt_opt = ckpt.get("meta", {}).get("optimizer_type", "adamw")
+                        _opt_match = (_ckpt_opt == _opt_type)
+                        if not _opt_match:
+                            logger.info(f"[{exp_id}] Optimizer mismatch (ckpt={_ckpt_opt}, current={_opt_type}) — loading weights only, fresh optimizer")
+                        if _opt_match and "optimizer" in ckpt:
                             optimizer.load_state_dict(ckpt["optimizer"])
-                        if "scheduler" in ckpt:
+                        if _opt_match and "scheduler" in ckpt:
                             lr_sched.load_state_dict(ckpt["scheduler"])
                         start_step = ckpt.get("step", 0)
                         _resumed_ema = ckpt.get("ema_state", None)
@@ -1980,6 +1997,7 @@ class FoleyTuneLoRAScheduler:
                             min_snr_gamma=config.get("min_snr_gamma", 0.0),
                             cos_sim_weight=config.get("cos_sim_weight", 0.0),
                             channel_weights=_channel_weights,
+                            temporal_variance_weight=config.get("temporal_variance_weight", 0.0),
                         )
                         loss = loss / config["grad_accum"]
                         loss.backward()

@@ -1215,3 +1215,108 @@ Published as safetensors to [ethanfel/FoleyTune-LoRAs](https://huggingface.co/et
 34. **Extended training (15k) helps sigma=0.7 but hurts sigma=0.8** — tighter timestep distributions benefit from longer refinement; wider distributions overfit with more steps
 35. **12-15k steps is the convergence window** on 299 clips — sigma=0.7 peaked at 15k, sigma=0.8 at 13k
 36. **More data is the remaining big lever** — the PBC/TV tradeoff is a dataset ceiling at 299 clips
+
+---
+
+### JAV Intense Sex Sweep — Rank, Optimizer & Prodigy+ (April–May 2026)
+
+New dataset: 394 unique clips, 8s each, from JAV intense sex content. Starting from the best BJ config (r64, σ=0.7, Prodigy, cosine, curriculum_switch=0.5), adapted for the larger and acoustically different dataset.
+
+#### Phase 1: Sigma & Rank
+
+**Base config:** Prodigy, cosine, curriculum_switch=0.5, batch=8, 15k steps, visual_dropout=0.5.
+
+**Sigma sweep (R64):**
+- σ=0.8 at 13k was the perceptual best — richer temporal dynamics than σ=0.7 for this dataset's frequency profile (85% energy below 1875Hz median rolloff)
+- σ=1.0 diverged at R128 but worked at R64/R96
+
+**Rank sweep:**
+
+| Config | SC | MCD | PBC | Notes |
+|---|---|---|---|---|
+| R64 σ=0.8 (13k) | 1.104 | 9.08 | 0.265 | Previous best |
+| **R96 σ=0.8 (13k)** | **1.100** | **9.27** | **0.357** | **Perceptual winner** |
+| R128 σ=0.8 (15k) | 1.070 | 10.11 | 0.286 | OK but not better perceptually |
+| R128 σ=1.0 (15k) | 1.206 | 11.76 | 0.207 | Diverged — HF ratio 0.45 |
+
+**Finding:** R96 is the sweet spot for 394 clips — R64 too constrained, R128 diverges (especially with σ=1.0). Contradicts the BJ finding where R64 > R96 — larger datasets benefit from higher rank.
+
+#### Phase 2: Prodigy Refinements (R96 σ=0.8)
+
+Tested: decouple, constant schedule, growth_rate, d_coef, noise_offset.
+
+| Experiment | SC | MCD | PBC | Steps | Notes |
+|---|---|---|---|---|---|
+| Resume 13k+decouple | 1.096 | 9.05 | 0.387 | 16k | decouple=True was already default — improvement from more steps, not decouple |
+| Constant schedule | 1.144 | 10.10 | 0.187 | 8k | Too volatile — uncapped d causes instability. Cancelled |
+| Constant+growth_rate=1.02 | 1.160 | 11.83 | 0.152 | 8k | Cap too restrictive. Cancelled |
+| **d_coef=0.5** | **1.088** | 9.12 | 0.215 | 15k | **Best SC** — slower LR adaptation. Rock solid plateau from 10k |
+| noise_offset=0.02 | 1.113 | 9.36 | 0.286 | 15k | Lower loss but advantage not sustained vs plain cosine |
+| noff+dcoef combined | 1.144 | 10.15 | 0.263 | 8k | Not synergistic — oscillating metrics. Cancelled |
+| **Prodigy+ (8k)** | **1.122** | **8.82** | 0.204 | 8k | **Smoothest training, lowest MCD/LSD at 8k** |
+
+**Key findings:**
+- Constant schedule fails with Prodigy — cosine decay is necessary for stable convergence
+- d_coef=0.5 gives best SC but low PBC — useful insight for Phase 3
+- Prodigy+ Schedule-Free (prodigy-plus-schedule-free v2.0.1) was the most promising direction — smoothest training, best loss in fewer steps
+
+#### Phase 3: Prodigy+ Schedule-Free (R96 σ=0.8)
+
+Switched to Prodigy+ as the optimizer. PP has built-in schedule-free optimization, d_limiter, and StableAdamW base. Schedule is forced to constant (PP handles scheduling internally). Requires `optimizer.train()`/`optimizer.eval()` calls for weight averaging.
+
+**PP Experiments:**
+
+| Experiment | SC | MCD | PBC | Steps | Notes |
+|---|---|---|---|---|---|
+| PP+noff=0.02 | 1.047 | 7.35 | 0.496 | 20k | Strong but baseline beats it |
+| **PP baseline** | **1.016** | **7.07** | **0.557** | 20k | **Best at 20k — ahead on every metric** |
+| PP+d_coef=0.5 | 1.194 | 8.97 | 0.152 | 7k | d_coef double-damps PP's built-in d_limiter. Cancelled |
+| **PP baseline ext** | **0.903** | **6.17** | **0.672** | 30k | **All-time best — still improving** |
+| PP no curriculum | 1.062 | 7.94 | 0.453 | 19k | Plateaued — curriculum wins (see below) |
+
+**PP Baseline Trajectory (the money run):**
+
+| Step | SC | MCD | LSD | PBC | Loss |
+|---|---|---|---|---|---|
+| 6k | 1.103 | 8.86 | 19.49 | 0.207 | 1.360 |
+| 10k | 1.122 | 9.35 | 20.11 | 0.247 | 1.382 |
+| 15k | 1.059 | 7.25 | 16.64 | 0.461 | 1.333 |
+| 20k | 1.016 | 7.07 | 16.15 | 0.557 | 1.356 |
+| 22k | 0.996 | 6.48 | 15.42 | 0.591 | 1.323 |
+| 25k | 0.971 | 6.36 | 15.28 | 0.634 | 1.349 |
+| 27k | 0.944 | 6.32 | 15.32 | 0.646 | 1.333 |
+| **30k** | **0.903** | **6.17** | **15.24** | **0.672** | 1.359 |
+
+Massive acceleration after step 10k (curriculum switch at 50% of 20k). SC broke below 1.0 at step 21k. MCD below 7.0 at step 16k. Still improving at 30k — extension to 40k queued.
+
+**Curriculum Ablation:**
+
+Tested PP with `curriculum_switch=0.0` (logit-normal σ=0.8 from step 0, no uniform phase).
+
+| Step | No Curriculum SC | Baseline SC | No Curriculum PBC | Baseline PBC |
+|---|---|---|---|---|
+| 4k | **1.152** | 1.171 | 0.226 | **0.254** |
+| 7k | **1.080** | 1.116 | 0.208 | **0.219** |
+| 10k | **1.089** | 1.122 | 0.211 | **0.247** |
+| 15k | 1.060 | **1.059** | 0.413 | **0.461** |
+| 17k | 1.056 | **1.031** | 0.447 | **0.486** |
+| 19k | 1.062 | **1.022** | 0.453 | **0.530** |
+
+No curriculum converges SC faster early (logit-normal from step 0 gives harder gradients immediately) but plateaus at SC~1.06, PBC~0.45 by 17-19k. The baseline with curriculum blows through those levels and keeps improving.
+
+**Conclusion:** curriculum_switch=0.5 is essential for PP training. The uniform-first phase builds a stable gradient foundation that PP exploits aggressively when harder logit-normal timesteps arrive. Without the curriculum switch, PP learns the hard stuff from the start but converges to a weaker final result.
+
+**Waveform Analysis — PP+noff 10k vs all other runs:**
+
+PP+noff at 10k had crest factor 25.1dB (vs 19-21dB for all other runs) and peak amplitude 0.803 (vs 0.42-0.50). Most balanced frequency distribution: 51% in 500-1kHz, 16% in 1-2kHz, 20% in 2-4kHz. Other runs over-concentrated energy in a single band (dcoef: 70% in 500-1k, baseline: 66% in 2-4k). The combination of noise_offset + PP produced the first waveforms with natural-sounding dynamic range and transient structure. However, the PP baseline without noise_offset ultimately produced better spectral metrics at longer training — PP handles dynamic range on its own given enough steps.
+
+#### Key Findings (JAV Sweep)
+
+37. **R96 > R64 for 394-clip dataset** — more data supports higher rank. Contradicts BJ finding (299 clips → R64 optimal). The rank sweet spot scales with dataset size
+38. **Prodigy+ Schedule-Free >> regular Prodigy** — smoothest training, best final metrics. SC=0.903, MCD=6.17, PBC=0.672 at 30k. Still improving
+39. **PP needs no noise_offset** — noise_offset helps early (better crest factor, dynamic range) but PP baseline overtakes it by 20k. PP handles dynamic range internally given enough steps
+40. **PP d_coef=0.5 is counterproductive** — PP has a built-in d_limiter; halving d_coef double-damps the LR adaptation. Loss stuck at 1.41
+41. **Curriculum switch is essential for PP** — uniform-first phase (curriculum_switch=0.5) builds a stable foundation that accelerates learning when harder timesteps arrive. No-curriculum plateaus at inferior metrics
+42. **PP training scales to 30k+ steps** — no convergence at 30k. The schedule-free optimizer maintains adaptive capacity throughout, unlike cosine which forces convergence via LR decay. Extension to 40k queued
+43. **Constant schedule fails with Prodigy** — uncapped d growth causes oscillating metrics. Cosine decay is necessary for stable convergence with regular Prodigy
+44. **Post-curriculum acceleration is dramatic with PP** — metrics accelerate 2-5k steps after the curriculum switch. SC drops from 1.12 → 0.90 between steps 10k and 30k. PBC climbs from 0.25 → 0.67 in the same window

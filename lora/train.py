@@ -322,7 +322,8 @@ def multi_resolution_spectral_loss(predicted, target, window_sizes=(4, 16, 64), 
 
 def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dtype,
                        visual_dropout_prob=0.0, min_snr_gamma=0.0,
-                       cos_sim_weight=0.0, channel_weights=None):
+                       cos_sim_weight=0.0, channel_weights=None,
+                       temporal_variance_weight=0.0):
     """Compute flow matching velocity prediction loss.
 
     Args:
@@ -406,6 +407,15 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
     if cos_sim_weight > 0:
         cos_loss = 1 - F.cosine_similarity(v_pred, v_target, dim=-1).mean()
         loss = loss + cos_sim_weight * cos_loss
+
+    if temporal_variance_weight > 0:
+        # Penalize predictions with less temporal variation than the target.
+        # Variance along the time axis (dim=-1) measures how dynamic the output is.
+        tv_pred = v_pred.var(dim=-1).mean()
+        tv_target = v_target.var(dim=-1).mean()
+        # ReLU: only penalize when pred is flatter than target, not when it's more dynamic.
+        tv_loss = F.relu(tv_target - tv_pred) / (tv_target.detach() + 1e-8)
+        loss = loss + temporal_variance_weight * tv_loss
 
     return loss
 

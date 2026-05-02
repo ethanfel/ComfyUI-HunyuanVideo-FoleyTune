@@ -318,12 +318,30 @@ def multi_resolution_spectral_loss(predicted, target, window_sizes=(4, 16, 64), 
     return total
 
 
+def visual_dropout_curriculum(base_prob, step, start_step, total_steps,
+                              vd_curriculum_ratio=0.0):
+    """Ramp visual dropout from low (sync-focused) to base_prob (spectral-focused).
+
+    When vd_curriculum_ratio > 0, dropout starts at 10% of base_prob and linearly
+    ramps to base_prob at vd_curriculum_ratio * total_steps. After that, stays at
+    base_prob. When vd_curriculum_ratio == 0, returns base_prob (disabled).
+    """
+    if vd_curriculum_ratio <= 0 or base_prob <= 0:
+        return base_prob
+    progress = (step - start_step) / max(total_steps, 1)
+    if progress >= vd_curriculum_ratio:
+        return base_prob
+    ramp = progress / vd_curriculum_ratio
+    return 0.1 * base_prob + ramp * 0.9 * base_prob
+
+
 # -- Loss computation --------------------------------------------------------
 
 def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dtype,
                        visual_dropout_prob=0.0, min_snr_gamma=0.0,
                        cos_sim_weight=0.0, channel_weights=None,
-                       temporal_variance_weight=0.0):
+                       temporal_variance_weight=0.0, tv_gate_sigma=0.3,
+                       tv_scales=(1, 4, 16)):
     """Compute flow matching velocity prediction loss.
 
     Args:
@@ -409,12 +427,22 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
         loss = loss + cos_sim_weight * cos_loss
 
     if temporal_variance_weight > 0:
-        # Temporal difference loss: penalise mismatch in temporal transitions.
-        # If v_pred is temporally smooth, its first-order differences are near-zero
-        # while v_target's are not — this doubles the gradient for missed spikes.
-        diff_pred = torch.diff(v_pred, dim=-1)
-        diff_target = torch.diff(v_target, dim=-1)
-        tv_loss = F.mse_loss(diff_pred, diff_target)
+        # SNR-gated multi-scale temporal difference loss.
+        # Gate: only fire at low noise where temporal structure is visible.
+        gate = torch.clamp(1.0 - t / tv_gate_sigma, min=0.0)  # [B], 1 at t=0, 0 at t>=gate_sigma
+        tv_loss = torch.tensor(0.0, device=device, dtype=dtype)
+        for s in tv_scales:
+            if s == 1:
+                dp = torch.diff(v_pred, dim=-1)
+                dt = torch.diff(v_target, dim=-1)
+            else:
+                pp = F.avg_pool1d(v_pred, kernel_size=s, stride=s)
+                pt = F.avg_pool1d(v_target, kernel_size=s, stride=s)
+                dp = torch.diff(pp, dim=-1)
+                dt = torch.diff(pt, dim=-1)
+            per_sample = F.mse_loss(dp, dt, reduction='none').mean(dim=(1, 2))
+            tv_loss = tv_loss + (gate * per_sample).mean()
+        tv_loss = tv_loss / len(tv_scales)
         loss = loss + temporal_variance_weight * tv_loss
 
     return loss

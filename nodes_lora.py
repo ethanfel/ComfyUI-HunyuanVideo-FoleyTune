@@ -27,6 +27,7 @@ from .lora.lora import (
 from .lora.train import (
     prepare_dataset, prepare_single_entry, sample_timesteps, flow_matching_loss,
     generate_eval_sample, save_checkpoint, save_meta_json,
+    visual_dropout_curriculum,
 )
 from .lora.spectral_metrics import spectral_metrics, reference_metrics, clap_similarity
 from PIL import Image, ImageDraw
@@ -828,7 +829,15 @@ class FoleyTuneLoRATrainer:
                 }),
                 "temporal_variance_weight": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Weight for temporal variance loss. Penalises predictions flatter than the target along the time axis, preserving motion-to-sound sync. 0.1 recommended. 0 = disabled.",
+                    "tooltip": "Weight for SNR-gated multi-scale temporal diff loss. Penalises missed temporal transitions at low noise levels. 0.3 recommended. 0 = disabled.",
+                }),
+                "tv_gate_sigma": ("FLOAT", {
+                    "default": 0.3, "min": 0.1, "max": 0.8, "step": 0.05,
+                    "tooltip": "Noise threshold for temporal loss gating. Loss only fires when t < this value (low noise = visible temporal structure). 0.3 recommended.",
+                }),
+                "vd_curriculum_ratio": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Visual dropout curriculum. Ramps dropout from 10% of base to full over this fraction of training. Forces sync learning early, spectral quality later. 0.4 recommended. 0 = disabled.",
                 }),
                 "t_min": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 0.2, "step": 0.01,
@@ -880,6 +889,7 @@ class FoleyTuneLoRATrainer:
               noise_offset=0.0, min_snr_gamma=0.0, ema_decay=0.0,
               cos_sim_weight=0.0, channel_loss_weight=False,
               temporal_variance_weight=0.0,
+              tv_gate_sigma=0.3, vd_curriculum_ratio=0.0,
               t_min=0.0, t_max=1.0, optimizer_type="adamw",
               visual_dropout_prob=0.0,
               gradient_checkpointing=False,
@@ -902,7 +912,7 @@ class FoleyTuneLoRATrainer:
             latent_mixup_alpha, latent_noise_sigma,
             noise_offset, min_snr_gamma, ema_decay,
             cos_sim_weight, channel_loss_weight,
-            temporal_variance_weight,
+            temporal_variance_weight, tv_gate_sigma, vd_curriculum_ratio,
             t_min, t_max, optimizer_type,
             visual_dropout_prob,
             gradient_checkpointing, resume_from,
@@ -917,7 +927,7 @@ class FoleyTuneLoRATrainer:
                      latent_mixup_alpha, latent_noise_sigma,
                      noise_offset, min_snr_gamma, ema_decay,
                      cos_sim_weight, channel_loss_weight,
-                     temporal_variance_weight,
+                     temporal_variance_weight, tv_gate_sigma, vd_curriculum_ratio,
                      t_min, t_max, optimizer_type,
                      visual_dropout_prob,
                      gradient_checkpointing, resume_from,
@@ -1086,6 +1096,8 @@ class FoleyTuneLoRATrainer:
             "cos_sim_weight": cos_sim_weight,
             "channel_loss_weight": channel_loss_weight,
             "temporal_variance_weight": temporal_variance_weight,
+            "tv_gate_sigma": tv_gate_sigma,
+            "vd_curriculum_ratio": vd_curriculum_ratio,
             "t_min": t_min, "t_max": t_max,
             "optimizer_type": optimizer_type,
             "gradient_checkpointing": gradient_checkpointing,
@@ -1194,13 +1206,17 @@ class FoleyTuneLoRATrainer:
             )
 
             # Forward + loss
+            effective_vd = visual_dropout_curriculum(
+                visual_dropout_prob, step, start_step, steps, vd_curriculum_ratio,
+            )
             loss = flow_matching_loss(
                 model, batch_latents, t, batch_clip, batch_sync, batch_text, device, dtype,
-                visual_dropout_prob=visual_dropout_prob,
+                visual_dropout_prob=effective_vd,
                 min_snr_gamma=min_snr_gamma,
                 cos_sim_weight=cos_sim_weight,
                 channel_weights=channel_weights,
                 temporal_variance_weight=temporal_variance_weight,
+                tv_gate_sigma=tv_gate_sigma,
             )
             loss = loss / grad_accum
             loss.backward()
@@ -1509,7 +1525,8 @@ class FoleyTuneLoRAScheduler:
         "lora_plus_ratio": 1.0, "schedule_type": "cosine",
         "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
         "noise_offset": 0.0, "min_snr_gamma": 0.0, "ema_decay": 0.0,
-        "cos_sim_weight": 0.0, "channel_loss_weight": False, "temporal_variance_weight": 0.0,
+        "cos_sim_weight": 0.0, "channel_loss_weight": False,
+        "temporal_variance_weight": 0.0, "tv_gate_sigma": 0.3, "vd_curriculum_ratio": 0.0,
         "t_min": 0.0, "t_max": 1.0, "optimizer_type": "prodigy",
         "prodigy_d_coef": 1.0, "prodigy_growth_rate": 0.0,
         "visual_dropout_prob": 0.5,
@@ -1990,14 +2007,20 @@ class FoleyTuneLoRAScheduler:
                             t_max=config.get("t_max", 1.0),
                         )
 
+                        effective_vd = visual_dropout_curriculum(
+                            config.get("visual_dropout_prob", 0.0),
+                            step, start_step, config["steps"],
+                            config.get("vd_curriculum_ratio", 0.0),
+                        )
                         loss = flow_matching_loss(
                             model, batch_latents, t, batch_clip, batch_sync, batch_text,
                             device, dtype,
-                            visual_dropout_prob=config.get("visual_dropout_prob", 0.0),
+                            visual_dropout_prob=effective_vd,
                             min_snr_gamma=config.get("min_snr_gamma", 0.0),
                             cos_sim_weight=config.get("cos_sim_weight", 0.0),
                             channel_weights=_channel_weights,
                             temporal_variance_weight=config.get("temporal_variance_weight", 0.0),
+                            tv_gate_sigma=config.get("tv_gate_sigma", 0.3),
                         )
                         loss = loss / config["grad_accum"]
                         loss.backward()

@@ -409,12 +409,12 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
         loss = loss + cos_sim_weight * cos_loss
 
     if temporal_variance_weight > 0:
-        # Penalize predictions with less temporal variation than the target.
-        # Variance along the time axis (dim=-1) measures how dynamic the output is.
-        tv_pred = v_pred.var(dim=-1).mean()
-        tv_target = v_target.var(dim=-1).mean()
-        # ReLU: only penalize when pred is flatter than target, not when it's more dynamic.
-        tv_loss = F.relu(tv_target - tv_pred) / (tv_target.detach() + 1e-8)
+        # Temporal difference loss: penalise mismatch in temporal transitions.
+        # If v_pred is temporally smooth, its first-order differences are near-zero
+        # while v_target's are not — this doubles the gradient for missed spikes.
+        diff_pred = torch.diff(v_pred, dim=-1)
+        diff_target = torch.diff(v_target, dim=-1)
+        tv_loss = F.mse_loss(diff_pred, diff_target)
         loss = loss + temporal_variance_weight * tv_loss
 
     return loss

@@ -1320,3 +1320,44 @@ PP+noff at 10k had crest factor 25.1dB (vs 19-21dB for all other runs) and peak 
 42. **PP training scales to 30k+ steps** — no convergence at 30k. The schedule-free optimizer maintains adaptive capacity throughout, unlike cosine which forces convergence via LR decay. Extension to 40k queued
 43. **Constant schedule fails with Prodigy** — uncapped d growth causes oscillating metrics. Cosine decay is necessary for stable convergence with regular Prodigy
 44. **Post-curriculum acceleration is dramatic with PP** — metrics accelerate 2-5k steps after the curriculum switch. SC drops from 1.12 → 0.90 between steps 10k and 30k. PBC climbs from 0.25 → 0.67 in the same window
+
+### Phase 4: The PBC/TV Tradeoff (May 2026)
+
+**Problem discovered:** Prodigy+ produces excellent spectral metrics (SC, PBC, MCD) but kills temporal variance (TV), resulting in spectrally accurate but poorly synced audio. Confirmed on both BJ (299 clips) and JAV (394 clips) datasets.
+
+**The seesaw:** PBC and TV are inversely correlated across all configurations. PP at 30k: PBC=0.672 but TV=0.73 (collapsed from 1.89). Regular Prodigy: TV=1.19 (healthy) but PBC=0.357 (weak). No config achieved both.
+
+| Config | TV | PBC | SC | Sync Quality |
+|---|---|---|---|---|
+| Regular Prodigy R96 σ=0.8 (13k) | 1.19 | 0.357 | 1.100 | Good |
+| PP baseline (20k) | 0.93 | 0.557 | 1.016 | Poor |
+| PP baseline ext (30k) | 0.73 | 0.672 | 0.903 | Very poor |
+| BJ rank3 Prodigy (13k) | 1.82 | 0.642 | 1.236 | Good |
+| BJ PP baseline (13k) | 1.35 | 0.666 | 1.227 | Poor |
+
+**Root cause:** PP's schedule-free adaptive LR finds that temporally smooth audio minimises loss better than temporally dynamic audio. A smooth prediction is "close enough" in MSE, while capturing temporal spikes costs more when timing is slightly off. Regular Prodigy's cosine LR decay acts as implicit regularisation — it forces the model to consolidate learned sync patterns rather than continuing to optimise toward spectral flatness.
+
+**Failed interventions (all on JAV PP R96 σ=0.8, 20k):**
+
+| Approach | Result |
+|---|---|
+| Lower visual dropout (0.3) | TV=1.81 but PBC stuck at 0.20 — too much visual signal starved audio learning |
+| Lower visual dropout (0.15) | PBC=0.40, TV=0.98 — milder PP-like collapse |
+| Temporal variance loss v1 (variance comparison, weight=0.1) | Too weak, TV still collapsed. Formula compared against noise-dominated target |
+| Temporal diff loss v2 (MSE on torch.diff, weight=0.5) | Loss doubled to 2.7 but TV=0.96. Applied at all noise levels — at high noise, temporal diffs are pure noise, actively harmful |
+| Resume PP→Prodigy+cosine + TV loss | TV dropped further (0.93→0.86), PBC flat |
+| SNR-gated multi-scale temporal diff (gate σ=0.3, scales 1/4/16, weight=0.3) | TV=0.83 at 20k. Gating was correct fix conceptually but still couldn't counteract PP's optimisation pressure |
+| Visual dropout curriculum (0.1→0.5 ramp over 40%) | TV=0.97 at 9k and falling. Worse PBC than baseline |
+| All combined | Same trajectory |
+
+**Key insight:** The PBC/TV tradeoff is fundamentally a **data complexity problem**, not a loss/optimizer problem. The BJ dataset (single position, consistent motion-to-sound mapping) achieves both good PBC and TV with regular Prodigy. The JAV dataset (multiple positions, diverse actions) has too many visual-audio patterns for the model to learn tight sync — PP shortcuts to spectrally flat audio, Prodigy can't push PBC high enough.
+
+**Conclusion:** For multi-position datasets, subset by position before training. A tight, consistent motion-to-sound mapping is more important than dataset size. No amount of loss engineering can substitute for data that the model can actually learn to sync.
+
+#### Updated Findings
+
+45. **PP kills temporal variance on all datasets** — TV drops monotonically (1.89→0.73 over 30k). The schedule-free LR removes the cosine decay that implicitly preserved sync
+46. **PBC and TV are inversely correlated** — across all configs, optimisers, and loss functions. Fundamental tradeoff in flow matching with visual conditioning
+47. **Loss-level interventions cannot fix the PBC/TV tradeoff** — temporal diff loss, SNR gating, multi-scale, visual dropout curriculum all failed. The optimiser's incentive to smooth temporal dynamics is stronger than any auxiliary loss
+48. **Dataset composition is the real lever** — single-position datasets (BJ) achieve both good sync and spectral quality. Multi-position datasets (JAV) force the model to choose between temporal fidelity and spectral accuracy
+49. **Temporal losses must be noise-level-aware** — ungated temporal diff loss at high noise just adds noise to gradients, pushing toward smoothness. SNR gating (t < 0.3) is conceptually correct but insufficient alone

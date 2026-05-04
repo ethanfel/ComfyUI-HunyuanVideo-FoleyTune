@@ -1354,7 +1354,124 @@ PP+noff at 10k had crest factor 25.1dB (vs 19-21dB for all other runs) and peak 
 
 **Conclusion:** For multi-position datasets, subset by position before training. A tight, consistent motion-to-sound mapping is more important than dataset size. No amount of loss engineering can substitute for data that the model can actually learn to sync.
 
+#### BJ PP Sweep (299 clips, R64 σ=0.8)
+
+Tested PP on the single-position BJ dataset. PP improves PBC over regular Prodigy but TV already degraded at 13k — cancelled before sync collapsed further.
+
+| Experiment | Optimizer | VD | Steps | PBC | TV | SC | MCD | Status |
+|---|---|---|---|---|---|---|---|---|
+| bj_pp_baseline | PP | 0.5 | 13k | 0.666 | 1.35 | 1.227 | — | Cancelled (TV regressing) |
+| BJ rank3 (reference) | Prodigy | 0.5 | 13k | 0.642 | 1.82 | 1.236 | — | Best BJ |
+
+PP got marginally better PBC (+0.02) but lost 0.47 TV. On this dataset Prodigy already achieves strong PBC, so PP offers no benefit.
+
+#### JAV PP Sweep (394 clips, R96 σ=0.8)
+
+| Experiment | Steps | PBC | TV | SC | MCD | LSD |
+|---|---|---|---|---|---|---|
+| output_8_pp_noff002 (noise offset 0.02) | 20k | 0.496 | 0.96 | 1.047 | 7.35 | 16.6 |
+| output_8_pp_baseline | 20k | 0.557 | 0.93 | 1.016 | 7.07 | 16.2 |
+| output_8_pp_baseline_ext | 30k | 0.672 | 0.73 | 0.903 | 6.17 | 15.2 |
+
+PBC climbs monotonically with steps, TV drops monotonically. Extended to 30k shows the trajectory clearly — PP never stops smoothing.
+
+#### JAV TV Recovery Sweep (R96 σ=0.8)
+
+Attempted to recover temporal variance via loss-level interventions.
+
+| Experiment | Method | Steps | PBC | TV | SC | MCD |
+|---|---|---|---|---|---|---|
+| tv_recovery_prodigy | Resume PP@20k → Prodigy+cosine + TV loss (0.1) | +1k | 0.556 | 0.86 | 1.000 | 7.43 |
+| tv_pp_tvloss_full | PP + TV loss v1 (variance formula, 0.1) | 3k* | 0.195 | 1.63 | 1.182 | 11.24 |
+| tv_pp_tdiff_full | PP + temporal diff v2 (MSE on torch.diff, 0.5) | 19k | 0.246 | 0.96 | 1.084 | 8.07 |
+
+*Cancelled at 3k — variance comparison formula was ineffective against noise-dominated targets. Rewrote to temporal diff MSE for v2.
+
+Resume from PP checkpoint: TV continued dropping. Once PP has smoothed temporal dynamics, even switching to cosine+TV loss can't reverse it.
+Temporal diff v2 at 0.5 weight: doubled total loss to ~2.7 but TV still collapsed. Temporal diffs at high noise levels are pure noise — the loss pushed toward smoothness rather than preserving dynamics.
+
+#### JAV Visual Dropout Sweep (R96 σ=0.8, regular Prodigy+cosine)
+
+Tested whether reducing visual dropout forces more sync learning.
+
+| Experiment | VD Prob | Steps | PBC | TV | SC | MCD |
+|---|---|---|---|---|---|---|
+| output_8_r96_vd030 | 0.30 | 20k | 0.206 | 1.81 | 1.203 | 13.47 |
+| output_8_r96_vd015 | 0.15 | 20k | 0.403 | 0.98 | 1.076 | 8.25 |
+| Regular Prodigy (reference, vd=0.5) | 0.50 | 13k | 0.357 | 1.19 | 1.100 | — |
+
+VD 0.3: preserves TV but PBC stuck at 0.2 — too much visual signal starved unconditional audio learning.
+VD 0.15: better PBC but TV collapsed to 0.98 — low dropout turns into PP-like behaviour where the model leans on visual signal so hard it smooths temporal dynamics anyway.
+
+#### JAV TV v3 Sweep (R96 σ=0.8, PP, SNR-gated losses)
+
+Final attempt: SNR-gated multi-scale temporal diff, visual dropout curriculum, and both combined.
+
+| Experiment | Method | Steps | PBC | TV | SC | MCD |
+|---|---|---|---|---|---|---|
+| pp_snr_gated_tv | SNR-gated TV (gate=0.3, scales 1/4/16, weight=0.3) | 20k | 0.531 | 0.83 | 1.016 | 7.09 |
+| pp_vd_curriculum | VD curriculum (0.1→0.5 ramp over 40% of steps) | 9k* | 0.318 | 0.97 | 1.091 | 9.25 |
+| pp_all_three | SNR-gated TV + VD curriculum | — | — | — | — | — |
+
+*Cancelled at 9k, same TV collapse trajectory. All-three skipped — both components failed individually.
+
+SNR gating (only apply temporal loss at t < 0.3 where temporal structure is visible) was conceptually correct but insufficient against PP's optimization pressure. VD curriculum ramped dropout too slowly to matter. Neither approached the BJ reference (PBC=0.642, TV=1.82).
+
+### Reverse Cowgirl Sweep — Single-Position Validation (May 2026)
+
+New single-position dataset: 124 clips, 8s each, reverse cowgirl only. Tests the Phase 4 hypothesis that dataset composition (not optimizer/loss) is the real lever for achieving both PBC and TV. Uses the proven BJ rank3 config (R64, Prodigy, cosine) as baseline.
+
+#### Results
+
+| Experiment | σ | Curriculum | Steps | PBC | TV | SC | MCD | LSD |
+|---|---|---|---|---|---|---|---|---|
+| sigma08_cur05 | 0.8 | 0.5 (4k) | 8k | 0.549 | 1.52 | 1.048 | 5.43 | 12.8 |
+| sigma08_late_cur (resume@4k) | 0.8 | 0.6 | 10k | 0.383 | 1.36 | 1.372 | 6.25 | 14.2 |
+| **sigma08_cur06_fresh** | **0.8** | **0.6 (6k)** | **10k** | **0.661** | **1.56** | **0.950** | **4.71** | **12.2** |
+
+#### Analysis
+
+**TV rose during training** — first time observed across any dataset. Went from 0.68 at 1k to 1.57 at 9k. On BJ and JAV, TV either started high and held or dropped monotonically. The tight motion-to-sound mapping (single position, consistent rhythm) lets the model build temporal dynamics rather than averaging them out.
+
+**Curriculum switch timing is critical on small datasets.** The cur=0.5 run (switch at 4k/8k) plateaued immediately after switching to uniform — PBC stalled at 0.43, TV dipped. The cur=0.6 run (switch at 6k/10k) gave 2k more logit-normal steps, and PBC jumped from 0.41→0.62 in the post-switch phase. The extra focused learning time lets Prodigy lock in spectral patterns before the uniform distribution dilutes gradients.
+
+**Resume with different total steps breaks cosine LR.** Resuming from 4k (of 8k) into a 10k run shifted the cosine schedule — LR was higher than the original at the same step. Results were worse across all metrics. For cosine-scheduled training, always run from scratch when changing total steps.
+
+**All-time best SC (0.950) and MCD (4.71).** Both metrics broke previous records held by the BJ rank3. PBC=0.661 matches BJ rank3's 0.642 while TV=1.56 is competitive with BJ's 1.82. Perceptual quality confirmed — the LoRA sounds excellent with tight motion-to-audio sync.
+
+#### Best Configuration
+
+```json
+{
+  "target": "all_attn_mlp",
+  "rank": 64,
+  "alpha": 64,
+  "lr": 5e-05,
+  "steps": 10000,
+  "schedule_type": "cosine",
+  "timestep_mode": "uniform",
+  "visual_dropout_prob": 0.5,
+  "warmup_steps": 100,
+  "batch_size": 8,
+  "seed": 42,
+  "optimizer_type": "prodigy",
+  "curriculum_switch": 0.6,
+  "logit_normal_sigma": 0.8
+}
+```
+
+**Best checkpoint:** `sigma08_cur06_fresh/adapter_step09000.pt` (PBC=0.660, TV=1.57, SC=1.026)
+
 #### Updated Findings
+
+50. **Single-position datasets confirm the Phase 4 hypothesis** — 124 RCG clips achieved PBC=0.661 + TV=1.56, matching or beating the 299-clip BJ dataset. Dataset coherence > dataset size
+51. **TV can rise during training** — only observed on single-position datasets with consistent rhythmic patterns. Multi-position datasets always show flat or declining TV
+52. **curriculum_switch=0.6 outperforms 0.5 on small datasets** — the extra logit-normal steps let Prodigy lock in spectral patterns before uniform timesteps dilute gradients. On 124 clips / 10k steps, this was the difference between PBC=0.55 and PBC=0.66
+53. **Never resume with different total steps on cosine schedule** — the LR mismatch degrades all metrics. Always run from scratch when changing step count
+
+---
+
+#### Updated Findings (Phase 4)
 
 45. **PP kills temporal variance on all datasets** — TV drops monotonically (1.89→0.73 over 30k). The schedule-free LR removes the cosine decay that implicitly preserved sync
 46. **PBC and TV are inversely correlated** — across all configs, optimisers, and loss functions. Fundamental tradeoff in flow matching with visual conditioning

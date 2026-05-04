@@ -3,43 +3,60 @@ import { api } from "../../../scripts/api.js";
 
 const VIDEO_EXTENSIONS = ["webm", "mp4", "mkv", "gif", "mov", "avi"];
 
+function fitHeight(node) {
+    node.setSize([node.size[0], node.computeSize([node.size[0], node.size[1]])[1]]);
+    node?.graph?.setDirtyCanvas(true);
+}
+
 function addVideoPreview(nodeType) {
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
         onNodeCreated?.apply(this, arguments);
 
         const node = this;
+        const container = document.createElement("div");
+        container.style.width = "100%";
+
         const videoEl = document.createElement("video");
         videoEl.controls = true;
         videoEl.loop = true;
         videoEl.muted = true;
         videoEl.style.width = "100%";
-        videoEl.style.display = "none";
-        videoEl.style.verticalAlign = "top";
-        videoEl.style.objectFit = "contain";
-        videoEl.style.background = "transparent";
-        videoEl.style.border = "none";
-        videoEl.style.outline = "none";
         videoEl.onmouseenter = () => { videoEl.muted = false; };
         videoEl.onmouseleave = () => { videoEl.muted = true; };
+        container.appendChild(videoEl);
 
-        const previewWidget = this.addDOMWidget("video_preview", "preview", videoEl, {
+        const previewWidget = this.addDOMWidget("videopreview", "preview", container, {
             serialize: false,
             hideOnZoom: false,
+            getValue() { return container.value; },
+            setValue(v) { container.value = v; },
         });
 
-        requestAnimationFrame(() => {
-            const container = videoEl.parentElement;
-            if (container) {
-                container.style.border = "none";
-                container.style.outline = "none";
-                container.style.background = "transparent";
+        previewWidget.videoEl = videoEl;
+        previewWidget.aspectRatio = null;
+
+        previewWidget.computeSize = function (width) {
+            if (this.aspectRatio && !container.hidden) {
+                const height = (node.size[0] - 20) / this.aspectRatio + 10;
+                return [width, Math.max(height, 0)];
             }
+            return [width, -4];
+        };
+
+        videoEl.addEventListener("loadedmetadata", () => {
+            previewWidget.aspectRatio = videoEl.videoWidth / videoEl.videoHeight;
+            container.hidden = false;
+            fitHeight(node);
         });
 
-        node._ftVideoPreview = { videoEl, previewWidget };
+        videoEl.addEventListener("error", () => {
+            container.hidden = true;
+            fitHeight(node);
+        });
 
-        // Update preview after execution
+        node._ftVideoPreview = previewWidget;
+
         const onExecuted = node.onExecuted;
         node.onExecuted = function (output) {
             onExecuted?.apply(this, arguments);
@@ -51,7 +68,6 @@ function addVideoPreview(nodeType) {
                     subfolder: g.subfolder || "",
                 });
                 videoEl.src = api.apiURL("/view?" + params.toString());
-                videoEl.style.display = "block";
             }
         };
     };
@@ -94,7 +110,6 @@ function addUploadWidget(nodeType) {
         });
         uploadWidget.serialize = false;
 
-        // Drag-drop support
         this.onDragOver = (e) => !!e?.dataTransfer?.types?.includes?.("Files");
         this.onDragDrop = async (e) => {
             const file = e?.dataTransfer?.files?.[0];
@@ -118,25 +133,22 @@ function addUploadWidget(nodeType) {
 
         function showPreview(filename) {
             if (!filename) return;
-            const preview = node._ftVideoPreview;
-            if (!preview) return;
+            const pw = node._ftVideoPreview;
+            if (!pw) return;
             const params = new URLSearchParams({
                 filename,
                 type: "input",
                 subfolder: "",
             });
-            preview.videoEl.src = api.apiURL("/view?" + params.toString());
-            preview.videoEl.style.display = "block";
+            pw.videoEl.src = api.apiURL("/view?" + params.toString());
         }
 
-        // Preview on combo selection change
         const origCallback = pathWidget.callback;
         pathWidget.callback = function (value) {
             origCallback?.apply(this, arguments);
             showPreview(value);
         };
 
-        // Show preview for already-selected value on workflow load
         requestAnimationFrame(() => showPreview(pathWidget.value));
     };
 }

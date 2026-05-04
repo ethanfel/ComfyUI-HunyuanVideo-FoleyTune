@@ -66,6 +66,16 @@ function addUploadWidget(nodeType) {
         const pathWidget = this.widgets.find((w) => w.name === "video");
         if (!pathWidget) return;
 
+        // Cap node width so long filenames don't push the node out of bounds
+        const MAX_NODE_WIDTH = 420;
+        const origComputeSize = this.computeSize;
+        this.computeSize = function () {
+            const sz = origComputeSize.apply(this, arguments);
+            sz[0] = Math.min(sz[0], MAX_NODE_WIDTH);
+            return sz;
+        };
+        this.size[0] = Math.min(this.size[0], MAX_NODE_WIDTH);
+
         const fileInput = document.createElement("input");
         fileInput.type = "file";
         fileInput.accept = "video/*,image/gif";

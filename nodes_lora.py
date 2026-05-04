@@ -1440,7 +1440,13 @@ class FoleyTuneLoRALoaderPath:
             state_dict = ckpt
             meta = {}
 
-        rank = meta.get("rank", 16)
+        # Infer rank from lora_A tensor shapes (first one found)
+        inferred_rank = None
+        for k, v in state_dict.items():
+            if "lora_A" in k and v.ndim == 2:
+                inferred_rank = v.shape[0]
+                break
+        rank = meta.get("rank", inferred_rank or 16)
         alpha = meta.get("alpha", float(rank))
         target = meta.get("target", "all_attn_mlp")
         init_mode = meta.get("init_mode", "standard")
@@ -2333,7 +2339,12 @@ class FoleyTuneLoRAEvaluator:
                 meta = ckpt.get("meta", {})
 
                 model = copy.deepcopy(hunyuan_model)
-                rank = meta.get("rank", 16)
+                inferred_rank = None
+                for k, v in sd.items():
+                    if "lora_A" in k and v.ndim == 2:
+                        inferred_rank = v.shape[0]
+                        break
+                rank = meta.get("rank", inferred_rank or 16)
                 alpha_val = meta.get("alpha", float(rank))
                 target = meta.get("target", "all_attn_mlp")
                 target_suffixes = FOLEY_TARGET_PRESETS.get(target, FOLEY_TARGET_PRESETS["all_attn_mlp"])

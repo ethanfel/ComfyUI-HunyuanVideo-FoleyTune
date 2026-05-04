@@ -1,8 +1,8 @@
 {
   "id": "d2808238-3689-457a-9a27-971438e11635",
   "revision": 0,
-  "last_node_id": 80,
-  "last_link_id": 135,
+  "last_node_id": 82,
+  "last_link_id": 138,
   "nodes": [
     {
       "id": 72,
@@ -16,7 +16,7 @@
         128
       ],
       "flags": {},
-      "order": 5,
+      "order": 4,
       "mode": 0,
       "inputs": [
         {
@@ -59,7 +59,7 @@
         288
       ],
       "flags": {},
-      "order": 6,
+      "order": 5,
       "mode": 0,
       "inputs": [
         {
@@ -69,8 +69,15 @@
         },
         {
           "name": "image",
+          "shape": 7,
           "type": "IMAGE",
-          "link": 114
+          "link": null
+        },
+        {
+          "name": "video_features",
+          "shape": 7,
+          "type": "FOLEYTUNE_VIDEO_FEATURES",
+          "link": 136
         },
         {
           "name": "prompt",
@@ -79,22 +86,6 @@
             "name": "prompt"
           },
           "link": 123
-        },
-        {
-          "name": "frame_rate",
-          "type": "FLOAT",
-          "widget": {
-            "name": "frame_rate"
-          },
-          "link": 45
-        },
-        {
-          "name": "duration",
-          "type": "FLOAT",
-          "widget": {
-            "name": "duration"
-          },
-          "link": 46
         }
       ],
       "outputs": [
@@ -129,96 +120,6 @@
         "",
         "clip"
       ]
-    },
-    {
-      "id": 40,
-      "type": "VHS_VideoCombine",
-      "pos": [
-        2880,
-        128
-      ],
-      "size": [
-        416,
-        987.6923076923076
-      ],
-      "flags": {},
-      "order": 8,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "images",
-          "type": "IMAGE",
-          "link": 115
-        },
-        {
-          "name": "audio",
-          "shape": 7,
-          "type": "AUDIO",
-          "link": 134
-        },
-        {
-          "name": "meta_batch",
-          "shape": 7,
-          "type": "VHS_BatchManager",
-          "link": null
-        },
-        {
-          "name": "vae",
-          "shape": 7,
-          "type": "VAE",
-          "link": null
-        },
-        {
-          "name": "frame_rate",
-          "type": "FLOAT",
-          "widget": {
-            "name": "frame_rate"
-          },
-          "link": 56
-        }
-      ],
-      "outputs": [
-        {
-          "name": "Filenames",
-          "type": "VHS_FILENAMES",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-videohelpersuite",
-        "ver": "1.7.9",
-        "Node name for S&R": "VHS_VideoCombine",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": {
-        "frame_rate": 8,
-        "loop_count": 0,
-        "filename_prefix": "FoleyTune/vid",
-        "format": "video/h264-mp4",
-        "pix_fmt": "yuv420p",
-        "crf": 19,
-        "save_metadata": true,
-        "trim_to_audio": false,
-        "pingpong": false,
-        "save_output": true,
-        "videopreview": {
-          "hidden": false,
-          "paused": false,
-          "params": {
-            "filename": "vid_00296-audio.mp4",
-            "subfolder": "FoleyTune",
-            "type": "output",
-            "format": "video/h264-mp4",
-            "frame_rate": 60,
-            "workflow": "vid_00296.png",
-            "fullpath": "/media/unraid/comfyui/output/FoleyTune/vid_00296-audio.mp4"
-          }
-        }
-      }
     },
     {
       "id": 77,
@@ -318,187 +219,6 @@
       ]
     },
     {
-      "id": 35,
-      "type": "VHS_LoadVideo",
-      "pos": [
-        -64,
-        480
-      ],
-      "size": [
-        256,
-        705
-      ],
-      "flags": {},
-      "order": 1,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "meta_batch",
-          "shape": 7,
-          "type": "VHS_BatchManager",
-          "link": null
-        },
-        {
-          "name": "vae",
-          "shape": 7,
-          "type": "VAE",
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            114,
-            115
-          ]
-        },
-        {
-          "name": "frame_count",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "audio",
-          "type": "AUDIO",
-          "links": []
-        },
-        {
-          "name": "video_info",
-          "type": "VHS_VIDEOINFO",
-          "links": [
-            113
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-videohelpersuite",
-        "ver": "1.7.9",
-        "Node name for S&R": "VHS_LoadVideo",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": {
-        "video": "221548_1__00001_.mp4",
-        "force_rate": 0,
-        "custom_width": 0,
-        "custom_height": 0,
-        "frame_load_cap": 0,
-        "skip_first_frames": 0,
-        "select_every_nth": 1,
-        "format": "AnimateDiff",
-        "videopreview": {
-          "hidden": false,
-          "paused": false,
-          "params": {
-            "filename": "221548_1__00001_.mp4",
-            "type": "input",
-            "format": "video/mp4",
-            "force_rate": 0,
-            "custom_width": 0,
-            "custom_height": 0,
-            "frame_load_cap": 0,
-            "skip_first_frames": 0,
-            "select_every_nth": 1
-          }
-        }
-      }
-    },
-    {
-      "id": 36,
-      "type": "VHS_VideoInfo",
-      "pos": [
-        256,
-        480
-      ],
-      "size": [
-        256,
-        224
-      ],
-      "flags": {},
-      "order": 4,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "video_info",
-          "type": "VHS_VIDEOINFO",
-          "link": 113
-        }
-      ],
-      "outputs": [
-        {
-          "name": "source_fps🟨",
-          "type": "FLOAT",
-          "links": null
-        },
-        {
-          "name": "source_frame_count🟨",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "source_duration🟨",
-          "type": "FLOAT",
-          "links": null
-        },
-        {
-          "name": "source_width🟨",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "source_height🟨",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "loaded_fps🟦",
-          "type": "FLOAT",
-          "links": [
-            45,
-            56
-          ]
-        },
-        {
-          "name": "loaded_frame_count🟦",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "loaded_duration🟦",
-          "type": "FLOAT",
-          "links": [
-            46
-          ]
-        },
-        {
-          "name": "loaded_width🟦",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "loaded_height🟦",
-          "type": "INT",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-videohelpersuite",
-        "ver": "1.7.9",
-        "Node name for S&R": "VHS_VideoInfo",
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "input_ue_unconnectable": {},
-          "version": "7.8"
-        }
-      },
-      "widgets_values": {}
-    },
-    {
       "id": 2,
       "type": "FoleyTuneDependenciesLoader",
       "pos": [
@@ -510,7 +230,7 @@
         96
       ],
       "flags": {},
-      "order": 2,
+      "order": 1,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -553,7 +273,7 @@
         288
       ],
       "flags": {},
-      "order": 7,
+      "order": 6,
       "mode": 0,
       "inputs": [
         {
@@ -589,7 +309,7 @@
           "name": "audio_first",
           "type": "AUDIO",
           "links": [
-            134
+            137
           ]
         },
         {
@@ -616,57 +336,105 @@
         1,
         1
       ]
+    },
+    {
+      "id": 82,
+      "type": "FoleyTuneVideoCombiner",
+      "pos": [
+        2880,
+        128
+      ],
+      "size": [
+        448,
+        1024
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video_features",
+          "type": "FOLEYTUNE_VIDEO_FEATURES",
+          "link": 138
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 137
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output_path",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {}
+        },
+        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-FoleyTune",
+        "ver": "582b306f665a3d18512ea3efbd408e626e3b95b4",
+        "Node name for S&R": "FoleyTuneVideoCombiner"
+      },
+      "widgets_values": [
+        "FoleyTune",
+        "aac",
+        true,
+        ""
+      ]
+    },
+    {
+      "id": 81,
+      "type": "FoleyTuneVideoLoaderUpload",
+      "pos": [
+        -64,
+        480
+      ],
+      "size": [
+        416,
+        736
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "hunyuan_deps",
+          "type": "FOLEYTUNE_DEPS",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "video_features",
+          "type": "FOLEYTUNE_VIDEO_FEATURES",
+          "links": [
+            136,
+            138
+          ]
+        }
+      ],
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {}
+        },
+        "aux_id": "ethanfel/ComfyUI-HunyuanVideo-FoleyTune",
+        "ver": "582b306f665a3d18512ea3efbd408e626e3b95b4",
+        "Node name for S&R": "FoleyTuneVideoLoaderUpload"
+      },
+      "widgets_values": [
+        "001515_UPIN_00001.mp4",
+        0,
+        0,
+        ""
+      ]
     }
   ],
   "links": [
-    [
-      45,
-      36,
-      5,
-      37,
-      3,
-      "FLOAT"
-    ],
-    [
-      46,
-      36,
-      7,
-      37,
-      4,
-      "FLOAT"
-    ],
-    [
-      56,
-      36,
-      5,
-      40,
-      4,
-      "FLOAT"
-    ],
-    [
-      113,
-      35,
-      3,
-      36,
-      0,
-      "VHS_VIDEOINFO"
-    ],
-    [
-      114,
-      35,
-      0,
-      37,
-      1,
-      "IMAGE"
-    ],
-    [
-      115,
-      35,
-      0,
-      40,
-      0,
-      "IMAGE"
-    ],
     [
       120,
       1,
@@ -688,7 +456,7 @@
       77,
       1,
       37,
-      2,
+      3,
       "STRING"
     ],
     [
@@ -724,12 +492,28 @@
       "FOLEYTUNE_FEATURES"
     ],
     [
-      134,
+      136,
+      81,
+      0,
+      37,
+      2,
+      "FOLEYTUNE_VIDEO_FEATURES"
+    ],
+    [
+      137,
       78,
       0,
-      40,
+      82,
       1,
       "AUDIO"
+    ],
+    [
+      138,
+      81,
+      0,
+      82,
+      0,
+      "FOLEYTUNE_VIDEO_FEATURES"
     ]
   ],
   "groups": [
@@ -776,10 +560,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.7142623895700069,
+      "scale": 0.7513148009015777,
       "offset": [
-        1332.280749215159,
-        266.6657905992729
+        2039.3630284047565,
+        633.7790883887054
       ]
     },
     "ue_links": [],
@@ -788,7 +572,30 @@
     "VHS_latentpreview": true,
     "VHS_latentpreviewrate": 0,
     "VHS_MetadataImage": true,
-    "VHS_KeepIntermediate": true
+    "VHS_KeepIntermediate": true,
+    "linkExtensions": [
+      {
+        "id": 136,
+        "parentId": 1
+      },
+      {
+        "id": 138,
+        "parentId": 1
+      }
+    ],
+    "reroutes": [
+      {
+        "id": 1,
+        "pos": [
+          1072.5,
+          338
+        ],
+        "linkIds": [
+          136,
+          138
+        ]
+      }
+    ]
   },
   "version": 0.4
 }

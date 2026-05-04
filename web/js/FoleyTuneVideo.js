@@ -66,16 +66,6 @@ function addUploadWidget(nodeType) {
         const pathWidget = this.widgets.find((w) => w.name === "video");
         if (!pathWidget) return;
 
-        // Cap node width so long filenames don't push the node out of bounds
-        const MAX_NODE_WIDTH = 420;
-        const origComputeSize = this.computeSize;
-        this.computeSize = function () {
-            const sz = origComputeSize.apply(this, arguments);
-            sz[0] = Math.min(sz[0], MAX_NODE_WIDTH);
-            return sz;
-        };
-        this.size[0] = Math.min(this.size[0], MAX_NODE_WIDTH);
-
         const fileInput = document.createElement("input");
         fileInput.type = "file";
         fileInput.accept = "video/*,image/gif";
@@ -126,22 +116,28 @@ function addUploadWidget(nodeType) {
             return true;
         };
 
+        function showPreview(filename) {
+            if (!filename) return;
+            const preview = node._ftVideoPreview;
+            if (!preview) return;
+            const params = new URLSearchParams({
+                filename,
+                type: "input",
+                subfolder: "",
+            });
+            preview.videoEl.src = api.apiURL("/view?" + params.toString());
+            preview.videoEl.style.display = "block";
+        }
+
         // Preview on combo selection change
         const origCallback = pathWidget.callback;
         pathWidget.callback = function (value) {
             origCallback?.apply(this, arguments);
-            if (!value) return;
-            const preview = node._ftVideoPreview;
-            if (preview) {
-                const params = new URLSearchParams({
-                    filename: value,
-                    type: "input",
-                    subfolder: "",
-                });
-                preview.videoEl.src = api.apiURL("/view?" + params.toString());
-                preview.videoEl.style.display = "block";
-            }
+            showPreview(value);
         };
+
+        // Show preview for already-selected value on workflow load
+        requestAnimationFrame(() => showPreview(pathWidget.value));
     };
 }
 

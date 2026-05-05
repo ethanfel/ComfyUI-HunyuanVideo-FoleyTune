@@ -2171,7 +2171,7 @@ class FoleyTuneDatasetSaver:
                 "rank": 64,
                 "alpha": 64,
                 "lr": 5e-5,
-                "steps": 13000,
+                "steps": 10000,
                 "batch_size": 8,
                 "grad_accum": 1,
                 "warmup_steps": 100,
@@ -2179,8 +2179,8 @@ class FoleyTuneDatasetSaver:
                 "timestep_mode": "uniform",
                 "precision": "bf16",
                 "seed": 42,
-                "logit_normal_sigma": 0.7,
-                "curriculum_switch": 0.5,
+                "logit_normal_sigma": 0.8,
+                "curriculum_switch": 0.6,
                 "init_mode": "standard",
                 "use_rslora": False,
                 "lora_dropout": 0.0,
@@ -2193,6 +2193,9 @@ class FoleyTuneDatasetSaver:
                 "cos_sim_weight": 0.0,
                 "t_min": 0.0,
                 "t_max": 1.0,
+                "optimizer_type": "prodigy",
+                "prodigy_d_coef": 1.0,
+                "prodigy_growth_rate": 0.0,
                 "visual_dropout_prob": 0.5,
                 "gradient_checkpointing": False,
                 "blocks_to_swap": 0,
@@ -2211,28 +2214,8 @@ class FoleyTuneDatasetSaver:
         tag = f"{sweep_name}_{total_train}clip"
         sweep_json["experiments"] = [
             {
-                "id": f"{tag}_sigma07_cur05",
-                "description": "Best overall — sigma=0.7, curriculum=0.5 (PBC=0.661)",
-                "logit_normal_sigma": 0.7,
-                "curriculum_switch": 0.5,
-            },
-            {
-                "id": f"{tag}_sigma08_cur05",
-                "description": "Best TV — sigma=0.8, curriculum=0.5 (PBC=0.642, TV=1.82)",
-                "logit_normal_sigma": 0.8,
-                "curriculum_switch": 0.5,
-            },
-            {
-                "id": f"{tag}_sigma07_cur04",
-                "description": "Earlier curriculum — sigma=0.7, curriculum=0.4 (PBC=0.644)",
-                "logit_normal_sigma": 0.7,
-                "curriculum_switch": 0.4,
-            },
-            {
-                "id": f"{tag}_baseline_cur05",
-                "description": "Baseline — default sigma=1.0, curriculum=0.5 (PBC=0.592)",
-                "logit_normal_sigma": 1.0,
-                "curriculum_switch": 0.5,
+                "id": f"{tag}_baseline",
+                "description": "R64 Prodigy σ=0.8 cosine curriculum@60% 10k steps",
             },
         ]
         with open(ds_json_path, "w") as f:

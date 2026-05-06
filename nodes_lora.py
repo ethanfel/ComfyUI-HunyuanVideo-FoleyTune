@@ -1073,6 +1073,9 @@ class FoleyTuneLoRATrainer:
             _opt_match = (_ckpt_opt == optimizer_type)
             if not _opt_match:
                 logger.info(f"Optimizer mismatch (ckpt={_ckpt_opt}, current={optimizer_type}) — loading weights only, fresh optimizer")
+            if freeze_blocks > 0:
+                logger.info(f"freeze_blocks={freeze_blocks} — fresh optimizer (param count changed)")
+                _opt_match = False
             if _opt_match and "optimizer" in ckpt:
                 optimizer.load_state_dict(ckpt["optimizer"])
             if _opt_match and "scheduler" in ckpt:
@@ -1880,6 +1883,9 @@ class FoleyTuneLoRAScheduler:
                         _opt_match = (_ckpt_opt == _opt_type)
                         if not _opt_match:
                             logger.info(f"[{exp_id}] Optimizer mismatch (ckpt={_ckpt_opt}, current={_opt_type}) — loading weights only, fresh optimizer")
+                        if _freeze > 0:
+                            logger.info(f"[{exp_id}] freeze_blocks={_freeze} — fresh optimizer (param count changed)")
+                            _opt_match = False
                         if _opt_match and "optimizer" in ckpt:
                             optimizer.load_state_dict(ckpt["optimizer"])
                         if _opt_match and "scheduler" in ckpt:

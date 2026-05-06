@@ -861,6 +861,10 @@ class FoleyTuneLoRATrainer:
                     "tooltip": "Per-sample probability of zeroing visual features during training. Forces the text channel to carry audio-character signal, decoupling identity from sound. Use 0.5 for generic-style LoRAs (no performer binding); leave 0.0 for identity-preserving LoRAs.",
                 }),
                 "gradient_checkpointing": ("BOOLEAN", {"default": False}),
+                "freeze_blocks": ("INT", {
+                    "default": 0, "min": 0, "max": 17, "step": 1,
+                    "tooltip": "Number of early triple_blocks to freeze during finetuning. LoRA weights in blocks 0..N-1 keep their pretrained values. Useful for adapting a pretrained LoRA to a small dataset without catastrophic forgetting. 0 = train all blocks.",
+                }),
                 "resume_from": ("STRING", {"default": ""}),
                 "dataset_json": ("STRING", {
                     "default": "",
@@ -893,6 +897,7 @@ class FoleyTuneLoRATrainer:
               t_min=0.0, t_max=1.0, optimizer_type="adamw",
               visual_dropout_prob=0.0,
               gradient_checkpointing=False,
+              freeze_blocks=0,
               resume_from="", dataset_json="",
               prodigy_d_coef=1.0, prodigy_growth_rate=0.0):
 
@@ -915,7 +920,7 @@ class FoleyTuneLoRATrainer:
             temporal_variance_weight, tv_gate_sigma, vd_curriculum_ratio,
             t_min, t_max, optimizer_type,
             visual_dropout_prob,
-            gradient_checkpointing, resume_from,
+            gradient_checkpointing, freeze_blocks, resume_from,
             dataset_json, prodigy_d_coef, prodigy_growth_rate,
         )
 
@@ -930,7 +935,7 @@ class FoleyTuneLoRATrainer:
                      temporal_variance_weight, tv_gate_sigma, vd_curriculum_ratio,
                      t_min, t_max, optimizer_type,
                      visual_dropout_prob,
-                     gradient_checkpointing, resume_from,
+                     gradient_checkpointing, freeze_blocks, resume_from,
                      dataset_json="",
                      prodigy_d_coef=1.0, prodigy_growth_rate=0.0):
         import random
@@ -996,6 +1001,17 @@ class FoleyTuneLoRATrainer:
         # Freeze base, train LoRA only
         for name, param in model.named_parameters():
             param.requires_grad = "lora_" in name
+
+        if freeze_blocks > 0:
+            n_frozen = 0
+            for name, param in model.named_parameters():
+                if "lora_" in name:
+                    for i in range(freeze_blocks):
+                        if f"triple_blocks.{i}." in name:
+                            param.requires_grad = False
+                            n_frozen += 1
+                            break
+            logger.info(f"Froze LoRA params in blocks 0..{freeze_blocks - 1} ({n_frozen} tensors)")
 
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
@@ -1101,6 +1117,7 @@ class FoleyTuneLoRATrainer:
             "t_min": t_min, "t_max": t_max,
             "optimizer_type": optimizer_type,
             "gradient_checkpointing": gradient_checkpointing,
+            "freeze_blocks": freeze_blocks,
             "n_clips": n_clips, "precision": precision, "seed": seed,
         }
 
@@ -1537,6 +1554,7 @@ class FoleyTuneLoRAScheduler:
         "prodigy_d_coef": 1.0, "prodigy_growth_rate": 0.0,
         "visual_dropout_prob": 0.5,
         "gradient_checkpointing": False,
+        "freeze_blocks": 0,
         "resume_from": "",
     }
 
@@ -1793,6 +1811,18 @@ class FoleyTuneLoRAScheduler:
 
                     for name, param in model.named_parameters():
                         param.requires_grad = "lora_" in name
+
+                    _freeze = config.get("freeze_blocks", 0)
+                    if _freeze > 0:
+                        n_frozen = 0
+                        for name, param in model.named_parameters():
+                            if "lora_" in name:
+                                for i in range(_freeze):
+                                    if f"triple_blocks.{i}." in name:
+                                        param.requires_grad = False
+                                        n_frozen += 1
+                                        break
+                        logger.info(f"[{exp_id}] Froze LoRA params in blocks 0..{_freeze - 1} ({n_frozen} tensors)")
 
                     # Optimizer
                     _lr = config["lr"]

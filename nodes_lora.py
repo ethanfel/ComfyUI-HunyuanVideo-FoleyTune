@@ -2186,6 +2186,8 @@ class FoleyTuneLoRAScheduler:
                                 _save_wav(samples_dir / f"{_ev_tag}_step_{step+1:05d}.wav", wav_v_t, sr_v)
                                 _save_spectrogram(wav_v_mono, sr_v, samples_dir / f"{_ev_tag}_step_{step+1:05d}")
                                 _ev_sm = spectral_metrics(wav_v_mono, sr_v)
+                                if _ev["ref_wav"] is not None:
+                                    _ev_sm.update(reference_metrics(wav_v_mono, _ev["ref_wav"], sr_v))
                                 for mk, mv in _ev_sm.items():
                                     step_metrics[f"{_ev_tag}_{mk}"] = mv
 

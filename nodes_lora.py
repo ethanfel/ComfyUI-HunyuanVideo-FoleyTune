@@ -1202,7 +1202,9 @@ class FoleyTuneLoRATrainer:
             batch_latents = torch.cat([dataset[i]["latents"] for i in indices], dim=0).to(device, dtype=dtype)
             batch_clip = torch.cat([dataset[i]["clip_features"] for i in indices], dim=0)
             batch_sync = torch.cat([dataset[i]["sync_features"] for i in indices], dim=0)
-            batch_text = torch.cat([dataset[i]["text_embedding"] for i in indices], dim=0)
+            _text_items = [dataset[i]["text_embedding"] for i in indices]
+            _max_tlen = max(t.shape[1] for t in _text_items)
+            batch_text = torch.cat([F.pad(t, (0, 0, 0, _max_tlen - t.shape[1])) for t in _text_items], dim=0)
 
             # Pad features to consistent lengths
             max_clip_len = max(batch_clip.shape[1], 1)
@@ -2052,7 +2054,9 @@ class FoleyTuneLoRAScheduler:
                         batch_latents = torch.cat([dataset[i]["latents"] for i in indices]).to(device, dtype=dtype)
                         batch_clip = torch.cat([dataset[i]["clip_features"] for i in indices])
                         batch_sync = torch.cat([dataset[i]["sync_features"] for i in indices])
-                        batch_text = torch.cat([dataset[i]["text_embedding"] for i in indices])
+                        _text_items = [dataset[i]["text_embedding"] for i in indices]
+                        _max_tlen = max(t.shape[1] for t in _text_items)
+                        batch_text = torch.cat([F.pad(t, (0, 0, 0, _max_tlen - t.shape[1])) for t in _text_items])
 
                         # Pad sync to multiple of 8
                         sync_len = batch_sync.shape[1]

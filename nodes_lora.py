@@ -1691,7 +1691,7 @@ class FoleyTuneLoRAScheduler:
         prompts_list = [p for p, _ in _prompt_counts.most_common()]
 
         # Load validation / eval samples — supports single path or list of {name, path}
-        def _load_ref_audio(npz_path):
+        def _load_ref_audio(npz_path, dac_model=None):
             for ext in (".flac", ".wav", ".ogg"):
                 candidate = Path(npz_path).with_suffix(ext)
                 if candidate.exists():
@@ -1702,6 +1702,13 @@ class FoleyTuneLoRAScheduler:
                     if _sr != 48000:
                         import soxr as _soxr
                         _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
+                    if dac_model is not None:
+                        with torch.no_grad():
+                            dac_model.to(device)
+                            _t = torch.from_numpy(_raw).float().unsqueeze(0).unsqueeze(0).to(device)
+                            _z, _, _, _, _ = dac_model.encode(_t)
+                            _raw = dac_model.decode(_z.mode()).squeeze().cpu().numpy()
+                            dac_model.cpu()
                     return _raw
             return None
 
@@ -1714,7 +1721,7 @@ class FoleyTuneLoRAScheduler:
                 eval_entries.append({
                     "name": "val",
                     "entry": prepare_single_entry(str(val_npz), hunyuan_deps.dac_model, device, dtype),
-                    "ref_wav": _load_ref_audio(val_npz),
+                    "ref_wav": _load_ref_audio(val_npz, hunyuan_deps.dac_model),
                 })
                 logger.info(f"Val clip loaded from dataset_json: {ds_cfg['val']}")
 
@@ -1731,7 +1738,7 @@ class FoleyTuneLoRAScheduler:
                     eval_entries.append({
                         "name": ev_name,
                         "entry": prepare_single_entry(ev_path, hunyuan_deps.dac_model, device, dtype),
-                        "ref_wav": _load_ref_audio(ev_path),
+                        "ref_wav": _load_ref_audio(ev_path, hunyuan_deps.dac_model),
                     })
                     logger.info(f"Eval sample loaded: {ev_name} ({ev_path})")
                 else:

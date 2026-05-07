@@ -1688,36 +1688,10 @@ class FoleyTuneLoRAScheduler:
         _prompt_counts = Counter(d["prompt"] for d in dataset)
         prompts_list = [p for p, _ in _prompt_counts.most_common()]
 
-        # Load optional validation sample — from dataset_json val or explicit eval_npz
-        val_entry = None
-        val_ref_wav = None
-        if ds_cfg is not None and ds_cfg.get("val"):
-            val_npz = Path(data_dir) / f"{ds_cfg['val']}.npz"
-            if val_npz.exists():
-                val_entry = prepare_single_entry(str(val_npz), hunyuan_deps.dac_model, device, dtype)
-                logger.info(f"Val clip loaded from dataset_json: {ds_cfg['val']}")
-                # Load reference audio for val spectrogram comparison
-                for ext in (".flac", ".wav", ".ogg"):
-                    candidate = val_npz.with_suffix(ext)
-                    if candidate.exists():
-                        import soundfile as _sf
-                        _raw, _sr = _sf.read(str(candidate))
-                        if _raw.ndim > 1:
-                            _raw = _raw.mean(axis=1)
-                        if _sr != 48000:
-                            import soxr as _soxr
-                            _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
-                        val_ref_wav = _raw
-                        break
-        eval_npz = sweep.get("eval_npz") or base_config.get("eval_npz")
-        if eval_npz and os.path.exists(eval_npz):
-            logger.info(f"Loading validation sample from {eval_npz}...")
-            val_entry = prepare_single_entry(eval_npz, hunyuan_deps.dac_model, device, dtype)
-            # Load reference audio for val spectrogram
-            val_stem = Path(eval_npz).stem
-            val_parent = Path(eval_npz).parent
+        # Load validation / eval samples — supports single path or list of {name, path}
+        def _load_ref_audio(npz_path):
             for ext in (".flac", ".wav", ".ogg"):
-                candidate = val_parent / f"{val_stem}{ext}"
+                candidate = Path(npz_path).with_suffix(ext)
                 if candidate.exists():
                     import soundfile as _sf
                     _raw, _sr = _sf.read(str(candidate))
@@ -1726,11 +1700,43 @@ class FoleyTuneLoRAScheduler:
                     if _sr != 48000:
                         import soxr as _soxr
                         _raw = _soxr.resample(_raw[:, None], _sr, 48000, quality="VHQ").squeeze(-1)
-                    val_ref_wav = _raw
-                    break
-            logger.info(f"Validation sample loaded: {val_entry['name']}")
-        elif eval_npz:
-            logger.warning(f"eval_npz path not found, skipping validation sample: {eval_npz}")
+                    return _raw
+            return None
+
+        eval_entries = []  # list of {"name": str, "entry": dict, "ref_wav": ndarray|None}
+
+        # Legacy: single val from first dataset_json
+        if ds_cfg is not None and ds_cfg.get("val"):
+            val_npz = Path(data_dir) / f"{ds_cfg['val']}.npz"
+            if val_npz.exists():
+                eval_entries.append({
+                    "name": "val",
+                    "entry": prepare_single_entry(str(val_npz), hunyuan_deps.dac_model, device, dtype),
+                    "ref_wav": _load_ref_audio(val_npz),
+                })
+                logger.info(f"Val clip loaded from dataset_json: {ds_cfg['val']}")
+
+        eval_npz = sweep.get("eval_npz") or base_config.get("eval_npz")
+        if eval_npz:
+            if isinstance(eval_npz, str):
+                eval_npz = [{"name": "eval", "path": eval_npz}]
+            for ev in eval_npz:
+                if isinstance(ev, str):
+                    ev = {"name": Path(ev).stem, "path": ev}
+                ev_path = ev["path"]
+                ev_name = ev.get("name", Path(ev_path).stem)
+                if os.path.exists(ev_path):
+                    eval_entries.append({
+                        "name": ev_name,
+                        "entry": prepare_single_entry(ev_path, hunyuan_deps.dac_model, device, dtype),
+                        "ref_wav": _load_ref_audio(ev_path),
+                    })
+                    logger.info(f"Eval sample loaded: {ev_name} ({ev_path})")
+                else:
+                    logger.warning(f"eval_npz path not found, skipping: {ev_path}")
+
+        if eval_entries:
+            logger.info(f"Loaded {len(eval_entries)} eval entries: {[e['name'] for e in eval_entries]}")
 
         # Collect loss histories for comparison chart
         all_loss_histories = {}
@@ -2009,20 +2015,22 @@ class FoleyTuneLoRAScheduler:
                         _save_spectrogram(wav0_mono, sr0, samples_dir_0 / "step_00000")
                         logger.info(f"[{exp_id}] Step 0 eval sample saved")
 
-                    # Step-0 validation eval (skip if resuming)
-                    if start_step == 0 and val_entry is not None:
-                        wav0v, sr0v = generate_eval_sample(
-                            model, hunyuan_deps.dac_model, val_entry, device, dtype,
-                        )
-                        wav0v_mono = wav0v.squeeze()
-                        wav0v_t = torch.from_numpy(wav0v)
-                        if wav0v_t.ndim == 1:
-                            wav0v_t = wav0v_t.unsqueeze(0)
-                        _save_wav(samples_dir_0 / "val_step_00000.wav", wav0v_t, sr0v)
-                        _save_spectrogram(wav0v_mono, sr0v, samples_dir_0 / "val_step_00000")
-                        if val_ref_wav is not None:
-                            _save_spectrogram(val_ref_wav, 48000, samples_dir_0 / "val_reference")
-                        logger.info(f"[{exp_id}] Step 0 val sample saved")
+                    # Step-0 validation eval for all eval entries (skip if resuming)
+                    if start_step == 0:
+                        for _ev in eval_entries:
+                            wav0v, sr0v = generate_eval_sample(
+                                model, hunyuan_deps.dac_model, _ev["entry"], device, dtype,
+                            )
+                            wav0v_mono = wav0v.squeeze()
+                            wav0v_t = torch.from_numpy(wav0v)
+                            if wav0v_t.ndim == 1:
+                                wav0v_t = wav0v_t.unsqueeze(0)
+                            _ev_tag = _ev["name"]
+                            _save_wav(samples_dir_0 / f"{_ev_tag}_step_00000.wav", wav0v_t, sr0v)
+                            _save_spectrogram(wav0v_mono, sr0v, samples_dir_0 / f"{_ev_tag}_step_00000")
+                            if _ev["ref_wav"] is not None:
+                                _save_spectrogram(_ev["ref_wav"], 48000, samples_dir_0 / f"{_ev_tag}_reference")
+                            logger.info(f"[{exp_id}] Step 0 {_ev_tag} sample saved")
 
                     model.train()
 
@@ -2161,17 +2169,21 @@ class FoleyTuneLoRAScheduler:
                             with open(exp_dir / "metrics_history.json", "w") as _mf:
                                 json.dump(metrics_history, _mf, indent=2)
 
-                            # Validation sample (external)
-                            if val_entry is not None:
+                            # Eval samples for all eval entries
+                            for _ev in eval_entries:
+                                _ev_tag = _ev["name"]
                                 wav_v, sr_v = generate_eval_sample(
-                                    model, hunyuan_deps.dac_model, val_entry, device, dtype,
+                                    model, hunyuan_deps.dac_model, _ev["entry"], device, dtype,
                                 )
                                 wav_v_mono = wav_v.squeeze()
                                 wav_v_t = torch.from_numpy(wav_v)
                                 if wav_v_t.ndim == 1:
                                     wav_v_t = wav_v_t.unsqueeze(0)
-                                _save_wav(samples_dir / f"val_step_{step+1:05d}.wav", wav_v_t, sr_v)
-                                _save_spectrogram(wav_v_mono, sr_v, samples_dir / f"val_step_{step+1:05d}")
+                                _save_wav(samples_dir / f"{_ev_tag}_step_{step+1:05d}.wav", wav_v_t, sr_v)
+                                _save_spectrogram(wav_v_mono, sr_v, samples_dir / f"{_ev_tag}_step_{step+1:05d}")
+                                _ev_sm = spectral_metrics(wav_v_mono, sr_v)
+                                for mk, mv in _ev_sm.items():
+                                    step_metrics[f"{_ev_tag}_{mk}"] = mv
 
                             # Restore live (non-EMA) weights for continued training
                             if ema_state is not None:
@@ -2183,17 +2195,19 @@ class FoleyTuneLoRAScheduler:
                             if _sf_opt:
                                 optimizer.train()
 
-                            logger.info(f"[{exp_id}] Step {step+1}: "
+                            _log_parts = [f"[{exp_id}] Step {step+1}: "
                                        f"loss={step_metrics['loss']:.4f}  "
-                                       f"LSD={step_metrics.get('log_spectral_distance_db', 0):.2f}dB  "
-                                       f"MCD={step_metrics.get('mel_cepstral_distortion', 0):.2f}  "
-                                       f"HF={step_metrics.get('hf_energy_ratio', 0):.3f}  "
-                                       f"SC={step_metrics.get('spectral_convergence', 0):.3f}  "
                                        f"PBC={step_metrics.get('per_band_correlation', 0):.3f}  "
-                                       f"SF={step_metrics.get('spectral_flatness', 0):.4f}  "
                                        f"TV={step_metrics.get('temporal_variance', 0):.3f}  "
-                                       f"C={step_metrics.get('spectral_centroid_hz', 0):.0f}Hz  "
-                                       f"R={step_metrics.get('spectral_rolloff_hz', 0):.0f}Hz")
+                                       f"SC={step_metrics.get('spectral_convergence', 0):.3f}  "
+                                       f"MCD={step_metrics.get('mel_cepstral_distortion', 0):.2f}"]
+                            for _ev in eval_entries:
+                                _t = _ev["name"]
+                                _log_parts.append(
+                                    f"  [{_t}] PBC={step_metrics.get(f'{_t}_per_band_correlation', 0):.3f}  "
+                                    f"TV={step_metrics.get(f'{_t}_temporal_variance', 0):.3f}  "
+                                    f"SC={step_metrics.get(f'{_t}_spectral_convergence', 0):.3f}")
+                            logger.info("".join(_log_parts))
 
                     # Save final (with EMA weights if enabled)
                     if ema_state is not None:

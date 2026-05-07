@@ -868,7 +868,7 @@ class FoleyTuneLoRATrainer:
                 "resume_from": ("STRING", {"default": ""}),
                 "dataset_json": ("STRING", {
                     "default": "",
-                    "tooltip": "Path to dataset.json. When set, uses its train/val split instead of scanning data_dir for all .npz files.",
+                    "tooltip": "Path to dataset.json (or comma-separated paths for multiple datasets). When set, uses train/val split instead of scanning data_dir for all .npz files.",
                 }),
             },
         }
@@ -952,23 +952,32 @@ class FoleyTuneLoRATrainer:
         # -- Prepare dataset --
         logger.info("Preparing dataset...")
 
-        clip_names = None
         val_entry = None
         ds_cfg = None
-        if dataset_json and os.path.exists(dataset_json):
-            try:
-                with open(dataset_json) as f:
-                    ds_cfg = json.load(f)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"Invalid JSON in dataset file {dataset_json}: {e}") from e
-            if not isinstance(ds_cfg.get("train"), list):
-                raise ValueError(f"dataset_json must contain a 'train' key with a list of clip names")
-            # Resolve paths relative to JSON file location
-            data_dir = str(Path(dataset_json).parent)
-            clip_names = ds_cfg["train"]
+        dataset_jsons = [p.strip() for p in dataset_json.split(",") if p.strip()] if dataset_json else []
+        dataset_jsons = [p for p in dataset_jsons if os.path.exists(p)]
 
-        dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype,
-                                  clip_names=clip_names)
+        if dataset_jsons:
+            dataset = []
+            for dj_path in dataset_jsons:
+                try:
+                    with open(dj_path) as f:
+                        dj_cfg = json.load(f)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"Invalid JSON in dataset file {dj_path}: {e}") from e
+                if not isinstance(dj_cfg.get("train"), list):
+                    raise ValueError(f"dataset_json must contain a 'train' key: {dj_path}")
+                dj_dir = str(Path(dj_path).parent)
+                dj_clips = dj_cfg["train"]
+                logger.info(f"Loading dataset: {dj_path} ({len(dj_clips)} clips)")
+                dataset += prepare_dataset(dj_dir, hunyuan_deps.dac_model, device, dtype,
+                                           clip_names=dj_clips)
+                if ds_cfg is None:
+                    ds_cfg = dj_cfg
+                    data_dir = dj_dir
+        else:
+            dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype)
+
         n_clips = len(dataset)
         logger.info(f"Dataset ready: {n_clips} clips")
 
@@ -1650,22 +1659,30 @@ class FoleyTuneLoRAScheduler:
         base_precision = base_config.get("precision", "bf16")
         dtype = dtype_map[base_precision]
 
-        clip_names = None
         ds_cfg = None
-        if dataset_json and os.path.exists(dataset_json):
-            with open(dataset_json) as f:
-                ds_cfg = json.load(f)
-            if not isinstance(ds_cfg.get("train"), list):
-                raise ValueError("dataset_json must contain a 'train' key with a list of clip names")
-            data_dir = str(Path(dataset_json).parent)
-            clip_names = ds_cfg["train"]
-            logger.info(f"Using dataset_json: {dataset_json} ({len(clip_names)} train clips)")
-        elif not data_dir:
-            raise ValueError("Sweep JSON must specify either 'data_dir' or 'dataset_json'")
+        dataset_jsons = dataset_json if isinstance(dataset_json, list) else [dataset_json] if dataset_json else []
+        dataset_jsons = [p for p in dataset_jsons if p and os.path.exists(p)]
 
-        logger.info(f"Preparing shared dataset from {data_dir}...")
-        dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype,
-                                  clip_names=clip_names)
+        if dataset_jsons:
+            dataset = []
+            for dj_path in dataset_jsons:
+                with open(dj_path) as f:
+                    dj_cfg = json.load(f)
+                if not isinstance(dj_cfg.get("train"), list):
+                    raise ValueError(f"dataset_json must contain a 'train' key: {dj_path}")
+                dj_dir = str(Path(dj_path).parent)
+                dj_clips = dj_cfg["train"]
+                logger.info(f"Loading dataset: {dj_path} ({len(dj_clips)} train clips)")
+                dataset += prepare_dataset(dj_dir, hunyuan_deps.dac_model, device, dtype,
+                                           clip_names=dj_clips)
+                if ds_cfg is None:
+                    ds_cfg = dj_cfg
+                    data_dir = dj_dir
+        elif data_dir:
+            logger.info(f"Preparing shared dataset from {data_dir}...")
+            dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype)
+        else:
+            raise ValueError("Sweep JSON must specify either 'data_dir' or 'dataset_json'")
 
         from collections import Counter
         _prompt_counts = Counter(d["prompt"] for d in dataset)

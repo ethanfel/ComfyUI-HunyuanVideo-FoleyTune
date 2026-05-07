@@ -1478,3 +1478,58 @@ New single-position dataset: 124 clips, 8s each, reverse cowgirl only. Tests the
 47. **Loss-level interventions cannot fix the PBC/TV tradeoff** — temporal diff loss, SNR gating, multi-scale, visual dropout curriculum all failed. The optimiser's incentive to smooth temporal dynamics is stronger than any auxiliary loss
 48. **Dataset composition is the real lever** — single-position datasets (BJ) achieve both good sync and spectral quality. Multi-position datasets (JAV) force the model to choose between temporal fidelity and spectral accuracy
 49. **Temporal losses must be noise-level-aware** — ungated temporal diff loss at high noise just adds noise to gradients, pushing toward smoothness. SNR gating (t < 0.3) is conceptually correct but insufficient alone
+
+---
+
+### Missionary Finetune — Small Dataset Transfer Learning (May 2026)
+
+45-clip missionary dataset. Too small for full training — R64 memorises, R32/R16 underfit. Tested finetuning from the RCG 9k checkpoint with a new `freeze_blocks` parameter that freezes early LoRA layers to prevent catastrophic forgetting.
+
+#### Strategy
+
+`freeze_blocks=N` freezes LoRA weights in `triple_blocks.0..N-1`, keeping pretrained representations in early blocks while only training later blocks on the new dataset. Fresh Prodigy optimizer (checkpoint optimizer state is incompatible due to changed param count).
+
+#### Results — From-Scratch Attempts
+
+| Experiment | Rank | VD | Steps | PBC | TV | SC | MCD |
+|---|---|---|---|---|---|---|---|
+| baseline (R64) | 64 | 0.5 | 5k | 0.641 | 1.23 | 0.654 | 3.84 |
+| r16_vd03 | 16 | 0.3 | 5k | 0.336 | 1.34 | 0.733 | 4.97 |
+| r32_vd03 | 32 | 0.3 | 5k | 0.109 | 0.98 | 1.295 | 6.32 |
+
+R64 baseline has best metrics but loss dropped steeply without plateau — memorisation. R16 learned something but noisy. R32 didn't learn.
+
+#### Results — Finetune from RCG 9k (Unfrozen)
+
+| Experiment | Steps | PBC | TV | SC | MCD |
+|---|---|---|---|---|---|
+| from_rcg (no freeze) | 9.5k | 0.162 | 0.94 | 1.289 | 5.46 |
+| from_rcg (no freeze) | 13k | 0.340 | 0.70 | 1.246 | 5.03 |
+
+Catastrophic forgetting — PBC collapsed from 0.696 (RCG base) to 0.162 immediately. Never recovered past 0.34.
+
+#### Results — Freeze Block Experiments
+
+| Experiment | Freeze | d_coef | Best PBC | Best TV | Best SC | Notes |
+|---|---|---|---|---|---|---|
+| freeze12 | 12/18 | 1.0 | 0.652 | 1.77 | 0.521 | Unstable — PBC swings 0.14–0.65 |
+| **freeze14** | **14/18** | **1.0** | **0.682** | **1.43** | **0.572** | More stable, best overall balance |
+| freeze14_slow | 14/18 | 0.5 | -0.006 | 1.55 | 1.343 | Too conservative — didn't learn |
+| freeze14_d08 | 14/18 | 0.8 | 0.644 | 1.24 | 0.617 | Same oscillation as d_coef=1.0 |
+
+**freeze14 at step 12500** (PBC=0.682, TV=1.27, SC=0.572) is the best checkpoint. Fewer trainable blocks (4 vs 6) reduces overfitting capacity and oscillation. However, perceptual quality is noisy — metallic artifacts present. Not production-ready.
+
+#### Analysis
+
+**Freeze blocks prevent catastrophic forgetting but introduce oscillation.** With only 4 trainable blocks on 45 clips, each gradient update has outsized impact. The frozen RCG blocks and trainable blocks compete — metrics swing depending on whether the trainable blocks align with or interfere with the frozen base.
+
+**d_coef doesn't fix the oscillation.** Tried 1.0, 0.8, and 0.5 — the first two oscillate similarly, the third doesn't learn at all. The instability is structural (too few clips for the trainable capacity), not a learning rate issue.
+
+**45 clips is fundamentally insufficient** for position-specific LoRA training, even with transfer learning. The freeze approach partially works (PBC=0.682 matches the RCG base) but produces noisy, metallic audio. A proper missionary dataset with 100+ clips is needed.
+
+#### Updated Findings
+
+54. **freeze_blocks enables transfer learning for small datasets** — freezing 14/18 blocks preserved RCG knowledge while adapting 4 blocks to missionary. Without freezing, finetuning causes catastrophic forgetting (PBC 0.696→0.162)
+55. **More frozen blocks = more stability** — freeze14 (4 trainable) was more stable and higher quality than freeze12 (6 trainable). Fewer trainable params = less capacity to overfit on 45 clips
+56. **Prodigy d_coef has a narrow useful range for frozen finetuning** — 1.0 and 0.8 oscillate, 0.5 doesn't learn. The instability is structural, not LR-related
+57. **45 clips is below minimum viable dataset size** — even with transfer learning and aggressive freezing, the model can't learn stable position-specific patterns. ~100+ clips needed for production quality

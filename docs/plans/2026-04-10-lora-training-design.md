@@ -1533,3 +1533,39 @@ Catastrophic forgetting — PBC collapsed from 0.696 (RCG base) to 0.162 immedia
 55. **More frozen blocks = more stability** — freeze14 (4 trainable) was more stable and higher quality than freeze12 (6 trainable). Fewer trainable params = less capacity to overfit on 45 clips
 56. **Prodigy d_coef has a narrow useful range for frozen finetuning** — 1.0 and 0.8 oscillate, 0.5 doesn't learn. The instability is structural, not LR-related
 57. **45 clips is below minimum viable dataset size** — even with transfer learning and aggressive freezing, the model can't learn stable position-specific patterns. ~100+ clips needed for production quality
+
+---
+
+### Combined Multi-Dataset Training — RCG + Missionary (May 2026)
+
+Combined 124 RCG clips + 46 missionary clips (170 total) into a single training run using the new multi-dataset support (`dataset_json` as list). Each dataset has its own prompt ("reverse cowgirl sex..." vs "missionary sex..."). Dual eval tracks metrics on both RCG and missionary val clips independently.
+
+#### Infrastructure Added
+
+- **Multi-dataset**: `dataset_json` accepts a list of paths; clips are concatenated. Text embeddings zero-padded to max batch length for mixed-prompt batches
+- **Multi-eval**: `eval_npz` accepts a list of `{name, path}` objects. Each entry gets its own samples, spectrograms, and prefixed metrics (e.g. `rcg_per_band_correlation`, `missionary_temporal_variance`)
+- **DAC round-trip for eval references**: eval reference audio goes through DAC encode→decode before PBC comparison, matching the main reference pipeline
+
+#### Results
+
+| Experiment | Steps | PBC | TV | SC | MCD |
+|---|---|---|---|---|---|
+| combined_169clip_baseline | 10k | 0.585 | 1.45 | 1.213 | 5.02 |
+| combined_170clip_13k | 13k | 0.681 | 1.67 | 1.001 | 5.92 |
+| combined_170clip_15k | 15k (best@14k) | 0.672 | 1.69 | 0.895 | 5.40 |
+
+10k was too few — PBC still climbing. 13k and 15k converge to similar PBC (~0.67-0.68). 15k has slightly better SC (0.895 vs 1.001).
+
+#### Analysis
+
+**Both concepts are learned separately** — the model distinguishes between RCG and missionary prompts. Each position produces position-appropriate audio when conditioned on the right text prompt.
+
+**Imbalanced clip counts degrade the minority class.** With 124 RCG vs 46 missionary clips (~73/27 split), the model biases toward RCG. Missionary eval PBC stayed near zero or negative throughout, while the primary PBC (evaluated on a RCG train clip) reached 0.68. For production multi-position LoRAs, datasets should be roughly balanced per prompt.
+
+**Larger mixed datasets need more steps.** 170 clips required 13k steps vs 10k for 124-clip single-position. Roughly proportional to dataset size.
+
+#### Updated Findings
+
+58. **Multi-dataset training works** — different positions with different prompts are learned in a single LoRA. Text conditioning separates the concepts at inference time
+59. **Dataset balance matters for multi-prompt LoRAs** — a 73/27 clip imbalance causes the minority prompt to underperform. Balance datasets per prompt for production quality
+60. **Multi-eval with DAC round-trip is required for cross-dataset PBC** — raw reference audio vs DAC-decoded output produces systematically negative PBC due to codec artifacts

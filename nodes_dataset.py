@@ -1772,11 +1772,17 @@ class FoleyTuneVideoQualityFilter:
         rng = random.Random(seed)
 
         dataset = list(accepted_items)
-        if rejected_items:
+        if not skip_rejected:
+            for it in rejected_items:
+                it["rejected"] = True
+                it.setdefault("reject_reasons", [])
+                dataset.append(it)
+            rejected_items = []
+        elif rejected_items:
             val_pick = rng.choice(rejected_items)
             val_pick["val"] = True
             dataset.append(val_pick)
-            rejected_items.clear()  # free waveforms of non-selected rejects
+            rejected_items.clear()
         results.clear()  # free Phase 1 result dicts
 
         # Extract audio for passing/val clips that were cached (deferred loading)

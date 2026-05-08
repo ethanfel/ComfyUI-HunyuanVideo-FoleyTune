@@ -1714,17 +1714,6 @@ class FoleyTuneLoRAScheduler:
 
         eval_entries = []  # list of {"name": str, "entry": dict, "ref_wav": ndarray|None}
 
-        # Legacy: single val from first dataset_json
-        if ds_cfg is not None and ds_cfg.get("val"):
-            val_npz = Path(data_dir) / f"{ds_cfg['val']}.npz"
-            if val_npz.exists():
-                eval_entries.append({
-                    "name": "val",
-                    "entry": prepare_single_entry(str(val_npz), hunyuan_deps.dac_model, device, dtype),
-                    "ref_wav": _load_ref_audio(val_npz, hunyuan_deps.dac_model),
-                })
-                logger.info(f"Val clip loaded from dataset_json: {ds_cfg['val']}")
-
         eval_npz = sweep.get("eval_npz") or base_config.get("eval_npz")
         if eval_npz:
             if isinstance(eval_npz, str):

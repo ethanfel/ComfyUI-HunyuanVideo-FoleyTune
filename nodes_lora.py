@@ -1044,7 +1044,8 @@ class FoleyTuneLoRATrainer:
                 pg.pop("lr", None)
             _growth = float("inf") if prodigy_growth_rate <= 0 else prodigy_growth_rate
             optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
-                                d_coef=prodigy_d_coef, growth_rate=_growth, decouple=True)
+                                d_coef=prodigy_d_coef, growth_rate=_growth, decouple=True,
+                                safeguard_warmup=True, use_bias_correction=True)
             logger.info(f"Using Prodigy optimizer (d_coef={prodigy_d_coef}, growth_rate={_growth}, decouple=True, wd=0.01)")
         elif optimizer_type == "prodigy_plus":
             from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
@@ -1866,7 +1867,8 @@ class FoleyTuneLoRAScheduler:
                         _growth = config.get("prodigy_growth_rate", 0.0)
                         _growth = float("inf") if _growth <= 0 else _growth
                         optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
-                                            d_coef=_d_coef, growth_rate=_growth, decouple=True)
+                                            d_coef=_d_coef, growth_rate=_growth, decouple=True,
+                                            safeguard_warmup=True, use_bias_correction=True)
                         logger.info(f"[{exp_id}] Using Prodigy optimizer (d_coef={_d_coef}, growth_rate={_growth}, decouple=True, wd=0.01)")
                     elif _opt_type == "prodigy_plus":
                         from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree

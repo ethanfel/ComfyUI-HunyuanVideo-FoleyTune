@@ -1524,6 +1524,130 @@ class FoleyTuneLoRALoaderPath:
         return (model, prompts)
 
 
+# --- Node: LoRA Timeline Entry (stacker) ------------------------------------
+
+class FoleyTuneLoRATimelineEntry:
+    """Configure a LoRA for placement on the timeline. Chain multiple entries."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "lora_name": (folder_paths.get_filename_list("loras"),),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "label": ("STRING", {"default": "LoRA"}),
+                "color": (["red", "blue", "green", "yellow", "purple", "orange"],),
+            },
+            "optional": {
+                "prev_entries": ("LORA_TIMELINE_ENTRIES",),
+            },
+        }
+
+    RETURN_TYPES = ("LORA_TIMELINE_ENTRIES",)
+    RETURN_NAMES = ("entries",)
+    FUNCTION = "add_entry"
+    CATEGORY = "FoleyTune"
+
+    def add_entry(self, lora_name, strength, label, color, prev_entries=None):
+        entries = list(prev_entries) if prev_entries else []
+        adapter_path = folder_paths.get_full_path_or_raise("loras", lora_name)
+        entries.append({
+            "path": adapter_path,
+            "strength": strength,
+            "label": label,
+            "color": color,
+        })
+        return (entries,)
+
+
+# --- Node: LoRA Timeline (visual widget) ------------------------------------
+
+class FoleyTuneLoRATimeline:
+    """Visual timeline for placing LoRA adapters on video segments."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "features": ("FOLEYTUNE_FEATURES",),
+                "entries": ("LORA_TIMELINE_ENTRIES",),
+                "segments_json": ("STRING", {
+                    "default": "[]",
+                    "multiline": True,
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("LORA_SCHEDULE", "FOLEYTUNE_FEATURES")
+    RETURN_NAMES = ("lora_schedule", "features")
+    FUNCTION = "build_schedule"
+    CATEGORY = "FoleyTune"
+
+    def build_schedule(self, features, entries, segments_json="[]"):
+        segments = json.loads(segments_json)
+
+        schedule = []
+        for seg in sorted(segments, key=lambda s: s["start_sec"]):
+            entry_idx = seg.get("entry_index", 0)
+            if entry_idx < 0 or entry_idx >= len(entries):
+                continue
+            entry = entries[entry_idx]
+            schedule.append({
+                "lora_path": entry["path"],
+                "start_sec": float(seg["start_sec"]),
+                "end_sec": float(seg["end_sec"]),
+                "strength": float(seg.get("strength", entry["strength"])),
+                "fade_in": float(seg.get("fade_in", 0.0)),
+                "fade_out": float(seg.get("fade_out", 0.0)),
+            })
+
+        return {
+            "ui": {
+                "duration": features["duration"],
+                "video_path": features.get("video_path", ""),
+                "entries": entries,
+            },
+            "result": (schedule, features),
+        }
+
+
+# --- API: Timeline Thumbnail Sprite -----------------------------------------
+
+try:
+    from server import PromptServer
+    import aiohttp.web as web
+    import subprocess
+
+    @PromptServer.instance.routes.get("/foleytune/timeline_thumbnails")
+    async def timeline_thumbnails(request):
+        """Generate a sprite sheet of video thumbnails for the timeline widget."""
+        video_path = request.query.get("video_path", "")
+        if not video_path or not os.path.exists(video_path):
+            return web.Response(status=404, text="Video not found")
+
+        mtime = os.path.getmtime(video_path)
+        cache_key = hashlib.md5(f"{video_path}:{mtime}".encode()).hexdigest()
+        cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "thumbnails")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, f"{cache_key}.jpg")
+
+        if not os.path.exists(cache_path):
+            result = subprocess.run([
+                "ffmpeg", "-y", "-i", video_path,
+                "-vf", "fps=2,scale=160:-1,tile=0x1",
+                "-frames:v", "1",
+                "-q:v", "5",
+                cache_path,
+            ], capture_output=True, timeout=30)
+            if result.returncode != 0 or not os.path.exists(cache_path):
+                return web.Response(status=500, text=f"ffmpeg failed: {result.stderr.decode()}")
+
+        return web.FileResponse(cache_path, headers={"Content-Type": "image/jpeg"})
+
+except ImportError:
+    pass  # Running outside ComfyUI server context
+
+
 # --- Node 4: LoRA Scheduler -------------------------------------------------
 
 class FoleyTuneLoRAScheduler:
@@ -2592,6 +2716,8 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneLoRATrainer": FoleyTuneLoRATrainer,
     "FoleyTuneLoRALoader": FoleyTuneLoRALoader,
     "FoleyTuneLoRALoaderPath": FoleyTuneLoRALoaderPath,
+    "FoleyTuneLoRATimelineEntry": FoleyTuneLoRATimelineEntry,
+    "FoleyTuneLoRATimeline": FoleyTuneLoRATimeline,
     "FoleyTuneLoRAScheduler": FoleyTuneLoRAScheduler,
     "FoleyTuneLoRAEvaluator": FoleyTuneLoRAEvaluator,
     "FoleyTuneVAERoundtrip": FoleyTuneVAERoundtrip,
@@ -2604,6 +2730,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneLoRATrainer": "FoleyTune LoRA Trainer",
     "FoleyTuneLoRALoader": "FoleyTune LoRA Loader",
     "FoleyTuneLoRALoaderPath": "FoleyTune LoRA Loader (Path)",
+    "FoleyTuneLoRATimelineEntry": "FoleyTune LoRA Timeline Entry",
+    "FoleyTuneLoRATimeline": "FoleyTune LoRA Timeline",
     "FoleyTuneLoRAScheduler": "FoleyTune LoRA Scheduler",
     "FoleyTuneLoRAEvaluator": "FoleyTune LoRA Evaluator",
     "FoleyTuneVAERoundtrip": "FoleyTune VAE Roundtrip",

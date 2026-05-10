@@ -1582,6 +1582,7 @@ class FoleyTuneLoRATimeline:
     RETURN_NAMES = ("lora_schedule", "features")
     FUNCTION = "build_schedule"
     CATEGORY = "FoleyTune"
+    OUTPUT_NODE = True
 
     def build_schedule(self, features, entries, segments_json="[]"):
         segments = json.loads(segments_json)
@@ -1603,9 +1604,9 @@ class FoleyTuneLoRATimeline:
 
         return {
             "ui": {
-                "duration": features["duration"],
-                "video_path": features.get("video_path", ""),
-                "entries": entries,
+                "duration": [features["duration"]],
+                "video_path": [features.get("video_path", "")],
+                "entries": [entries],
             },
             "result": (schedule, features),
         }

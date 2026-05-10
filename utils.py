@@ -30,12 +30,33 @@ except Exception:
 # -----------------------------------------------------------------------------------
 
 
+_lora_ckpt_cache = {}
+
+
+def _load_lora_checkpoint(lora_path):
+    """Load a LoRA checkpoint with caching to avoid repeated disk I/O."""
+    if lora_path in _lora_ckpt_cache:
+        return _lora_ckpt_cache[lora_path]
+
+    from safetensors.torch import load_file as load_safetensors
+    if lora_path.endswith(".safetensors"):
+        ckpt = load_safetensors(lora_path)
+        meta = {}
+    else:
+        ckpt = torch.load(lora_path, map_location="cpu", weights_only=True)
+        meta = ckpt.get("meta", {})
+        ckpt = ckpt.get("state_dict", ckpt)
+
+    _lora_ckpt_cache[lora_path] = (ckpt, meta)
+    return ckpt, meta
+
+
 def _apply_lora_for_time(model, lora_schedule, time_sec, base_state):
     """Restore base weights and apply the LoRA active at time_sec (if any)."""
     from .lora.lora import apply_lora, load_lora, remove_lora, FOLEY_TARGET_PRESETS
 
-    model.load_state_dict(base_state, strict=False)
     remove_lora(model)
+    model.load_state_dict(base_state, strict=False)
 
     target = None
     for seg in lora_schedule:
@@ -48,14 +69,7 @@ def _apply_lora_for_time(model, lora_schedule, time_sec, base_state):
         return
 
     lora_path = target["lora_path"]
-    from safetensors.torch import load_file as load_safetensors
-    if lora_path.endswith(".safetensors"):
-        ckpt = load_safetensors(lora_path)
-        meta = {}
-    else:
-        ckpt = torch.load(lora_path, map_location="cpu", weights_only=True)
-        meta = ckpt.get("meta", {})
-        ckpt = ckpt.get("state_dict", ckpt)
+    ckpt, meta = _load_lora_checkpoint(lora_path)
 
     rank = meta.get("rank", 64)
     alpha = meta.get("alpha", float(rank))

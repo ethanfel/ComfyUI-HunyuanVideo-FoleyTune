@@ -193,16 +193,16 @@ app.registerExtension({
             node.onExecuted = function (output) {
                 origOnExecuted?.apply(this, arguments);
 
-                if (output?.duration) duration = output.duration;
-                if (output?.video_path) {
+                if (output?.duration?.[0]) duration = output.duration[0];
+                if (output?.video_path?.[0]) {
                     const url = api.apiURL("/foleytune/timeline_thumbnails?video_path=" +
-                        encodeURIComponent(output.video_path));
+                        encodeURIComponent(output.video_path[0]));
                     thumbImg.src = url;
                     thumbImg.onload = () => {
                         thumbImg.style.width = thumbStrip.clientWidth + "px";
                     };
                 }
-                if (output?.entries) entries = output.entries;
+                if (output?.entries?.[0]) entries = output.entries[0];
 
                 renderRuler();
                 renderSegments();

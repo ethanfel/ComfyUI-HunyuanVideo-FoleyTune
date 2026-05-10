@@ -470,6 +470,35 @@ def compute_chunk_boundaries(duration: float, chunk_duration: float, overlap_sec
     return chunks
 
 
+def align_chunks_to_schedule(chunks, lora_schedule, min_chunk_sec=4.0):
+    """Adjust chunk boundaries to prefer alignment with LoRA segment boundaries.
+
+    When a segment boundary falls inside a chunk, split the chunk so the boundary
+    aligns with a chunk edge. This lets crossfade handle LoRA transitions naturally.
+    """
+    if not lora_schedule:
+        return chunks
+
+    boundaries = set()
+    for seg in lora_schedule:
+        boundaries.add(seg["start_sec"])
+        boundaries.add(seg["end_sec"])
+
+    adjusted = []
+    for (cs, ce) in chunks:
+        splits = sorted(b for b in boundaries if cs + min_chunk_sec < b < ce - min_chunk_sec)
+        if not splits:
+            adjusted.append((cs, ce))
+        else:
+            prev = cs
+            for b in splits:
+                adjusted.append((prev, b))
+                prev = b
+            adjusted.append((prev, ce))
+
+    return adjusted
+
+
 def slice_features_for_chunk(features: dict, t_start: float, t_end: float):
     """Slice pre-computed features to a specific time window.
 
@@ -616,6 +645,10 @@ def chunked_denoise_process(
     Returns:
         (audio_waveform, sample_rate) tuple
     """
+    # Align chunk boundaries to LoRA schedule segment edges
+    if lora_schedule:
+        chunks = align_chunks_to_schedule(chunks, lora_schedule)
+
     target_dtype = model_dict.foley_model.dtype
     device = model_dict.device
     audio_frame_rate = cfg.model_config.model_kwargs.audio_frame_rate

@@ -1567,6 +1567,7 @@ class FoleyTuneLoRAScheduler:
         "temporal_variance_weight": 0.0, "tv_gate_sigma": 0.3, "vd_curriculum_ratio": 0.0,
         "t_min": 0.0, "t_max": 1.0, "optimizer_type": "prodigy",
         "prodigy_d_coef": 1.0, "prodigy_growth_rate": 0.0,
+        "prodigy_safeguard_warmup": True,
         "visual_dropout_prob": 0.5,
         "gradient_checkpointing": False,
         "freeze_blocks": 0,
@@ -1866,10 +1867,11 @@ class FoleyTuneLoRAScheduler:
                         _d_coef = config.get("prodigy_d_coef", 1.0)
                         _growth = config.get("prodigy_growth_rate", 0.0)
                         _growth = float("inf") if _growth <= 0 else _growth
+                        _safeguard = config.get("prodigy_safeguard_warmup", True)
                         optimizer = Prodigy(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
                                             d_coef=_d_coef, growth_rate=_growth, decouple=True,
-                                            safeguard_warmup=True, use_bias_correction=True)
-                        logger.info(f"[{exp_id}] Using Prodigy optimizer (d_coef={_d_coef}, growth_rate={_growth}, decouple=True, wd=0.01)")
+                                            safeguard_warmup=_safeguard, use_bias_correction=True)
+                        logger.info(f"[{exp_id}] Using Prodigy optimizer (d_coef={_d_coef}, growth_rate={_growth}, safeguard={_safeguard}, decouple=True, wd=0.01)")
                     elif _opt_type == "prodigy_plus":
                         from prodigyplus.prodigy_plus_schedulefree import ProdigyPlusScheduleFree
                         for pg in param_groups:

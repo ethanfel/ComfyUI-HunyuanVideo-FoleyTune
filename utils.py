@@ -29,6 +29,50 @@ except Exception:
 # compatible with ComfyUI's data flow (e.g., accepting a torch.Generator).
 # -----------------------------------------------------------------------------------
 
+
+def _apply_lora_for_time(model, lora_schedule, time_sec, base_state):
+    """Restore base weights and apply the LoRA active at time_sec (if any)."""
+    from .lora.lora import apply_lora, load_lora, remove_lora, FOLEY_TARGET_PRESETS
+
+    model.load_state_dict(base_state, strict=False)
+    remove_lora(model)
+
+    target = None
+    for seg in lora_schedule:
+        if seg["start_sec"] <= time_sec < seg["end_sec"]:
+            target = seg
+            break
+
+    if target is None:
+        logger.info(f"LoRA swap @ {time_sec:.1f}s: base model (no LoRA)")
+        return
+
+    lora_path = target["lora_path"]
+    from safetensors.torch import load_file as load_safetensors
+    if lora_path.endswith(".safetensors"):
+        ckpt = load_safetensors(lora_path)
+        meta = {}
+    else:
+        ckpt = torch.load(lora_path, map_location="cpu", weights_only=True)
+        meta = ckpt.get("meta", {})
+        ckpt = ckpt.get("state_dict", ckpt)
+
+    rank = meta.get("rank", 64)
+    alpha = meta.get("alpha", float(rank))
+    target_key = meta.get("target", "all_attn_mlp")
+    target_suffixes = FOLEY_TARGET_PRESETS.get(target_key, FOLEY_TARGET_PRESETS["all_attn_mlp"])
+
+    apply_lora(model, rank=rank, alpha=alpha, target_suffixes=target_suffixes)
+    load_lora(model, ckpt)
+
+    strength = target.get("strength", 1.0)
+    if strength != 1.0:
+        for n, p in model.named_parameters():
+            if "lora_A" in n or "lora_B" in n:
+                p.data.mul_(strength)
+
+    logger.info(f"LoRA swap @ {time_sec:.1f}s: {os.path.basename(lora_path)} strength={strength}")
+
 # DAC kwargs + explicit latent_dim (must be 128 or the decoder mismatches)
 # extracted from original pth
 _DAC_KWARGS = dict(
@@ -550,6 +594,7 @@ def chunked_denoise_process(
     init_latents=None,
     strength=1.0,
     noise_blend=0.0,
+    lora_schedule=None,
 ):
     """Chunked denoising with overlap stitching for long-form generation.
 
@@ -581,9 +626,21 @@ def chunked_denoise_process(
     ]
     sample_rate = model_dict.dac_model.sample_rate
 
+    # --- LoRA schedule: save base state for hot-swapping ---
+    _lora_base_state = None
+    _current_lora_path = None
+    if lora_schedule:
+        import copy
+        _lora_base_state = copy.deepcopy(model_dict.foley_model.state_dict())
+        logger.info(f"LoRA timeline: {len(lora_schedule)} segments, base state saved")
+
     # Single chunk — delegate to standard denoise
     if len(chunks) == 1:
         t_start, t_end = chunks[0]
+        # Apply LoRA for single-chunk case
+        if lora_schedule and _lora_base_state is not None:
+            _apply_lora_for_time(model_dict.foley_model, lora_schedule,
+                                 (t_start + t_end) / 2, _lora_base_state)
         chunk_feats = slice_features_for_chunk(features, t_start, t_end)
         chunk_dur = t_end - t_start
         visual = {
@@ -600,11 +657,15 @@ def chunked_denoise_process(
             frame_start = int(t_start * audio_frame_rate)
             frame_end = int(t_end * audio_frame_rate)
             chunk_init = init_latents[:, :, frame_start:frame_end]
-        return denoise_process_with_generator(
+        result = denoise_process_with_generator(
             visual, text, chunk_dur, model_dict, cfg,
             guidance_scale, num_inference_steps, batch_size, sampler, generator,
             init_latents=chunk_init, strength=strength, noise_blend=noise_blend,
         )
+        # Restore base state after single-chunk generation
+        if _lora_base_state is not None:
+            model_dict.foley_model.load_state_dict(_lora_base_state, strict=False)
+        return result
 
     # --- Multi-chunk: set up per-chunk schedulers and latents ---
     # CRITICAL: each chunk needs its own scheduler instance because
@@ -706,6 +767,18 @@ def chunked_denoise_process(
             "clip": cfg_clip, "sync": cfg_sync, "text": cfg_text,
         })
 
+    # --- Precompute per-chunk LoRA assignment ---
+    _chunk_lora_targets = [None] * len(chunks)
+    if lora_schedule and _lora_base_state is not None:
+        for c_idx, (cs, ce) in enumerate(chunks):
+            chunk_center = (cs + ce) / 2
+            for seg in lora_schedule:
+                if seg["start_sec"] <= chunk_center < seg["end_sec"]:
+                    _chunk_lora_targets[c_idx] = seg
+                    break
+        lora_summary = [os.path.basename(s["lora_path"]) if s else "base" for s in _chunk_lora_targets]
+        logger.info(f"LoRA timeline per-chunk: {lora_summary}")
+
     # --- Denoising loop ---
     total_steps = len(timesteps) * len(chunks)
     pbar = ProgressBar(total_steps)
@@ -719,6 +792,16 @@ def chunked_denoise_process(
                 t = t.to(device=device)
 
             for c_idx in range(len(chunks)):
+                # LoRA hot-swap: apply correct LoRA before processing this chunk
+                if lora_schedule and _lora_base_state is not None:
+                    target = _chunk_lora_targets[c_idx]
+                    target_path = target["lora_path"] if target else None
+                    if target_path != _current_lora_path:
+                        _apply_lora_for_time(model_dict.foley_model, lora_schedule,
+                                             (chunks[c_idx][0] + chunks[c_idx][1]) / 2,
+                                             _lora_base_state)
+                        _current_lora_path = target_path
+
                 latents = chunk_latents[c_idx]
                 cfg_in = chunk_cfg_inputs[c_idx]
 
@@ -757,6 +840,14 @@ def chunked_denoise_process(
                             chunk_latents[c_idx], chunk_latents[c_idx + 1],
                             ovl, step_idx
                         )
+
+    # --- Restore base model after LoRA hot-swap ---
+    if _lora_base_state is not None:
+        from .lora.lora import remove_lora
+        model_dict.foley_model.load_state_dict(_lora_base_state, strict=False)
+        remove_lora(model_dict.foley_model)
+        del _lora_base_state
+        logger.info("LoRA timeline: base model restored")
 
     # --- Stitch results ---
     if crossfade_mode == "safa":

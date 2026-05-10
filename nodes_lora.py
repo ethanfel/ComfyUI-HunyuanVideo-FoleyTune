@@ -21,7 +21,7 @@ import comfy.model_management as mm
 import comfy.utils
 
 from .lora.lora import (
-    apply_lora, get_lora_state_dict, load_lora,
+    apply_lora, remove_lora, get_lora_state_dict, load_lora,
     FOLEY_TARGET_PRESETS, LoRALinear,
 )
 from .lora.train import (

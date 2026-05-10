@@ -190,6 +190,25 @@ def apply_lora(
     return n_wrapped
 
 
+def remove_lora(model: nn.Module) -> int:
+    """Remove all LoRA wrappers, restoring original nn.Linear layers."""
+    n_removed = 0
+    for name, module in list(model.named_modules()):
+        if not isinstance(module, LoRALinear):
+            continue
+        parts = name.rsplit(".", 1)
+        if len(parts) == 2:
+            parent_name, attr_name = parts
+            parent = dict(model.named_modules())[parent_name]
+        else:
+            parent = model
+            attr_name = parts[0]
+        setattr(parent, attr_name, module.base)
+        n_removed += 1
+    logger.debug(f"LoRA removed: {n_removed} layers unwrapped")
+    return n_removed
+
+
 def get_lora_state_dict(model: nn.Module) -> dict:
     """Extract only LoRA parameters (lora_A, lora_B) from model."""
     return {

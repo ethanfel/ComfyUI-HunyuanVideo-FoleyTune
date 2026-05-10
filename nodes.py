@@ -423,6 +423,7 @@ class FoleyTuneChunkedSampler:
                 "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
                              "tooltip": "1.0=full generation from noise, 0.0=keep original. "
                                         "Uses sigma-based mapping for smooth control across the full range."}),
+                "lora_schedule": ("LORA_SCHEDULE", {"tooltip": "LoRA timeline schedule — assigns different LoRAs to different time segments."}),
                 "force_offload": ("BOOLEAN", {"default": True}),
             }
         }
@@ -443,6 +444,7 @@ class FoleyTuneChunkedSampler:
         sampler_options=None,
         init_audio=None,
         denoise=1.0,
+        lora_schedule=None,
         force_offload=True,
     ):
         opts = sampler_options or {}
@@ -547,6 +549,7 @@ class FoleyTuneChunkedSampler:
             init_latents=init_latents,
             strength=denoise,
             noise_blend=noise_blend,
+            lora_schedule=lora_schedule,
         )
 
         waveform_batch = decoded_waveform.float().cpu()

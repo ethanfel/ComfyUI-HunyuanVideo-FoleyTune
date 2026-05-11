@@ -1569,3 +1569,74 @@ Combined 124 RCG clips + 46 missionary clips (170 total) into a single training 
 58. **Multi-dataset training works** — different positions with different prompts are learned in a single LoRA. Text conditioning separates the concepts at inference time
 59. **Dataset balance matters for multi-prompt LoRAs** — a 73/27 clip imbalance causes the minority prompt to underperform. Balance datasets per prompt for production quality
 60. **Multi-eval with DAC round-trip is required for cross-dataset PBC** — raw reference audio vs DAC-decoded output produces systematically negative PBC due to codec artifacts
+
+---
+
+### CLAP Prompt Experiments — RCG (May 2026)
+
+Tested prompt sensitivity by re-extracting the same RCG videos with different CLAP text prompts.
+
+| Prompt | Clips | PBC | Notes |
+|---|---|---|---|
+| Original: "reverse cowgirl sex, rhythmic skin slapping, wet clapping, heavy breathing, moaning" | 124 | 0.696 | Best overall |
+| V3 hybrid: "reverse cowgirl sex, rhythmic slapping and wet clapping impacts, loud moaning, heavy panting" | 128 | 0.652 | Close second |
+| Narrow: "reverse cowgirl sex, rhythmic skin slapping, loud female moaning" | 133 | 0.368 | Lost audio breadth |
+| CLAP-optimized: "rhythmic slapping and wet clapping impacts, loud moaning and whimpering vocals, heavy panting and gasping" | 125 | 0.487 | Removed domain context |
+| CLAP resume from RCG 9k | 125 | 0.231 | RCG associations fight new embedding |
+
+#### Updated Findings
+
+61. **Prompt must describe full audio texture** — narrow prompts ("loud female moaning") tank PBC from 0.70 to 0.37 on the same videos. CLAP conditions the denoiser; incomplete prompts force the model to learn against its conditioning
+62. **Domain context helps despite CLAP not "knowing" it** — removing "reverse cowgirl sex" from the prompt degraded results. The term may anchor the embedding in a useful region even without explicit AudioSet coverage
+63. **Gender-specific terms are weak in CLAP** — "female moaning" underperforms "moaning" alone. CLAP training de-biased gender terms
+64. **Resuming from a different-prompt checkpoint hurts** — the original checkpoint's learned associations fight the new text embedding, producing worse results than training from scratch
+
+---
+
+### Prodigy Optimizer Tuning (May 2026)
+
+#### safeguard_warmup
+
+During LR warmup, Prodigy overestimates its `d` (step size) parameter because small effective LR keeps gradients large. `safeguard_warmup=True` prevents this by excluding the LR factor from the denominator accumulation. Added as configurable `prodigy_safeguard_warmup` parameter (default: true).
+
+**Tradeoff:** Safeguard prevents loss spikes but makes the LR more conservative. On the doggy dataset, safeguard-on and no-warmup produced nearly identical results — the conservatism may slow convergence without improving final quality.
+
+#### Updated Findings
+
+65. **safeguard_warmup prevents loss spikes but doesn't improve final PBC** — on the doggy dataset, safeguard on, safeguard off, and no warmup all converged to similar PBC (~0.30-0.38). The warmup interaction is cosmetic, not structural
+66. **noise_offset is a significant improvement** — noise_offset=0.03 improved PBC from 0.40 to 0.54 on the same dataset. Helps the model learn dynamic range differences between clips
+
+---
+
+### Doggystyle POV Training — Multi-Performer (May 2026)
+
+Two datasets tested: `mp4_doggy_features` (5 sources, 135 clips) and `mp4_doggy_clap_features` (20+ sources, 106 clips).
+
+#### First Dataset (5 sources, 135 clips)
+
+| Experiment | VD | PBC | Notes |
+|---|---|---|---|
+| baseline (vd=0.5) | 0.5 | 0.215 | Bland average — too few sources for high VD |
+| vd=0.2 | 0.2 | 0.472 | 2× PBC — low VD critical for few-source datasets |
+
+#### Second Dataset (20+ sources, 106 clips)
+
+| Experiment | Best PBC | @step | Key Change |
+|---|---|---|---|
+| **noise_vd0** | **0.632** | **7k** | vd=0 + noise_offset 0.03 — best perceptual quality |
+| 13k | 0.640 | 13k | Highest PBC but lost clapping sounds — overtrained |
+| vd05_13k | 0.604 | 12k | vd=0.5 + 13k |
+| noise_offset | 0.539 | 7k | noise_offset 0.03 alone |
+| 8k | 0.440 | 7k | Baseline at fewer steps |
+| baseline (vd=0.25) | 0.404 | 8k | Reference |
+| no_curriculum | 0.371 | 5k | Uniform timesteps worse |
+| σ=0.7/cur=0.5 | 0.360 | 7k | Second-best RCG combo didn't transfer |
+
+#### Updated Findings
+
+67. **Visual dropout is counterproductive for multi-performer datasets** — with 20+ sources, performer diversity naturally prevents identity binding. vd=0 allows the model to use every visual frame for sync, producing better audio-visual coupling. vd=0 + noise_offset reached PBC 0.632 vs 0.404 at vd=0.25
+68. **noise_offset=0.03 is a reliable improvement** — consistent gains across experiments. Helps the model learn dynamic range and prevents collapse to a bland average
+69. **More steps can overtrain and lose audio components** — 13k had the highest PBC (0.640) but perceptually lost clapping sounds. 7-8k with noise_offset preserved full audio texture. PBC alone doesn't capture component loss
+70. **Dataset source diversity matters more than clip count** — 106 clips from 20+ sources (PBC 0.632) dramatically outperformed 135 clips from 5 sources (PBC 0.472). Visual diversity > clip volume
+71. **Curriculum and sigma settings transfer poorly across datasets** — σ=0.7/cur=0.5 was second-best for RCG but performed worst for doggy. Optimal hyperparameters are dataset-dependent
+72. **Eval PBC on a single held-out clip is unreliable** — eval PBC was near zero or negative across all runs regardless of perceptual quality. Perceptual evaluation (listening tests) remains essential

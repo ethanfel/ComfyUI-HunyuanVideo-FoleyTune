@@ -30,29 +30,13 @@ except Exception:
 # -----------------------------------------------------------------------------------
 
 
-_lora_ckpt_cache = {}
+def _apply_lora_for_time(model, lora_schedule, time_sec, base_state, ckpt_cache):
+    """Restore base weights and apply the LoRA active at time_sec (if any).
 
-
-def _load_lora_checkpoint(lora_path):
-    """Load a LoRA checkpoint with caching to avoid repeated disk I/O."""
-    if lora_path in _lora_ckpt_cache:
-        return _lora_ckpt_cache[lora_path]
-
-    from safetensors.torch import load_file as load_safetensors
-    if lora_path.endswith(".safetensors"):
-        ckpt = load_safetensors(lora_path)
-        meta = {}
-    else:
-        ckpt = torch.load(lora_path, map_location="cpu", weights_only=True)
-        meta = ckpt.get("meta", {})
-        ckpt = ckpt.get("state_dict", ckpt)
-
-    _lora_ckpt_cache[lora_path] = (ckpt, meta)
-    return ckpt, meta
-
-
-def _apply_lora_for_time(model, lora_schedule, time_sec, base_state):
-    """Restore base weights and apply the LoRA active at time_sec (if any)."""
+    Args:
+        ckpt_cache: dict used as a per-generation session cache — caller owns
+                    its lifetime and clears it after the generation loop.
+    """
     from .lora.lora import apply_lora, load_lora, remove_lora, FOLEY_TARGET_PRESETS
 
     remove_lora(model)
@@ -69,7 +53,20 @@ def _apply_lora_for_time(model, lora_schedule, time_sec, base_state):
         return
 
     lora_path = target["lora_path"]
-    ckpt, meta = _load_lora_checkpoint(lora_path)
+
+    # Session-scoped cache — lives only for this generation
+    if lora_path in ckpt_cache:
+        ckpt, meta = ckpt_cache[lora_path]
+    else:
+        from safetensors.torch import load_file as load_safetensors
+        if lora_path.endswith(".safetensors"):
+            ckpt = load_safetensors(lora_path)
+            meta = {}
+        else:
+            raw = torch.load(lora_path, map_location="cpu", weights_only=True)
+            meta = raw.get("meta", {})
+            ckpt = raw.get("state_dict", raw)
+        ckpt_cache[lora_path] = (ckpt, meta)
 
     rank = meta.get("rank", 64)
     alpha = meta.get("alpha", float(rank))
@@ -676,10 +673,11 @@ def chunked_denoise_process(
     # --- LoRA schedule: save base state for hot-swapping ---
     _lora_base_state = None
     _current_lora_path = None
+    _lora_ckpt_cache = {}
     if lora_schedule:
-        import copy
-        _lora_base_state = copy.deepcopy(model_dict.foley_model.state_dict())
-        logger.info(f"LoRA timeline: {len(lora_schedule)} segments, base state saved")
+        # Store base state on CPU to avoid doubling GPU memory
+        _lora_base_state = {k: v.cpu().clone() for k, v in model_dict.foley_model.state_dict().items()}
+        logger.info(f"LoRA timeline: {len(lora_schedule)} segments, base state saved (CPU)")
 
     # Single chunk — delegate to standard denoise
     if len(chunks) == 1:
@@ -687,7 +685,8 @@ def chunked_denoise_process(
         # Apply LoRA for single-chunk case
         if lora_schedule and _lora_base_state is not None:
             _apply_lora_for_time(model_dict.foley_model, lora_schedule,
-                                 (t_start + t_end) / 2, _lora_base_state)
+                                 (t_start + t_end) / 2, _lora_base_state,
+                                 _lora_ckpt_cache)
         chunk_feats = slice_features_for_chunk(features, t_start, t_end)
         chunk_dur = t_end - t_start
         visual = {
@@ -711,7 +710,14 @@ def chunked_denoise_process(
         )
         # Restore base state after single-chunk generation
         if _lora_base_state is not None:
+            import gc
+            from .lora.lora import remove_lora
+            remove_lora(model_dict.foley_model)
             model_dict.foley_model.load_state_dict(_lora_base_state, strict=False)
+            del _lora_base_state
+            _lora_ckpt_cache.clear()
+            gc.collect()
+            torch.cuda.empty_cache()
         return result
 
     # --- Multi-chunk: set up per-chunk schedulers and latents ---
@@ -846,7 +852,7 @@ def chunked_denoise_process(
                     if target_path != _current_lora_path:
                         _apply_lora_for_time(model_dict.foley_model, lora_schedule,
                                              (chunks[c_idx][0] + chunks[c_idx][1]) / 2,
-                                             _lora_base_state)
+                                             _lora_base_state, _lora_ckpt_cache)
                         _current_lora_path = target_path
 
                 latents = chunk_latents[c_idx]
@@ -890,11 +896,15 @@ def chunked_denoise_process(
 
     # --- Restore base model after LoRA hot-swap ---
     if _lora_base_state is not None:
+        import gc
         from .lora.lora import remove_lora
-        model_dict.foley_model.load_state_dict(_lora_base_state, strict=False)
         remove_lora(model_dict.foley_model)
+        model_dict.foley_model.load_state_dict(_lora_base_state, strict=False)
         del _lora_base_state
-        logger.info("LoRA timeline: base model restored")
+        _lora_ckpt_cache.clear()
+        gc.collect()
+        torch.cuda.empty_cache()
+        logger.info("LoRA timeline: base model restored, caches cleared")
 
     # --- Stitch results ---
     if crossfade_mode == "safa":

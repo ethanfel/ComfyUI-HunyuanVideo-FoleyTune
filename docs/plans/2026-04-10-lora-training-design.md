@@ -1640,3 +1640,43 @@ Two datasets tested: `mp4_doggy_features` (5 sources, 135 clips) and `mp4_doggy_
 70. **Dataset source diversity matters more than clip count** — 106 clips from 20+ sources (PBC 0.632) dramatically outperformed 135 clips from 5 sources (PBC 0.472). Visual diversity > clip volume
 71. **Curriculum and sigma settings transfer poorly across datasets** — σ=0.7/cur=0.5 was second-best for RCG but performed worst for doggy. Optimal hyperparameters are dataset-dependent
 72. **Eval PBC on a single held-out clip is unreliable** — eval PBC was near zero or negative across all runs regardless of perceptual quality. Perceptual evaluation (listening tests) remains essential
+
+---
+
+### Noise Offset Sweep — vd=0 (May 2026)
+
+Tested noise_offset values {0.0, 0.01, 0.03, 0.05, 0.1} all with vd=0 on the doggy_clap dataset (20+ sources, 106 clips). All runs used 8k steps, σ=0.8, cur=0.6, Prodigy+cosine, safeguard_warmup=True.
+
+| offset | train PBC @7k | train TV @7k | final loss | Perceptual Assessment |
+|---|---|---|---|---|
+| 0.00 | — | — | 1.254 | Clean audio, good quality, slightly less sync than 0.03 |
+| 0.01 | — | — | 1.253 | No clear improvement over 0.00 |
+| **0.03** | — | — | **1.256** | **Best sync + full audio texture — selected** |
+| 0.05 | 0.585 | 1.317 | 1.253 | Competitive but no clear advantage over 0.03 |
+| 0.10 | 0.615 | 1.356 | 1.272 | Moaning diminished — too aggressive, suppresses sustained textures |
+
+Best checkpoint: `doggy_clap_noise_vd0/adapter_step07000.pt` (noise_offset=0.03, vd=0)
+
+#### Updated Findings
+
+73. **noise_offset sweet spot is 0.03 for foley LoRA** — below 0.03 (0.01) shows no benefit; above (0.05) shows no clear advantage; at 0.1 the channel-uniform noise overwhelms sustained spectral content (moaning) while preserving transients (claps). 0.03 is the Goldilocks value
+74. **Higher noise_offset increases loss** — offset=0.1 final loss 1.272 vs 0.03 at 1.256. The added noise makes the denoising task harder, which is only beneficial up to a point
+75. **noise_offset primarily helps transient sync, not spectral fidelity** — the mechanism (per-sample, per-channel, uniform across time) teaches the model to distinguish dynamic range patterns. Sustained textures (moaning, breathing) don't benefit and degrade at high values
+76. **min_snr_gamma=5 doesn't improve perceptual quality** — changes loss scale (~1.0 vs ~1.25) but spectrally and perceptually indistinguishable from unweighted. Mid-range timestep rebalancing isn't a bottleneck for foley
+77. **rank 64 is sufficient for 106-clip datasets** — rank 96 (PBC 0.599) and 128 (PBC 0.647) didn't improve over rank 64 (PBC 0.632) perceptually. Extra capacity without proportionally more data doesn't help; the bottleneck is data diversity, not model capacity
+
+#### Recommended Config for Multi-Performer Foley LoRA (20+ sources)
+
+```
+target: all_attn_mlp
+rank: 64, alpha: 64
+optimizer: prodigy (safeguard_warmup: true)
+schedule: cosine
+steps: 7000-8000
+visual_dropout: 0.0
+noise_offset: 0.03
+logit_normal_sigma: 0.8
+curriculum_switch: 0.6
+warmup_steps: 100
+batch_size: 8
+```

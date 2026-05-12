@@ -459,6 +459,8 @@ class FoleyTuneChunkedSampler:
 
         if hasattr(hunyuan_model, "_compilation_progress_counter"):
             hunyuan_model._compilation_progress_counter[0] = 0
+        if hasattr(hunyuan_model, "_seen_compile_signatures"):
+            hunyuan_model._seen_compile_signatures.clear()
 
         config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    "configs", "hunyuanvideo-foley-xxl.yaml")
@@ -554,7 +556,8 @@ class FoleyTuneChunkedSampler:
         if force_offload:
             hunyuan_model.to(offload_device)
             hunyuan_deps["dac_model"].to(offload_device)
-            mm.soft_empty_cache()
+        gc.collect()
+        torch.cuda.empty_cache()
 
         first_waveform = waveform_batch[0].unsqueeze(0)
         audio_first = {"waveform": first_waveform, "sample_rate": sample_rate}

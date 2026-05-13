@@ -1680,3 +1680,37 @@ curriculum_switch: 0.6
 warmup_steps: 100
 batch_size: 8
 ```
+
+---
+
+### Source Separation Experiment — Stem-Split LoRAs (May 2026)
+
+Tested training separate LoRAs for moaning (sustained vocals) and claps (transient impacts) using melband source separation on the doggy_clap dataset. Same video features, different audio targets.
+
+#### Moaning Stem (stem1)
+
+All moaning runs suffered **HF collapse** — MSE deprioritizes high frequencies because low-frequency content has more energy. Rolloff consistently dropped from ~1300 Hz → 750-820 Hz by 7k steps.
+
+| Experiment | PBC @7k | HF @7k | Rolloff | Notes |
+|---|---|---|---|---|
+| baseline | 0.767 | 0.000273 | 750 | Severe HF collapse |
+| noise003 | peaked 4k | 0.000312 | 1102 | noise_offset didn't help |
+| cossim01 | 0.822 | 0.000080 | 1102 | cos_sim too weak |
+| **cossim01+noise003** | **0.833** | **0.000178** | **1102** | Best moaning — HF 2x cossim alone |
+| cossim03 | 0.826 | 0.000216 | 820 | Stronger cos_sim but muddier |
+
+#### Claps Stem (stem2)
+
+No HF collapse — transient signals have broadband energy that MSE handles naturally.
+
+| Experiment | PBC @7k | HF @7k | Rolloff |
+|---|---|---|---|
+| **baseline (0.03)** | **0.609** | **0.025** | **1406** |
+| noise005 (0.05) | 0.652 | 0.002 | 1172 |
+
+#### Updated Findings
+
+78. **Source separation doesn't justify dual-LoRA training** — stacking moaning + claps LoRAs produces usable results but doesn't improve over the single combined LoRA. Added complexity (source sep, two models, stacking) without quality gain
+79. **Sustained audio signals suffer HF collapse under MSE** — moaning LoRA loses high frequencies by 5-7k steps because MSE rewards low-frequency reconstruction. cos_sim_weight partially mitigates but doesn't solve
+80. **Transient signals don't have this problem** — claps LoRA maintained HF energy throughout training. Broadband transients distribute energy more evenly across frequencies
+81. **cos_sim_weight + noise_offset together preserve HF better than either alone** — cos_sim=0.1 + noise_offset=0.03 doubled HF energy vs cos_sim alone for moaning

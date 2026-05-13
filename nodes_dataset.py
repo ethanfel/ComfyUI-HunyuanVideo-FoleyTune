@@ -1941,8 +1941,8 @@ class FoleyTuneDatasetHfSmoother:
 class FoleyTuneDatasetAugmenter:
     """Create augmented variants of each clip to expand a small dataset.
 
-    Supports gain variation (always available) and optionally pitch shift
-    and time stretch via audiomentations.
+    Supports gain variation (always available), speed perturbation, time shift,
+    and optionally pitch shift and time stretch via audiomentations.
     """
 
     @classmethod
@@ -1961,6 +1961,17 @@ class FoleyTuneDatasetAugmenter:
                 "seed": ("INT", {"default": 42}),
             },
             "optional": {
+                "speed_range": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 0.3, "step": 0.01,
+                    "tooltip": "Random speed perturbation +/-fraction (0.1 = 90%-110% speed). "
+                               "Changes both pitch and duration naturally. Trimmed/padded to "
+                               "original length. 0 = disabled.",
+                }),
+                "time_shift_ms": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 200.0, "step": 5.0,
+                    "tooltip": "Random time shift +/-ms. Creates slight timing variation "
+                               "relative to video features. Zero-padded, not circular. 0 = disabled.",
+                }),
                 "pitch_range_semitones": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 4.0, "step": 0.25,
                     "tooltip": "Random pitch shift +/-semitones. Requires audiomentations. 0 = disabled.",
@@ -1982,13 +1993,16 @@ class FoleyTuneDatasetAugmenter:
     FUNCTION = "augment"
     CATEGORY = FOLEYTUNE_DS_CATEGORY
     DESCRIPTION = (
-        "Create augmented variants of each clip (gain, pitch, time stretch) "
+        "Create augmented variants of each clip (gain, speed, time shift, pitch, stretch) "
         "to expand small training datasets."
     )
 
     def augment(self, dataset, variants_per_clip: int, gain_range_db: float,
-                seed: int, pitch_range_semitones: float = 0.0,
+                seed: int, speed_range: float = 0.0, time_shift_ms: float = 0.0,
+                pitch_range_semitones: float = 0.0,
                 time_stretch_range: float = 0.0, keep_originals: bool = True):
+        import soxr as _soxr
+
         rng = np.random.RandomState(seed)
 
         use_am = False
@@ -2026,12 +2040,44 @@ class FoleyTuneDatasetAugmenter:
             wav = item["waveform"]  # [1, C, L]
             sr = item["sample_rate"]
             name = item["name"]
+            orig_len = wav.shape[-1]
 
             for v in range(variants_per_clip):
+                # 1. Gain
                 gain_db = rng.uniform(-gain_range_db, gain_range_db) if gain_range_db > 0 else 0.0
                 gain_lin = 10.0 ** (gain_db / 20.0)
                 wav_aug = wav * gain_lin
 
+                # 2. Speed perturbation (resample trick — shifts pitch + duration naturally)
+                if speed_range > 0:
+                    speed_factor = rng.uniform(1.0 - speed_range, 1.0 + speed_range)
+                    if abs(speed_factor - 1.0) > 0.001:
+                        src_sr = int(round(sr * speed_factor))
+                        wav_np = wav_aug[0].float().numpy()  # [C, L]
+                        wav_np = wav_np.T  # [L, C] for soxr
+                        wav_np = _soxr.resample(wav_np, src_sr, sr, quality="VHQ")
+                        wav_np = wav_np.T  # [C, L]
+                        # Trim or pad to original length
+                        cur_len = wav_np.shape[-1]
+                        if cur_len > orig_len:
+                            wav_np = wav_np[:, :orig_len]
+                        elif cur_len < orig_len:
+                            wav_np = np.pad(wav_np, ((0, 0), (0, orig_len - cur_len)))
+                        wav_aug = torch.from_numpy(wav_np).unsqueeze(0)  # [1, C, L]
+
+                # 3. Time shift (zero-padded offset)
+                if time_shift_ms > 0:
+                    shift_samples = int(rng.uniform(-time_shift_ms, time_shift_ms) * sr / 1000)
+                    if shift_samples > 0 and shift_samples < orig_len:
+                        wav_aug = torch.nn.functional.pad(
+                            wav_aug[:, :, :-shift_samples], (shift_samples, 0)
+                        )
+                    elif shift_samples < 0 and -shift_samples < orig_len:
+                        wav_aug = torch.nn.functional.pad(
+                            wav_aug[:, :, -shift_samples:], (0, -shift_samples)
+                        )
+
+                # 4. Audiomentations (pitch shift, time stretch)
                 if use_am and am_compose is not None:
                     wav_np = wav_aug[0].numpy()  # [C, L]
                     if wav_np.shape[0] == 1:
@@ -2041,6 +2087,7 @@ class FoleyTuneDatasetAugmenter:
                         wav_np = wav_np[np.newaxis, :]
                     wav_aug = torch.from_numpy(wav_np).unsqueeze(0)  # [1, C, L]
 
+                # 5. Peak normalize
                 peak = wav_aug.abs().max()
                 if peak > 1.0:
                     wav_aug = wav_aug / peak
@@ -2052,11 +2099,17 @@ class FoleyTuneDatasetAugmenter:
                 new_item.pop("val", None)
                 out.append(new_item)
 
+        parts = [f"gain=+/-{gain_range_db:.1f}dB"]
+        if speed_range > 0:
+            parts.append(f"speed=+/-{speed_range:.0%}")
+        if time_shift_ms > 0:
+            parts.append(f"shift=+/-{time_shift_ms:.0f}ms")
+        if pitch_range_semitones > 0:
+            parts.append(f"pitch=+/-{pitch_range_semitones:.1f}st")
+        if time_stretch_range > 0:
+            parts.append(f"stretch=+/-{time_stretch_range:.0%}")
         print(f"[FoleyTuneDatasetAugmenter] {len(dataset)} originals -> {len(out)} total clips  "
-              f"gain=+/-{gain_range_db:.1f}dB"
-              + (f"  pitch=+/-{pitch_range_semitones:.1f}st" if pitch_range_semitones > 0 else "")
-              + (f"  stretch=+/-{time_stretch_range:.0%}" if time_stretch_range > 0 else ""),
-              flush=True)
+              f"{'  '.join(parts)}", flush=True)
         return (out,)
 
 

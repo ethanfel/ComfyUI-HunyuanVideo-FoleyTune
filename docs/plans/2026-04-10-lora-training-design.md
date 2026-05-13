@@ -1714,3 +1714,27 @@ No HF collapse — transient signals have broadband energy that MSE handles natu
 79. **Sustained audio signals suffer HF collapse under MSE** — moaning LoRA loses high frequencies by 5-7k steps because MSE rewards low-frequency reconstruction. cos_sim_weight partially mitigates but doesn't solve
 80. **Transient signals don't have this problem** — claps LoRA maintained HF energy throughout training. Broadband transients distribute energy more evenly across frequencies
 81. **cos_sim_weight + noise_offset together preserve HF better than either alone** — cos_sim=0.1 + noise_offset=0.03 doubled HF energy vs cos_sim alone for moaning
+
+---
+
+### Audio Augmentation — Recommended Settings (May 2026)
+
+Added speed perturbation and time shift to `FoleyTuneDatasetAugmenter` (alongside existing gain, pitch shift, time stretch). Applied at dataset creation time — augmented variants are saved as separate FLAC files inheriting the original's NPZ features. DAC encoding happens at training time.
+
+#### Recommended starting config for foley
+
+| Parameter | Value | Rationale |
+|---|---|---|
+| variants_per_clip | 2 | 3x dataset size (originals + 2 variants) |
+| gain_range_db | 3.0 | Subtle volume variation; safe up to 5.0 after LUFS normalization |
+| speed_range | 0.1 | 90%-110% speed; natural pitch+duration shift, good for impacts/foley |
+| time_shift_ms | 50 | ±50ms offset vs video features; teaches A/V misalignment tolerance |
+| pitch_range_semitones | 0.0 | Disabled — speed_range already shifts pitch naturally |
+| time_stretch_range | 0.0 | Disabled — use for voice content where formant preservation matters |
+| keep_originals | true | Always include unaugmented clips |
+
+#### Augmentation stacking order
+
+Per variant: gain → speed perturbation → time shift → (pitch shift) → (time stretch) → peak normalize.
+
+All augmentations preserve the original clip length (trim/pad after speed change, zero-pad for time shift). No new dependencies — speed perturbation uses soxr (already required by the resampler node).

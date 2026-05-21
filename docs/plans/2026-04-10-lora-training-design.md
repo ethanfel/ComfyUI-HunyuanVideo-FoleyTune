@@ -1738,3 +1738,14 @@ Added speed perturbation and time shift to `FoleyTuneDatasetAugmenter` (alongsid
 Per variant: gain → speed perturbation → time shift → (pitch shift) → (time stretch) → peak normalize.
 
 All augmentations preserve the original clip length (trim/pad after speed change, zero-pad for time shift). No new dependencies — speed perturbation uses soxr (already required by the resampler node).
+
+#### Augmentation Training Results
+
+Tested on the doggy_clap dataset: 318 augmented clips (106 originals + 2 variants each) vs 106 original clips.
+
+| Dataset | Steps | Best PBC | Notes |
+|---|---|---|---|
+| Original 106 clips | 7k | **0.632** | Winner — vd=0, noise_offset=0.03 |
+| Augmented 318 clips | 21k | 0.553 | Plateaued at 13k, never improved |
+
+82. **Audio augmentation (speed change + timeshift) doesn't improve training** — augmented dataset (318 clips) plateaued at PBC 0.55 vs 0.63 for the original 106 clips, despite 3x the data and proportionally scaled steps. Speed perturbation and time shift introduce subtle visual-audio desynchronization that the model can't overcome — the augmented samples teach conflicting alignment signals that cap quality below the clean originals

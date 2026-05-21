@@ -131,10 +131,15 @@ def _pil_to_tensor(img):
     return torch.from_numpy(arr).unsqueeze(0)
 
 
-def _draw_loss_curve(losses, log_interval=1, start_step=0, smoothed=None):
-    """Render a loss curve as a PIL Image."""
+def _draw_loss_curve(losses, log_interval=1, start_step=0, smoothed=None, metrics_history=None):
+    """Render a loss curve as a PIL Image, with optional HF energy ratio on right axis."""
+    hf_points = []
+    if metrics_history:
+        hf_points = [(m["step"], m["hf_energy_ratio"]) for m in metrics_history if "hf_energy_ratio" in m]
+
     W, H = 800, 380
-    pl, pr, pt, pb = 70, 20, 25, 45
+    pr = 70 if hf_points else 20
+    pl, pt, pb = 70, 25, 45
 
     img = Image.new("RGB", (W, H), (255, 255, 255))
     draw = ImageDraw.Draw(img)
@@ -176,6 +181,35 @@ def _draw_loss_curve(losses, log_interval=1, start_step=0, smoothed=None):
             x = pl + int(i * pw / 4)
             step = int(first_step + i * (last_step - first_step) / 4)
             draw.text((x - 12, H - pb + 5), str(step), fill=(120, 120, 120))
+
+        if hf_points:
+            hf_lo = min(v for _, v in hf_points)
+            hf_hi = max(v for _, v in hf_points)
+            if hf_hi == hf_lo:
+                hf_hi = hf_lo + 0.001
+            hf_rng = hf_hi - hf_lo
+            step_range = last_step - first_step if last_step > first_step else 1
+
+            for i in range(5):
+                y = pt + int(i * ph / 4)
+                val = hf_hi - i * hf_rng / 4
+                draw.text((W - pr + 5, y - 7), f"{val:.4f}", fill=(230, 126, 34))
+
+            draw.line([(W - pr, pt), (W - pr, H - pb)], fill=(230, 126, 34), width=1)
+
+            hf_px = []
+            for s, v in hf_points:
+                frac = max(0.0, min(1.0, (s - first_step) / step_range))
+                x = pl + int(frac * pw)
+                y = pt + int((1.0 - (v - hf_lo) / hf_rng) * ph)
+                hf_px.append((x, y))
+
+            if len(hf_px) >= 2:
+                draw.line(hf_px, fill=(230, 126, 34), width=2)
+            for x, y in hf_px:
+                draw.ellipse([x - 3, y - 3, x + 3, y + 3], fill=(230, 126, 34))
+
+            draw.text((W - pr - 20, 5), "HF", fill=(230, 126, 34))
 
     draw.line([(pl, pt), (pl, H - pb)], fill=(40, 40, 40), width=1)
     draw.line([(pl, H - pb), (W - pr, H - pb)], fill=(40, 40, 40), width=1)
@@ -1284,6 +1318,7 @@ class FoleyTuneLoRATrainer:
                 preview_img = _draw_loss_curve(
                     losses, start_step=start_step,
                     smoothed=_smooth_losses(losses),
+                    metrics_history=metrics_history,
                 )
                 pbar.update_absolute(
                     step + 1 - start_step, remaining,
@@ -1296,7 +1331,7 @@ class FoleyTuneLoRATrainer:
                 ckpt_path = output_path / f"adapter_step{step+1:05d}.pt"
                 save_checkpoint(model, optimizer, scheduler, step + 1, meta, ckpt_path,
                                 ema_state=ema_state)
-                _draw_loss_curve(losses, start_step=start_step, smoothed=_smooth_losses(losses)).save(str(output_path / "loss.png"))
+                _draw_loss_curve(losses, start_step=start_step, smoothed=_smooth_losses(losses), metrics_history=metrics_history).save(str(output_path / "loss.png"))
 
                 # Switch schedule-free optimizer to eval mode (averaged weights)
                 _sf_opt = hasattr(optimizer, 'eval') and hasattr(optimizer, 'train')
@@ -1385,7 +1420,7 @@ class FoleyTuneLoRATrainer:
         save_meta_json(meta, output_path / "meta.json")
         # Draw and save loss curve
         smoothed = _smooth_losses(losses)
-        loss_img = _draw_loss_curve(losses, start_step=start_step, smoothed=smoothed)
+        loss_img = _draw_loss_curve(losses, start_step=start_step, smoothed=smoothed, metrics_history=metrics_history)
         loss_img.save(str(output_path / "loss.png"))
         loss_curve_tensor = _pil_to_tensor(loss_img)
 
@@ -2124,6 +2159,7 @@ class FoleyTuneLoRAScheduler:
                             preview_img = _draw_loss_curve(
                                 losses,
                                 smoothed=_smooth_losses(losses),
+                                metrics_history=metrics_history,
                             )
                             pbar_train.update_absolute(
                                 step + 1 - start_step, config["steps"] - start_step,
@@ -2148,7 +2184,7 @@ class FoleyTuneLoRAScheduler:
                                 for n, p in model.named_parameters():
                                     if p.requires_grad and n in ema_state:
                                         p.data.copy_(ema_state[n])
-                            _draw_loss_curve(losses, smoothed=_smooth_losses(losses)).save(str(exp_dir / "loss.png"))
+                            _draw_loss_curve(losses, smoothed=_smooth_losses(losses), metrics_history=metrics_history).save(str(exp_dir / "loss.png"))
 
                             # Generate eval audio sample + compute metrics
                             samples_dir = exp_dir / "samples"
@@ -2204,6 +2240,7 @@ class FoleyTuneLoRAScheduler:
                             _log_parts = [f"[{exp_id}] Step {step+1}: "
                                        f"loss={step_metrics['loss']:.4f}  "
                                        f"PBC={step_metrics.get('per_band_correlation', 0):.3f}  "
+                                       f"HF={step_metrics.get('hf_energy_ratio', 0):.4f}  "
                                        f"TV={step_metrics.get('temporal_variance', 0):.3f}  "
                                        f"SC={step_metrics.get('spectral_convergence', 0):.3f}  "
                                        f"MCD={step_metrics.get('mel_cepstral_distortion', 0):.2f}"]
@@ -2229,7 +2266,7 @@ class FoleyTuneLoRAScheduler:
                     save_checkpoint(model, optimizer, lr_sched, config["steps"], meta, final_path, final=True)
                     # Draw and save per-experiment loss curve
                     smoothed = _smooth_losses(losses)
-                    loss_img = _draw_loss_curve(losses, smoothed=smoothed)
+                    loss_img = _draw_loss_curve(losses, smoothed=smoothed, metrics_history=metrics_history)
                     loss_img.save(str(exp_dir / "loss.png"))
 
                     # Save loss + metrics history

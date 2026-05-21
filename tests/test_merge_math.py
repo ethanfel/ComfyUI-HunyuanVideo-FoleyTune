@@ -58,5 +58,121 @@ class TestConflictAnalysis(unittest.TestCase):
         self.assertEqual(result, "conflicting")
 
 
+class TestMergeStrategies(unittest.TestCase):
+
+    def test_weighted_average_equal_weights(self):
+        from lora.merge_math import merge_weighted_average
+        a = torch.tensor([2.0, 4.0])
+        b = torch.tensor([6.0, 8.0])
+        result = merge_weighted_average([a, b], [1.0, 1.0])
+        expected = torch.tensor([4.0, 6.0])
+        torch.testing.assert_close(result, expected)
+
+    def test_weighted_average_unequal_weights(self):
+        from lora.merge_math import merge_weighted_average
+        a = torch.tensor([0.0, 10.0])
+        b = torch.tensor([10.0, 0.0])
+        result = merge_weighted_average([a, b], [0.75, 0.25])
+        expected = torch.tensor([2.5, 7.5])
+        torch.testing.assert_close(result, expected)
+
+    def test_ties_trims_low_magnitude(self):
+        from lora.merge_math import ties_trim
+        t = torch.tensor([0.01, 0.5, -0.8, 0.02, -0.9])
+        trimmed = ties_trim(t, density=0.6)
+        nonzero = (trimmed != 0).sum().item()
+        self.assertEqual(nonzero, 3)
+
+    def test_ties_elect_sign(self):
+        from lora.merge_math import ties_elect_sign
+        a = torch.tensor([1.0, -1.0, 1.0])
+        b = torch.tensor([1.0, 1.0, -1.0])
+        c = torch.tensor([1.0, -1.0, -1.0])
+        majority = ties_elect_sign([a, b, c])
+        expected = torch.tensor([1.0, -1.0, -1.0])
+        torch.testing.assert_close(majority, expected)
+
+    def test_ties_disjoint_merge(self):
+        from lora.merge_math import ties_disjoint_merge
+        a = torch.tensor([1.0, -2.0])
+        b = torch.tensor([3.0, 1.0])
+        majority = torch.tensor([1.0, -1.0])
+        result = ties_disjoint_merge([a, b], [1.0, 1.0], majority)
+        # Position 0: both positive and majority is +1 -> a agrees (1.0), b agrees (3.0) -> avg = 2.0
+        # Position 1: a is -2.0 (agrees with -1 majority), b is 1.0 (disagrees) -> -2.0/1 = -2.0
+        self.assertAlmostEqual(result[0].item(), 2.0, places=4)
+        self.assertAlmostEqual(result[1].item(), -2.0, places=4)
+
+    def test_merge_ties_full_pipeline(self):
+        from lora.merge_math import merge_ties
+        a = torch.randn(64, 64)
+        b = torch.randn(64, 64)
+        result = merge_ties([a, b], [1.0, 1.0], density=0.7)
+        self.assertEqual(result.shape, a.shape)
+
+    def test_slerp_midpoint(self):
+        from lora.merge_math import merge_slerp
+        a = torch.tensor([1.0, 0.0, 0.0])
+        b = torch.tensor([0.0, 1.0, 0.0])
+        result = merge_slerp(a, b, t=0.5)
+        # Norm-corrected SLERP: target_norm = 0.5*||a|| + 0.5*||b|| = 1.0
+        self.assertAlmostEqual(result.norm().item(), 1.0, places=3)
+
+    def test_slerp_t0_returns_a(self):
+        from lora.merge_math import merge_slerp
+        a = torch.tensor([1.0, 0.0])
+        b = torch.tensor([0.0, 1.0])
+        result = merge_slerp(a, b, t=0.0)
+        torch.testing.assert_close(result, a, atol=1e-5, rtol=1e-5)
+
+    def test_slerp_t1_returns_b(self):
+        from lora.merge_math import merge_slerp
+        a = torch.tensor([1.0, 0.0])
+        b = torch.tensor([0.0, 1.0])
+        result = merge_slerp(a, b, t=1.0)
+        torch.testing.assert_close(result, b, atol=1e-5, rtol=1e-5)
+
+    def test_slerp_parallel_fallback(self):
+        from lora.merge_math import merge_slerp
+        a = torch.tensor([1.0, 2.0, 3.0])
+        b = torch.tensor([2.0, 4.0, 6.0])
+        result = merge_slerp(a, b, t=0.5)
+        expected = 0.5 * a + 0.5 * b
+        torch.testing.assert_close(result, expected, atol=1e-4, rtol=1e-4)
+
+    def test_iterative_slerp_n_diffs(self):
+        from lora.merge_math import merge_slerp_n
+        a = torch.randn(100)
+        b = torch.randn(100)
+        c = torch.randn(100)
+        result = merge_slerp_n([(a, 1.0), (b, 1.0), (c, 1.0)])
+        self.assertEqual(result.shape, a.shape)
+
+
+class TestDareSparsify(unittest.TestCase):
+
+    def test_dare_density_1_is_identity(self):
+        from lora.merge_math import dare_sparsify
+        t = torch.randn(100)
+        result = dare_sparsify(t, density=1.0)
+        torch.testing.assert_close(result, t)
+
+    def test_dare_zeros_some_elements(self):
+        from lora.merge_math import dare_sparsify
+        t = torch.ones(10000)
+        result = dare_sparsify(t, density=0.5, seed=42)
+        zero_frac = (result == 0).float().mean().item()
+        self.assertAlmostEqual(zero_frac, 0.5, delta=0.05)
+
+    def test_conflict_mask_opposing_signs(self):
+        from lora.merge_math import compute_conflict_mask
+        a = torch.tensor([1.0, -1.0, 1.0])
+        b = torch.tensor([-1.0, -1.0, 1.0])
+        mask = compute_conflict_mask([(a, 1.0), (b, 1.0)])
+        self.assertTrue(mask[0].item())
+        self.assertFalse(mask[1].item())
+        self.assertFalse(mask[2].item())
+
+
 if __name__ == "__main__":
     unittest.main()

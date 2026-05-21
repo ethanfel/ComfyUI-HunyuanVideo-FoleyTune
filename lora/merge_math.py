@@ -238,3 +238,84 @@ def compute_conflict_mask(diffs_with_weights):
         has_pos |= (nonzero & (effective > 0))
         has_neg |= (nonzero & (effective < 0))
     return has_pos & has_neg
+
+
+# --- Auto-strength ---
+
+def compute_auto_strength(strengths, norm_sq_list, dot_accum, floor=None):
+    """Energy-based auto-strength normalization.
+
+    strengths: list of per-LoRA strength values
+    norm_sq_list: list of accumulated Frobenius norm^2 per LoRA
+    dot_accum: dict {(i,j): accumulated_dot} for pairwise cross-terms
+    floor: minimum scale factor (None = use orthogonal floor from THRESHOLDS)
+
+    Returns: scale factor to multiply all strengths by.
+    """
+    n = len(strengths)
+    effective = [abs(strengths[i]) * math.sqrt(max(norm_sq_list[i], 0.0)) for i in range(n)]
+    nonzero = [e for e in effective if e > 0]
+    if len(nonzero) <= 1:
+        return 1.0
+
+    energy_sq = sum((strengths[i] ** 2) * norm_sq_list[i] for i in range(n))
+    for (i, j), dot in dot_accum.items():
+        energy_sq += 2.0 * strengths[i] * strengths[j] * dot
+
+    energy_sq = max(energy_sq, 0.0)
+    current_energy = math.sqrt(energy_sq)
+    reference_energy = max(effective)
+    scale = min(reference_energy / current_energy, 1.0) if current_energy > 0 else 1.0
+
+    pairwise_cos = []
+    for (i, j), dot in dot_accum.items():
+        denom = math.sqrt(max(norm_sq_list[i], 0.0)) * math.sqrt(max(norm_sq_list[j], 0.0))
+        if denom > 0:
+            pairwise_cos.append(dot / denom)
+
+    if pairwise_cos:
+        avg_cos = sum(pairwise_cos) / len(pairwise_cos)
+        if abs(avg_cos) <= THRESHOLDS["alignment_threshold"]:
+            ortho_floor = floor if floor is not None else THRESHOLDS["auto_strength_orthogonal_floor"]
+            scale = max(scale, ortho_floor)
+
+    return scale
+
+
+# --- Delta computation ---
+
+def compute_deltas(state_dict, rank, alpha, strength, use_rslora=False):
+    """Compute merged delta (B @ A * scaling * strength) per layer.
+
+    state_dict keys follow the pattern: <layer_name>.base.lora_A / .base.lora_B
+    or <layer_name>.lora_A / <layer_name>.lora_B.
+
+    Returns dict {layer_name: delta_tensor}.
+    """
+    if use_rslora:
+        scaling = alpha / math.sqrt(rank)
+    else:
+        scaling = alpha / rank
+
+    pairs = {}
+    for k, v in state_dict.items():
+        if "lora_A" in k:
+            layer = k.rsplit(".lora_A", 1)[0]
+            if layer.endswith(".base"):
+                layer = layer[:-5]
+            pairs.setdefault(layer, {})["A"] = v
+        elif "lora_B" in k:
+            layer = k.rsplit(".lora_B", 1)[0]
+            if layer.endswith(".base"):
+                layer = layer[:-5]
+            pairs.setdefault(layer, {})["B"] = v
+
+    deltas = {}
+    for layer, ab in pairs.items():
+        if "A" not in ab or "B" not in ab:
+            continue
+        A = ab["A"].float()
+        B = ab["B"].float()
+        deltas[layer] = (B @ A) * scaling * strength
+
+    return deltas

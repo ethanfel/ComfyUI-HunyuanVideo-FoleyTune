@@ -174,5 +174,72 @@ class TestDareSparsify(unittest.TestCase):
         self.assertFalse(mask[2].item())
 
 
+class TestAutoStrength(unittest.TestCase):
+
+    def test_single_lora_no_adjustment(self):
+        from lora.merge_math import compute_auto_strength
+        norms = [10.0]
+        dots = {}
+        strengths = [1.0]
+        scale = compute_auto_strength(strengths, norms, dots)
+        self.assertAlmostEqual(scale, 1.0)
+
+    def test_two_aligned_loras_scale_down(self):
+        from lora.merge_math import compute_auto_strength
+        norms = [100.0, 100.0]
+        dots = {(0, 1): 80.0}
+        strengths = [1.0, 1.0]
+        scale = compute_auto_strength(strengths, norms, dots)
+        self.assertLess(scale, 1.0)
+
+    def test_two_orthogonal_loras_floor_applied(self):
+        from lora.merge_math import compute_auto_strength, THRESHOLDS
+        norms = [100.0, 100.0]
+        dots = {(0, 1): 0.0}
+        strengths = [1.0, 1.0]
+        scale = compute_auto_strength(strengths, norms, dots)
+        self.assertGreaterEqual(scale, THRESHOLDS["auto_strength_orthogonal_floor"])
+
+
+class TestComputeDelta(unittest.TestCase):
+
+    def test_compute_deltas_from_state_dict(self):
+        from lora.merge_math import compute_deltas
+        rank = 4
+        sd = {
+            "layer.base.lora_A": torch.randn(rank, 64),
+            "layer.base.lora_B": torch.randn(128, rank),
+        }
+        deltas = compute_deltas(sd, rank=rank, alpha=4.0, strength=1.0)
+        self.assertIn("layer", deltas)
+        self.assertEqual(deltas["layer"].shape, (128, 64))
+
+    def test_compute_deltas_strength_scales(self):
+        from lora.merge_math import compute_deltas
+        rank = 4
+        sd = {
+            "layer.base.lora_A": torch.ones(rank, 8),
+            "layer.base.lora_B": torch.ones(16, rank),
+        }
+        d1 = compute_deltas(sd, rank=rank, alpha=4.0, strength=1.0)
+        d2 = compute_deltas(sd, rank=rank, alpha=4.0, strength=0.5)
+        ratio = d1["layer"].sum().item() / d2["layer"].sum().item()
+        self.assertAlmostEqual(ratio, 2.0, places=3)
+
+    def test_compute_deltas_rslora(self):
+        from lora.merge_math import compute_deltas
+        rank = 16
+        sd = {
+            "layer.base.lora_A": torch.ones(rank, 8),
+            "layer.base.lora_B": torch.ones(16, rank),
+        }
+        d_normal = compute_deltas(sd, rank=rank, alpha=16.0, strength=1.0, use_rslora=False)
+        d_rslora = compute_deltas(sd, rank=rank, alpha=16.0, strength=1.0, use_rslora=True)
+        # rslora scaling = alpha/sqrt(rank) vs normal = alpha/rank
+        # For rank=16, alpha=16: normal=1.0, rslora=4.0
+        ratio = d_rslora["layer"].sum().item() / d_normal["layer"].sum().item()
+        self.assertAlmostEqual(ratio, 4.0, places=2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -21,7 +21,7 @@ import comfy.model_management as mm
 import comfy.utils
 
 from .lora.lora import (
-    apply_lora, get_lora_state_dict, load_lora,
+    apply_lora, get_lora_state_dict, load_lora, merge_lora_into_weights,
     FOLEY_TARGET_PRESETS, LoRALinear,
 )
 from .lora.train import (
@@ -1531,29 +1531,38 @@ class FoleyTuneLoRALoaderPath:
         # Deep copy model
         model = copy.deepcopy(hunyuan_model)
 
-        # Apply LoRA structure (always standard init for loading)
-        n_wrapped = apply_lora(
-            model, rank=rank, alpha=alpha,
-            target_suffixes=target_suffixes,
-            dropout=lora_dropout,
-            init_mode="standard",  # PiSSA residuals are in the checkpoint
-            use_rslora=use_rslora,
-        )
+        # Detect if model already has a LoRA applied — if so, merge into weights
+        has_existing_lora = any(isinstance(m, LoRALinear) for m in model.modules())
 
-        # Load weights — for PiSSA, state_dict includes modified base weights
-        if init_mode == "pissa":
-            model.load_state_dict(state_dict, strict=False)
+        if has_existing_lora:
+            n_applied = merge_lora_into_weights(
+                model, state_dict,
+                rank=rank, alpha=alpha, strength=strength,
+                target_suffixes=target_suffixes,
+                use_rslora=use_rslora,
+            )
+            model.eval()
+            logger.info(f"LoRA stacked (merged into weights): {n_applied} layers, "
+                        f"rank={rank}, strength={strength}")
         else:
-            load_lora(model, state_dict)
-
-        # Apply strength scaling
-        if strength != 1.0:
-            for name, module in model.named_modules():
-                if isinstance(module, LoRALinear):
-                    module.lora_B.data *= strength
-
-        model.eval()
-        logger.info(f"Loaded LoRA adapter: {n_wrapped} layers, rank={rank}, strength={strength}")
+            # First LoRA — wrap layers with LoRALinear
+            n_wrapped = apply_lora(
+                model, rank=rank, alpha=alpha,
+                target_suffixes=target_suffixes,
+                dropout=lora_dropout,
+                init_mode="standard",
+                use_rslora=use_rslora,
+            )
+            if init_mode == "pissa":
+                model.load_state_dict(state_dict, strict=False)
+            else:
+                load_lora(model, state_dict)
+            if strength != 1.0:
+                for name, module in model.named_modules():
+                    if isinstance(module, LoRALinear):
+                        module.lora_B.data *= strength
+            model.eval()
+            logger.info(f"Loaded LoRA adapter: {n_wrapped} layers, rank={rank}, strength={strength}")
 
         prompts = "\n".join(meta.get("prompts", []))
         return (model, prompts)

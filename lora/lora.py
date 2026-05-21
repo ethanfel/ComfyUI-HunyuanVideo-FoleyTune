@@ -224,6 +224,79 @@ def load_lora(model: nn.Module, state_dict: dict) -> int:
     return loaded
 
 
+def merge_lora_into_weights(
+    model: nn.Module,
+    state_dict: dict,
+    rank: int,
+    alpha: float,
+    strength: float = 1.0,
+    target_suffixes: Sequence[str] = FOLEY_TARGET_PRESETS["all_attn_mlp"],
+    use_rslora: bool = False,
+) -> int:
+    """Merge LoRA A/B deltas directly into base model weights (no wrapping).
+
+    Computes delta = B @ A * scaling * strength and adds it to the matching
+    nn.Linear weight. Can be called multiple times to stack LoRAs.
+
+    Args:
+        model: base model (unwrapped nn.Linear layers)
+        state_dict: LoRA checkpoint containing lora_A / lora_B keys
+        rank: LoRA rank (for scaling computation)
+        alpha: LoRA alpha (for scaling computation)
+        strength: multiplier on the delta (0.0 = no effect, 1.0 = full)
+        target_suffixes: layer name suffixes that were wrapped during training
+        use_rslora: whether rsLoRA scaling was used during training
+
+    Returns:
+        Number of layers merged.
+    """
+    if use_rslora:
+        scaling = alpha / math.sqrt(rank)
+    else:
+        scaling = alpha / rank
+
+    # Build mapping: layer_name -> (lora_A, lora_B)
+    lora_pairs = {}
+    for k, v in state_dict.items():
+        if "lora_A" in k:
+            layer_name = k.rsplit(".lora_A", 1)[0]
+            lora_pairs.setdefault(layer_name, {})["A"] = v
+        elif "lora_B" in k:
+            layer_name = k.rsplit(".lora_B", 1)[0]
+            lora_pairs.setdefault(layer_name, {})["B"] = v
+
+    # Match LoRA pairs to model layers and merge
+    named_modules = dict(model.named_modules())
+    n_merged = 0
+    for lora_name, pair in lora_pairs.items():
+        if "A" not in pair or "B" not in pair:
+            continue
+
+        # Strip ".base" suffix if present (from LoRALinear-wrapped checkpoints)
+        module_name = lora_name.replace(".base", "") if lora_name.endswith(".base") else lora_name
+        module = named_modules.get(module_name)
+        if module is None:
+            logger.warning(f"merge_lora: layer not found: {module_name}")
+            continue
+
+        # Get the weight tensor (nn.Linear or LoRALinear.base)
+        if isinstance(module, LoRALinear):
+            weight = module.base.weight
+        elif hasattr(module, 'weight'):
+            weight = module.weight
+        else:
+            continue
+
+        A = pair["A"].float()  # [rank, in]
+        B = pair["B"].float()  # [out, rank]
+        delta = (B @ A) * scaling * strength
+        weight.data += delta.to(weight.dtype)
+        n_merged += 1
+
+    logger.debug(f"LoRA merged into weights: {n_merged} layers, strength={strength}")
+    return n_merged
+
+
 def spectral_surgery(
     model: nn.Module,
     calibration_fn=None,

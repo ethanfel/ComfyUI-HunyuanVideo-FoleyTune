@@ -8,6 +8,10 @@ license = {file = "LICENSE"}
 Repository = "https://github.com/phazei/ComfyUI-HunyuanVideo-Foley"
 #  Used by Comfy Registry https://comfyregistry.org
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib"
+
 [tool.comfy]
 PublisherId = "phazei"
 DisplayName = "ComfyUI-HunyuanVideo-Foley"

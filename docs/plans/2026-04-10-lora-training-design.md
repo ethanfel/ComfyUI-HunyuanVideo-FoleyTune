@@ -1749,3 +1749,53 @@ Tested on the doggy_clap dataset: 318 augmented clips (106 originals + 2 variant
 | Augmented 318 clips | 21k | 0.553 | Plateaued at 13k, never improved |
 
 82. **Audio augmentation (speed change + timeshift) doesn't improve training** — augmented dataset (318 clips) plateaued at PBC 0.55 vs 0.63 for the original 106 clips, despite 3x the data and proportionally scaled steps. Speed perturbation and time shift introduce subtle visual-audio desynchronization that the model can't overcome — the augmented samples teach conflicting alignment signals that cap quality below the clean originals
+
+---
+
+### Front-Facing Combined Dataset — Step Scaling & Schedule (May 2026)
+
+Combined cowgirl + missionary datasets: 212 clips from 60 unique sources, no talking/claps, moaning + sex sounds only. Trained with best config (vd=0, noise_offset=0.03, rank 64, Prodigy).
+
+#### Step Scaling Results
+
+212 clips (~2x the 106-clip doggy dataset) need proportionally more steps. Cosine schedule peaks around 13k steps vs 7k for doggy — roughly linear scaling with dataset size.
+
+| Experiment | Schedule | Steps | Best PBC | Best Step | HF @best | Notes |
+|---|---|---|---|---|---|---|
+| baseline | cosine | 8k | 0.472 | 6k | 0.0033 | Too few steps — still climbing |
+| 10k | cosine | 10k | 0.538 | 8k | 0.0016 | Better but early plateau |
+| 13k | cosine | 13k | 0.562 | 11k | 0.0038 | Plateaued at 11k |
+| **16k** | cosine | 16k | **0.630** | 13k | 0.0032 | Best cosine run |
+| **16k_constant** | **constant** | **16k** | **0.652** | **11k** | **0.0054** | **Winner — best PBC and HF** |
+| 20k | cosine | 20k | 0.624 | 17k | 0.0013 | Overtraining — HF collapse |
+
+#### Constant vs Cosine Schedule
+
+Constant schedule with Prodigy outperformed cosine on both PBC and HF retention:
+
+- **Constant** (Prodigy controls LR entirely via `d` adaptation): effective LR stabilized at ~5.01e-04 throughout. Peaked at PBC 0.652 @11k with HF 0.0054.
+- **Cosine** (LR decays from 1.0→0 multiplied by Prodigy `d`): effective LR drops in late training. Peaked at PBC 0.630 @13k with HF 0.0032.
+
+Constant schedule peaked faster (11k vs 13k) and retained more HF energy. With Prodigy's self-adaptive `d`, the cosine decay is redundant — Prodigy already reduces the effective LR as gradients stabilize. Cosine on top forces premature LR collapse.
+
+Best checkpoint: `frontfacing_noclap_16k_constant/adapter_step11000.pt`
+
+#### HF Preservation with cos_sim_weight (Front-Facing)
+
+cos_sim_weight did not help for mixed front-facing content (unlike pure moaning stems where it doubled HF). HF was essentially identical to baseline (0.0031 vs 0.0032), while PBC dropped:
+
+| Experiment | cos_sim | noise_offset | Best PBC | HF @best |
+|---|---|---|---|---|
+| 16k cosine (baseline) | 0.0 | 0.03 | 0.630 | 0.0032 |
+| cossim01 | 0.1 | 0.03 | 0.611 | 0.0031 |
+| cossim01_noise005 | 0.1 | 0.05 | 0.576 | 0.0020 |
+| **16k_constant** | **0.0** | **0.03** | **0.652** | **0.0054** |
+
+cos_sim improved HF on pure moaning stems (finding #81) but not on mixed content — the transient sounds already provide broadband signal that MSE handles well. Constant schedule preserved HF 1.7x better than any cos_sim variant without the PBC penalty.
+
+#### Updated Findings
+
+83. **Step scaling is roughly linear with dataset size** — 212 clips (2x) peaked at 11-13k steps vs 7k for 106 clips. 20k overshoots and degrades HF
+84. **Constant schedule + Prodigy beats cosine** — PBC 0.652 vs 0.630, with better HF retention (0.0054 vs 0.0032). Prodigy's `d` adaptation is sufficient — cosine decay on top forces premature LR collapse
+85. **cos_sim_weight doesn't help mixed content** — only benefits pure sustained signals (moaning stems). For mixed datasets, constant schedule is the better HF preservation mechanism
+86. **Updated recommended config** — constant schedule replaces cosine for Prodigy-based training. Full config: vd=0, noise_offset=0.03, rank 64, schedule_type=constant, Prodigy, ~50-65 steps/clip

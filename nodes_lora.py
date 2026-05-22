@@ -861,6 +861,10 @@ class FoleyTuneLoRATrainer:
                     "default": 0.0, "min": 0.0, "max": 0.5, "step": 0.005,
                     "tooltip": "Weight for multi-resolution STFT auxiliary loss. Reconstructs predicted clean sample and penalises frequency-domain error with 2x HF emphasis. Preserves high-frequency energy when timestep clipping removes the low-noise HF learning regime. 0.02 recommended. 0 = disabled.",
                 }),
+                "hf_phase_switch": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Two-phase curriculum for HF recovery. After this fraction of training, t_min/t_max clipping is removed so the model trains on full timestep range including the low-noise regime where HF detail is learned. Use with spectral_weight for best results. 0.6 recommended. 0 = disabled.",
+                }),
                 "channel_loss_weight": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "Weight velocity MSE by per-channel variance from dataset. Upweights perceptually important latent dimensions.",
@@ -929,7 +933,8 @@ class FoleyTuneLoRATrainer:
               lora_plus_ratio=1.0, schedule_type="constant",
               latent_mixup_alpha=0.0, latent_noise_sigma=0.0,
               noise_offset=0.0, min_snr_gamma=0.0, ema_decay=0.0,
-              cos_sim_weight=0.0, spectral_weight=0.0, channel_loss_weight=False,
+              cos_sim_weight=0.0, spectral_weight=0.0, hf_phase_switch=0.0,
+              channel_loss_weight=False,
               temporal_variance_weight=0.0,
               tv_gate_sigma=0.3, vd_curriculum_ratio=0.0,
               t_min=0.0, t_max=1.0, optimizer_type="adamw",
@@ -954,7 +959,7 @@ class FoleyTuneLoRATrainer:
             lora_dropout, lora_plus_ratio, schedule_type,
             latent_mixup_alpha, latent_noise_sigma,
             noise_offset, min_snr_gamma, ema_decay,
-            cos_sim_weight, spectral_weight, channel_loss_weight,
+            cos_sim_weight, spectral_weight, hf_phase_switch, channel_loss_weight,
             temporal_variance_weight, tv_gate_sigma, vd_curriculum_ratio,
             t_min, t_max, optimizer_type,
             visual_dropout_prob,
@@ -969,7 +974,7 @@ class FoleyTuneLoRATrainer:
                      lora_dropout, lora_plus_ratio, schedule_type,
                      latent_mixup_alpha, latent_noise_sigma,
                      noise_offset, min_snr_gamma, ema_decay,
-                     cos_sim_weight, spectral_weight, channel_loss_weight,
+                     cos_sim_weight, spectral_weight, hf_phase_switch, channel_loss_weight,
                      temporal_variance_weight, tv_gate_sigma, vd_curriculum_ratio,
                      t_min, t_max, optimizer_type,
                      visual_dropout_prob,
@@ -1162,6 +1167,7 @@ class FoleyTuneLoRATrainer:
             "ema_decay": ema_decay,
             "cos_sim_weight": cos_sim_weight,
             "spectral_weight": spectral_weight,
+            "hf_phase_switch": hf_phase_switch,
             "channel_loss_weight": channel_loss_weight,
             "temporal_variance_weight": temporal_variance_weight,
             "tv_gate_sigma": tv_gate_sigma,
@@ -1268,12 +1274,17 @@ class FoleyTuneLoRATrainer:
                 offset = torch.randn(batch_latents.shape[0], batch_latents.shape[1], 1, device=device, dtype=dtype) * noise_offset
                 batch_latents = batch_latents + offset
 
-            # Sample timesteps
+            # Sample timesteps — widen to full range after HF phase switch
+            eff_t_min, eff_t_max = t_min, t_max
+            if hf_phase_switch > 0:
+                progress = (step - start_step) / max(steps - start_step, 1)
+                if progress >= hf_phase_switch:
+                    eff_t_min, eff_t_max = 0.0, 1.0
             t = sample_timesteps(
                 batch_size, timestep_mode, device, dtype,
                 sigma=logit_normal_sigma, curriculum_switch=curriculum_switch,
                 step=step, start_step=start_step, total_steps=steps,
-                t_min=t_min, t_max=t_max,
+                t_min=eff_t_min, t_max=eff_t_max,
             )
 
             # Forward + loss
@@ -1613,7 +1624,7 @@ class FoleyTuneLoRAScheduler:
         "lora_plus_ratio": 1.0, "schedule_type": "cosine",
         "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
         "noise_offset": 0.0, "min_snr_gamma": 0.0, "ema_decay": 0.0,
-        "cos_sim_weight": 0.0, "spectral_weight": 0.0, "channel_loss_weight": False,
+        "cos_sim_weight": 0.0, "spectral_weight": 0.0, "hf_phase_switch": 0.0, "channel_loss_weight": False,
         "temporal_variance_weight": 0.0, "tv_gate_sigma": 0.3, "vd_curriculum_ratio": 0.0,
         "t_min": 0.0, "t_max": 1.0, "optimizer_type": "prodigy",
         "prodigy_d_coef": 1.0, "prodigy_growth_rate": 0.0,
@@ -2119,13 +2130,19 @@ class FoleyTuneLoRAScheduler:
                             offset = torch.randn(batch_latents.shape[0], batch_latents.shape[1], 1, device=device, dtype=dtype) * _noise_offset
                             batch_latents = batch_latents + offset
 
+                        _hf_switch = config.get("hf_phase_switch", 0.0)
+                        _eff_t_min = config.get("t_min", 0.0)
+                        _eff_t_max = config.get("t_max", 1.0)
+                        if _hf_switch > 0:
+                            _progress = (step - start_step) / max(config["steps"] - start_step, 1)
+                            if _progress >= _hf_switch:
+                                _eff_t_min, _eff_t_max = 0.0, 1.0
                         t = sample_timesteps(
                             bs, config["timestep_mode"], device, dtype,
                             sigma=config["logit_normal_sigma"],
                             curriculum_switch=config["curriculum_switch"],
                             step=step, total_steps=config["steps"],
-                            t_min=config.get("t_min", 0.0),
-                            t_max=config.get("t_max", 1.0),
+                            t_min=_eff_t_min, t_max=_eff_t_max,
                         )
 
                         effective_vd = visual_dropout_curriculum(

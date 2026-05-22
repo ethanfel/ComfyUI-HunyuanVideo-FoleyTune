@@ -274,24 +274,24 @@ def multi_resolution_spectral_loss(predicted, target, window_sizes=(4, 16, 64), 
         scalar loss
     """
     B, C, T = predicted.shape
-    # Flatten batch and channel for per-channel STFT: [B*C, T]
-    pred_flat = predicted.reshape(B * C, T)
-    tgt_flat = target.reshape(B * C, T)
+    # cuFFT requires float32 — cast from bf16/fp16 and cast back
+    orig_dtype = predicted.dtype
+    pred_flat = predicted.reshape(B * C, T).float()
+    tgt_flat = target.reshape(B * C, T).float()
 
-    total = torch.tensor(0.0, device=predicted.device, dtype=predicted.dtype)
+    total = torch.tensor(0.0, device=predicted.device)
     for ws in window_sizes:
         if T < ws:
             continue  # skip if latent sequence too short for this window
 
+        _window = torch.hann_window(ws, device=predicted.device)
         pred_stft = torch.stft(
             pred_flat, n_fft=ws, hop_length=max(ws // 4, 1),
-            win_length=ws, return_complex=True,
-            window=torch.hann_window(ws, device=predicted.device, dtype=predicted.dtype),
+            win_length=ws, return_complex=True, window=_window,
         )
         tgt_stft = torch.stft(
             tgt_flat, n_fft=ws, hop_length=max(ws // 4, 1),
-            win_length=ws, return_complex=True,
-            window=torch.hann_window(ws, device=target.device, dtype=target.dtype),
+            win_length=ws, return_complex=True, window=_window,
         )
 
         mag_pred = pred_stft.abs()
@@ -315,7 +315,7 @@ def multi_resolution_spectral_loss(predicted, target, window_sizes=(4, 16, 64), 
     if n_valid > 0:
         total = total / n_valid
 
-    return total
+    return total.to(orig_dtype)
 
 
 def visual_dropout_curriculum(base_prob, step, start_step, total_steps,

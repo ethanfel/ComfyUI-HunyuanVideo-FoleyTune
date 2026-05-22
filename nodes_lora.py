@@ -857,6 +857,10 @@ class FoleyTuneLoRATrainer:
                     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "Weight for cosine similarity auxiliary loss on velocity. Directly targets phase/correlation alignment. 0.1 recommended. 0 = disabled.",
                 }),
+                "spectral_weight": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 0.5, "step": 0.005,
+                    "tooltip": "Weight for multi-resolution STFT auxiliary loss. Reconstructs predicted clean sample and penalises frequency-domain error with 2x HF emphasis. Preserves high-frequency energy when timestep clipping removes the low-noise HF learning regime. 0.02 recommended. 0 = disabled.",
+                }),
                 "channel_loss_weight": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "Weight velocity MSE by per-channel variance from dataset. Upweights perceptually important latent dimensions.",
@@ -925,7 +929,7 @@ class FoleyTuneLoRATrainer:
               lora_plus_ratio=1.0, schedule_type="constant",
               latent_mixup_alpha=0.0, latent_noise_sigma=0.0,
               noise_offset=0.0, min_snr_gamma=0.0, ema_decay=0.0,
-              cos_sim_weight=0.0, channel_loss_weight=False,
+              cos_sim_weight=0.0, spectral_weight=0.0, channel_loss_weight=False,
               temporal_variance_weight=0.0,
               tv_gate_sigma=0.3, vd_curriculum_ratio=0.0,
               t_min=0.0, t_max=1.0, optimizer_type="adamw",
@@ -950,7 +954,7 @@ class FoleyTuneLoRATrainer:
             lora_dropout, lora_plus_ratio, schedule_type,
             latent_mixup_alpha, latent_noise_sigma,
             noise_offset, min_snr_gamma, ema_decay,
-            cos_sim_weight, channel_loss_weight,
+            cos_sim_weight, spectral_weight, channel_loss_weight,
             temporal_variance_weight, tv_gate_sigma, vd_curriculum_ratio,
             t_min, t_max, optimizer_type,
             visual_dropout_prob,
@@ -965,7 +969,7 @@ class FoleyTuneLoRATrainer:
                      lora_dropout, lora_plus_ratio, schedule_type,
                      latent_mixup_alpha, latent_noise_sigma,
                      noise_offset, min_snr_gamma, ema_decay,
-                     cos_sim_weight, channel_loss_weight,
+                     cos_sim_weight, spectral_weight, channel_loss_weight,
                      temporal_variance_weight, tv_gate_sigma, vd_curriculum_ratio,
                      t_min, t_max, optimizer_type,
                      visual_dropout_prob,
@@ -1157,6 +1161,7 @@ class FoleyTuneLoRATrainer:
             "min_snr_gamma": min_snr_gamma,
             "ema_decay": ema_decay,
             "cos_sim_weight": cos_sim_weight,
+            "spectral_weight": spectral_weight,
             "channel_loss_weight": channel_loss_weight,
             "temporal_variance_weight": temporal_variance_weight,
             "tv_gate_sigma": tv_gate_sigma,
@@ -1283,6 +1288,7 @@ class FoleyTuneLoRATrainer:
                 channel_weights=channel_weights,
                 temporal_variance_weight=temporal_variance_weight,
                 tv_gate_sigma=tv_gate_sigma,
+                spectral_weight=spectral_weight,
             )
             loss = loss / grad_accum
             loss.backward()
@@ -1607,7 +1613,7 @@ class FoleyTuneLoRAScheduler:
         "lora_plus_ratio": 1.0, "schedule_type": "cosine",
         "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
         "noise_offset": 0.0, "min_snr_gamma": 0.0, "ema_decay": 0.0,
-        "cos_sim_weight": 0.0, "channel_loss_weight": False,
+        "cos_sim_weight": 0.0, "spectral_weight": 0.0, "channel_loss_weight": False,
         "temporal_variance_weight": 0.0, "tv_gate_sigma": 0.3, "vd_curriculum_ratio": 0.0,
         "t_min": 0.0, "t_max": 1.0, "optimizer_type": "prodigy",
         "prodigy_d_coef": 1.0, "prodigy_growth_rate": 0.0,
@@ -2136,6 +2142,7 @@ class FoleyTuneLoRAScheduler:
                             channel_weights=_channel_weights,
                             temporal_variance_weight=config.get("temporal_variance_weight", 0.0),
                             tv_gate_sigma=config.get("tv_gate_sigma", 0.3),
+                            spectral_weight=config.get("spectral_weight", 0.0),
                         )
                         loss = loss / config["grad_accum"]
                         loss.backward()

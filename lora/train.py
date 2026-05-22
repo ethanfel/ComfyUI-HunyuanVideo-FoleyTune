@@ -341,7 +341,8 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
                        visual_dropout_prob=0.0, min_snr_gamma=0.0,
                        cos_sim_weight=0.0, channel_weights=None,
                        temporal_variance_weight=0.0, tv_gate_sigma=0.3,
-                       tv_scales=(1, 4, 16)):
+                       tv_scales=(1, 4, 16),
+                       spectral_weight=0.0):
     """Compute flow matching velocity prediction loss.
 
     Args:
@@ -444,6 +445,13 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
             tv_loss = tv_loss + (gate * per_sample).mean()
         tv_loss = tv_loss / len(tv_scales)
         loss = loss + temporal_variance_weight * tv_loss
+
+    if spectral_weight > 0:
+        x1_pred = xt - t_expand.to(dtype=dtype) * v_pred
+        spec_loss = multi_resolution_spectral_loss(
+            x1_pred, x1.to(device=device, dtype=dtype),
+        )
+        loss = loss + spectral_weight * spec_loss
 
     return loss
 

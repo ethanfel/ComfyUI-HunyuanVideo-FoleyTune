@@ -1263,10 +1263,15 @@ class FoleyTuneLoRATrainer:
         # differentiable decode during training.
         _wav_dac = None
         if wav_spectral_weight > 0:
-            _wav_dac = hunyuan_deps.dac_model
-            _wav_dac.to(device=device)
-            for _p in _wav_dac.parameters():
-                _p.requires_grad_(False)
+            # DAC was loaded under ComfyUI inference_mode → its weights are inference
+            # tensors that cannot join an autograd graph (and weight_norm recomputes
+            # one on every forward, so in-place laundering is insufficient). Make a
+            # frozen deepcopy outside inference_mode for the differentiable decode;
+            # the shared eval DAC is left untouched.
+            with torch.inference_mode(False), torch.no_grad():
+                _wav_dac = copy.deepcopy(hunyuan_deps.dac_model).to(device=device).eval()
+                for _p in _wav_dac.parameters():
+                    _p.requires_grad_(False)
             logger.info(f"Waveform spectral loss ON: weight={wav_spectral_weight}, every={wav_spectral_every}, crop={wav_spectral_crop}")
 
         logger.info(f"Starting training: {steps} steps, batch {batch_size}, lr {lr}")
@@ -2154,10 +2159,13 @@ class FoleyTuneLoRAScheduler:
                     _wav_adaptive = bool(config.get("wav_spectral_adaptive", True))
                     _wav_dac = None
                     if _wav_w > 0:
-                        _wav_dac = hunyuan_deps.dac_model
-                        _wav_dac.to(device=device)
-                        for _p in _wav_dac.parameters():
-                            _p.requires_grad_(False)
+                        # Frozen deepcopy outside inference_mode so the differentiable
+                        # decode can backprop (DAC's inference-tensor weights + weight_norm
+                        # recompute can't join autograd in place). Shared eval DAC untouched.
+                        with torch.inference_mode(False), torch.no_grad():
+                            _wav_dac = copy.deepcopy(hunyuan_deps.dac_model).to(device=device).eval()
+                            for _p in _wav_dac.parameters():
+                                _p.requires_grad_(False)
                         logger.info(f"[{exp_id}] Waveform spectral loss ON: weight={_wav_w}, every={_wav_every}, crop={_wav_crop}")
 
                     for step in range(start_step, config["steps"]):

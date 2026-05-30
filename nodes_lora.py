@@ -27,7 +27,7 @@ from .lora.lora import (
 from .lora.train import (
     prepare_dataset, prepare_single_entry, sample_timesteps, flow_matching_loss,
     generate_eval_sample, save_checkpoint, save_meta_json,
-    visual_dropout_curriculum,
+    visual_dropout_curriculum, compute_channel_weights,
 )
 from .lora.spectral_metrics import spectral_metrics, reference_metrics, clap_similarity
 from PIL import Image, ImageDraw
@@ -865,9 +865,29 @@ class FoleyTuneLoRATrainer:
                     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "Two-phase curriculum for HF recovery. After this fraction of training, t_min/t_max clipping is removed so the model trains on full timestep range including the low-noise regime where HF detail is learned. Use with spectral_weight for best results. 0.6 recommended. 0 = disabled.",
                 }),
+                "wav_spectral_weight": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Weight for WAVEFORM-domain multi-res STFT loss. Reconstructs the predicted clean latent, decodes a crop through DAC (differentiable), and penalises >4kHz error on the real 48kHz audio. This is the only loss that sees true audio HF (latent STFT cannot). 0.1 recommended. 0 = disabled.",
+                }),
+                "wav_spectral_every": ("INT", {
+                    "default": 8, "min": 1, "max": 64, "step": 1,
+                    "tooltip": "Compute the waveform spectral loss every N steps (DAC decode is expensive). 8 recommended.",
+                }),
+                "wav_spectral_crop": ("INT", {
+                    "default": 64, "min": 16, "max": 256, "step": 8,
+                    "tooltip": "Latent-frame crop length decoded for the waveform loss (64 frames ~ 1.3s at 50fps). Larger = more HF context, more VRAM.",
+                }),
+                "wav_spectral_adaptive": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Energy-adaptive HF weighting: scale HF error by 1/sqrt(target magnitude) to up-weight low-energy time-frequency bins (the collapsed HF). Off = flat HF-band L1.",
+                }),
+                "channel_weight_mode": (["off", "variance", "inverse"], {
+                    "default": "off",
+                    "tooltip": "Per-channel MSE weighting. 'variance' up-weights high-variance LF-bulk channels (legacy). 'inverse' up-weights low-variance channels that carry HF detail — counters diffusion spectral bias. 'off' = uniform.",
+                }),
                 "channel_loss_weight": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Weight velocity MSE by per-channel variance from dataset. Upweights perceptually important latent dimensions.",
+                    "tooltip": "DEPRECATED — use channel_weight_mode. When true and mode is off, applies legacy 'variance' weighting.",
                 }),
                 "temporal_variance_weight": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
@@ -934,6 +954,8 @@ class FoleyTuneLoRATrainer:
               latent_mixup_alpha=0.0, latent_noise_sigma=0.0,
               noise_offset=0.0, min_snr_gamma=0.0, ema_decay=0.0,
               cos_sim_weight=0.0, spectral_weight=0.0, hf_phase_switch=0.0,
+              wav_spectral_weight=0.0, wav_spectral_every=8, wav_spectral_crop=64,
+              wav_spectral_adaptive=True, channel_weight_mode="off",
               channel_loss_weight=False,
               temporal_variance_weight=0.0,
               tv_gate_sigma=0.3, vd_curriculum_ratio=0.0,
@@ -959,7 +981,9 @@ class FoleyTuneLoRATrainer:
             lora_dropout, lora_plus_ratio, schedule_type,
             latent_mixup_alpha, latent_noise_sigma,
             noise_offset, min_snr_gamma, ema_decay,
-            cos_sim_weight, spectral_weight, hf_phase_switch, channel_loss_weight,
+            cos_sim_weight, spectral_weight, hf_phase_switch,
+            wav_spectral_weight, wav_spectral_every, wav_spectral_crop,
+            wav_spectral_adaptive, channel_weight_mode, channel_loss_weight,
             temporal_variance_weight, tv_gate_sigma, vd_curriculum_ratio,
             t_min, t_max, optimizer_type,
             visual_dropout_prob,
@@ -974,7 +998,9 @@ class FoleyTuneLoRATrainer:
                      lora_dropout, lora_plus_ratio, schedule_type,
                      latent_mixup_alpha, latent_noise_sigma,
                      noise_offset, min_snr_gamma, ema_decay,
-                     cos_sim_weight, spectral_weight, hf_phase_switch, channel_loss_weight,
+                     cos_sim_weight, spectral_weight, hf_phase_switch,
+                     wav_spectral_weight, wav_spectral_every, wav_spectral_crop,
+                     wav_spectral_adaptive, channel_weight_mode, channel_loss_weight,
                      temporal_variance_weight, tv_gate_sigma, vd_curriculum_ratio,
                      t_min, t_max, optimizer_type,
                      visual_dropout_prob,
@@ -1168,6 +1194,11 @@ class FoleyTuneLoRATrainer:
             "cos_sim_weight": cos_sim_weight,
             "spectral_weight": spectral_weight,
             "hf_phase_switch": hf_phase_switch,
+            "wav_spectral_weight": wav_spectral_weight,
+            "wav_spectral_every": wav_spectral_every,
+            "wav_spectral_crop": wav_spectral_crop,
+            "wav_spectral_adaptive": wav_spectral_adaptive,
+            "channel_weight_mode": channel_weight_mode,
             "channel_loss_weight": channel_loss_weight,
             "temporal_variance_weight": temporal_variance_weight,
             "tv_gate_sigma": tv_gate_sigma,
@@ -1184,13 +1215,14 @@ class FoleyTuneLoRATrainer:
         prompt_counts = Counter(d["prompt"] for d in dataset)
         meta["prompts"] = [p for p, _ in prompt_counts.most_common()]
 
-        # Pre-compute per-channel variance weights for channel-weighted loss
+        # Pre-compute per-channel loss weights. "variance" up-weights LF bulk (legacy);
+        # "inverse" up-weights low-variance HF channels to counter spectral bias.
+        _cw_mode = channel_weight_mode or ("variance" if channel_loss_weight else "off")
         channel_weights = None
-        if channel_loss_weight:
+        if _cw_mode != "off":
             all_latents = torch.cat([d["latents"] for d in dataset], dim=0)
-            ch_var = all_latents.var(dim=(0, 2))
-            channel_weights = (ch_var / ch_var.mean()).clamp(0.5, 2.0)
-            logger.info(f"Channel weights: min={channel_weights.min():.2f} max={channel_weights.max():.2f}")
+            channel_weights = compute_channel_weights(all_latents, _cw_mode)
+            logger.info(f"Channel weights ({_cw_mode}): min={channel_weights.min():.2f} max={channel_weights.max():.2f}")
             del all_latents
 
         losses = []
@@ -1226,6 +1258,16 @@ class FoleyTuneLoRATrainer:
                 ref_wav_np = _ref_dec.squeeze().cpu().numpy()
                 hunyuan_deps.dac_model.cpu()
             _save_spectrogram(ref_wav_np, 48000, samples_path / "reference")
+
+        # Waveform spectral loss needs the DAC decoder resident on GPU (frozen) for
+        # differentiable decode during training.
+        _wav_dac = None
+        if wav_spectral_weight > 0:
+            _wav_dac = hunyuan_deps.dac_model
+            _wav_dac.to(device=device)
+            for _p in _wav_dac.parameters():
+                _p.requires_grad_(False)
+            logger.info(f"Waveform spectral loss ON: weight={wav_spectral_weight}, every={wav_spectral_every}, crop={wav_spectral_crop}")
 
         logger.info(f"Starting training: {steps} steps, batch {batch_size}, lr {lr}")
         t_start = time.time()
@@ -1291,6 +1333,7 @@ class FoleyTuneLoRATrainer:
             effective_vd = visual_dropout_curriculum(
                 visual_dropout_prob, step, start_step, steps, vd_curriculum_ratio,
             )
+            _do_wav = _wav_dac is not None and (step % wav_spectral_every == 0)
             loss = flow_matching_loss(
                 model, batch_latents, t, batch_clip, batch_sync, batch_text, device, dtype,
                 visual_dropout_prob=effective_vd,
@@ -1300,6 +1343,10 @@ class FoleyTuneLoRATrainer:
                 temporal_variance_weight=temporal_variance_weight,
                 tv_gate_sigma=tv_gate_sigma,
                 spectral_weight=spectral_weight,
+                dac_model=_wav_dac, wav_spectral_weight=wav_spectral_weight,
+                wav_spectral_crop=wav_spectral_crop,
+                wav_spectral_adaptive=wav_spectral_adaptive,
+                compute_wav_spectral=_do_wav,
             )
             loss = loss / grad_accum
             loss.backward()
@@ -1624,7 +1671,9 @@ class FoleyTuneLoRAScheduler:
         "lora_plus_ratio": 1.0, "schedule_type": "cosine",
         "latent_mixup_alpha": 0.0, "latent_noise_sigma": 0.0,
         "noise_offset": 0.0, "min_snr_gamma": 0.0, "ema_decay": 0.0,
-        "cos_sim_weight": 0.0, "spectral_weight": 0.0, "hf_phase_switch": 0.0, "channel_loss_weight": False,
+        "cos_sim_weight": 0.0, "spectral_weight": 0.0, "hf_phase_switch": 0.0,
+        "wav_spectral_weight": 0.0, "wav_spectral_every": 8, "wav_spectral_crop": 64,
+        "wav_spectral_adaptive": True, "channel_weight_mode": "off", "channel_loss_weight": False,
         "temporal_variance_weight": 0.0, "tv_gate_sigma": 0.3, "vd_curriculum_ratio": 0.0,
         "t_min": 0.0, "t_max": 1.0, "optimizer_type": "prodigy",
         "prodigy_d_coef": 1.0, "prodigy_growth_rate": 0.0,
@@ -1996,13 +2045,13 @@ class FoleyTuneLoRAScheduler:
                             ema_state = {n: p.data.clone() for n, p in model.named_parameters() if p.requires_grad}
                             logger.info(f"[{exp_id}] EMA initialized fresh (decay={_ema_decay})")
 
-                    # Channel-weighted loss
+                    # Channel-weighted loss: "variance" (legacy LF bulk) or "inverse" (HF channels)
+                    _cw_mode = config.get("channel_weight_mode") or ("variance" if config.get("channel_loss_weight", False) else "off")
                     _channel_weights = None
-                    if config.get("channel_loss_weight", False):
+                    if _cw_mode != "off":
                         _all_lat = torch.cat([d["latents"] for d in dataset], dim=0)
-                        _ch_var = _all_lat.var(dim=(0, 2))
-                        _channel_weights = (_ch_var / _ch_var.mean()).clamp(0.5, 2.0)
-                        logger.info(f"[{exp_id}] Channel weights: min={_channel_weights.min():.2f} max={_channel_weights.max():.2f}")
+                        _channel_weights = compute_channel_weights(_all_lat, _cw_mode)
+                        logger.info(f"[{exp_id}] Channel weights ({_cw_mode}): min={_channel_weights.min():.2f} max={_channel_weights.max():.2f}")
                         del _all_lat
 
                     import random
@@ -2097,6 +2146,20 @@ class FoleyTuneLoRAScheduler:
 
                     model.train()
 
+                    # Waveform spectral loss: keep DAC resident on GPU (frozen) for
+                    # differentiable decode during training.
+                    _wav_w = config.get("wav_spectral_weight", 0.0)
+                    _wav_every = int(config.get("wav_spectral_every", 8))
+                    _wav_crop = int(config.get("wav_spectral_crop", 64))
+                    _wav_adaptive = bool(config.get("wav_spectral_adaptive", True))
+                    _wav_dac = None
+                    if _wav_w > 0:
+                        _wav_dac = hunyuan_deps.dac_model
+                        _wav_dac.to(device=device)
+                        for _p in _wav_dac.parameters():
+                            _p.requires_grad_(False)
+                        logger.info(f"[{exp_id}] Waveform spectral loss ON: weight={_wav_w}, every={_wav_every}, crop={_wav_crop}")
+
                     for step in range(start_step, config["steps"]):
                         mm.throw_exception_if_processing_interrupted()
                         # Skip flag
@@ -2150,6 +2213,7 @@ class FoleyTuneLoRAScheduler:
                             step, start_step, config["steps"],
                             config.get("vd_curriculum_ratio", 0.0),
                         )
+                        _do_wav = _wav_dac is not None and (step % _wav_every == 0)
                         loss = flow_matching_loss(
                             model, batch_latents, t, batch_clip, batch_sync, batch_text,
                             device, dtype,
@@ -2160,6 +2224,10 @@ class FoleyTuneLoRAScheduler:
                             temporal_variance_weight=config.get("temporal_variance_weight", 0.0),
                             tv_gate_sigma=config.get("tv_gate_sigma", 0.3),
                             spectral_weight=config.get("spectral_weight", 0.0),
+                            dac_model=_wav_dac, wav_spectral_weight=_wav_w,
+                            wav_spectral_crop=_wav_crop,
+                            wav_spectral_adaptive=_wav_adaptive,
+                            compute_wav_spectral=_do_wav,
                         )
                         loss = loss / config["grad_accum"]
                         loss.backward()

@@ -318,6 +318,80 @@ def multi_resolution_spectral_loss(predicted, target, window_sizes=(4, 16, 64), 
     return total.to(orig_dtype)
 
 
+def compute_channel_weights(all_latents, mode):
+    """Per-channel MSE weights from dataset latent statistics.
+
+    Modes:
+        "off"      -> None (uniform)
+        "variance" -> weight proportional to per-channel variance, clamp [0.5, 2.0].
+                      Up-weights high-variance (low-frequency bulk) channels. Legacy.
+        "inverse"  -> weight proportional to 1/std, clamp [0.5, 4.0]. Up-weights the
+                      low-variance channels that carry high-frequency detail (which
+                      plain MSE ignores). Counters diffusion spectral bias for HF.
+
+    Args:
+        all_latents: [N, 128, T] stacked dataset latents
+        mode: one of the above strings
+
+    Returns:
+        [128] weight tensor or None
+    """
+    if mode == "off" or not mode:
+        return None
+    if mode == "variance":
+        ch_var = all_latents.var(dim=(0, 2))
+        return (ch_var / ch_var.mean()).clamp(0.5, 2.0)
+    if mode == "inverse":
+        ch_std = all_latents.std(dim=(0, 2))
+        return (ch_std.mean() / (ch_std + 1e-6)).clamp(0.5, 4.0)
+    raise ValueError(f"Unknown channel_weight_mode: {mode!r}")
+
+
+def waveform_spectral_loss(pred_wav, tgt_wav, sr=48000, ffts=(512, 1024, 2048),
+                           hf_hz=4000.0, hf_weight=3.0, energy_adaptive=True):
+    """Multi-resolution STFT loss on DECODED 48kHz waveforms with >4kHz emphasis.
+
+    Unlike multi_resolution_spectral_loss (which runs on DAC latents and is blind
+    to audio frequency — the latent time axis is 50fps/25Hz Nyquist), this operates
+    on the real waveform after DAC decode, so the STFT bins map to true audio Hz and
+    can target the >4kHz band that collapses during training.
+
+    Args:
+        pred_wav: [B, samples] predicted waveform (requires grad through DAC decode)
+        tgt_wav: [B, samples] target waveform (no grad)
+        sr: sample rate (48000)
+        ffts: STFT window sizes for multi-resolution analysis
+        hf_hz: high-frequency band threshold (matches spectral_metrics hf_energy_ratio)
+        hf_weight: multiplier on the HF-band term
+        energy_adaptive: if True, weight HF error by 1/sqrt(target_mag) to up-weight
+            low-energy time-frequency bins (Flow2GAN Eq.6 style); else flat HF band L1
+
+    Returns:
+        scalar loss
+    """
+    total = pred_wav.new_zeros(())
+    for n_fft in ffts:
+        hop = n_fft // 4
+        win = torch.hann_window(n_fft, device=pred_wav.device)
+        P = torch.stft(pred_wav, n_fft=n_fft, hop_length=hop, win_length=n_fft,
+                       window=win, return_complex=True).abs()
+        T = torch.stft(tgt_wav, n_fft=n_fft, hop_length=hop, win_length=n_fft,
+                       window=win, return_complex=True).abs()
+        # Spectral convergence (Frobenius) + log-magnitude L1
+        sc = torch.linalg.norm(T - P) / (torch.linalg.norm(T) + 1e-7)
+        logmag = F.l1_loss(torch.log1p(P), torch.log1p(T))
+        # HF band (>hf_hz) emphasis — the band that collapses
+        freqs = torch.fft.rfftfreq(n_fft, 1.0 / sr).to(pred_wav.device)
+        hf = (freqs > hf_hz).float().view(1, -1, 1)
+        if energy_adaptive:
+            w = hf / torch.sqrt(T + 1e-5)
+            hf_term = (((P - T) * w).abs()).mean()
+        else:
+            hf_term = F.l1_loss(P * hf, T * hf)
+        total = total + sc + logmag + hf_weight * hf_term
+    return total / len(ffts)
+
+
 def visual_dropout_curriculum(base_prob, step, start_step, total_steps,
                               vd_curriculum_ratio=0.0):
     """Ramp visual dropout from low (sync-focused) to base_prob (spectral-focused).
@@ -342,7 +416,10 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
                        cos_sim_weight=0.0, channel_weights=None,
                        temporal_variance_weight=0.0, tv_gate_sigma=0.3,
                        tv_scales=(1, 4, 16),
-                       spectral_weight=0.0):
+                       spectral_weight=0.0,
+                       dac_model=None, wav_spectral_weight=0.0,
+                       wav_spectral_crop=64, wav_spectral_adaptive=True,
+                       compute_wav_spectral=False):
     """Compute flow matching velocity prediction loss.
 
     Args:
@@ -452,6 +529,32 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
             x1_pred, x1.to(device=device, dtype=dtype),
         )
         loss = loss + spectral_weight * spec_loss
+
+    # Waveform-domain spectral loss: reconstruct predicted clean latent, decode a
+    # cropped window through DAC (differentiable), and penalise >4kHz error on the
+    # real 48kHz waveform. Only runs on flagged steps (decode is expensive).
+    if compute_wav_spectral and wav_spectral_weight > 0 and dac_model is not None:
+        dac_model.to(device=device)  # idempotent; eval/ref decode may have offloaded it
+        dac_dtype = next(dac_model.parameters()).dtype
+        x1_pred = xt - t_expand.to(dtype=dtype) * v_pred  # [B,128,T]
+        x1_tgt = x1.to(device=device, dtype=dtype)
+        T_lat = x1_pred.shape[-1]
+        crop = min(wav_spectral_crop, T_lat)
+        if T_lat > crop:
+            s = int(torch.randint(0, T_lat - crop + 1, (1,)).item())
+            x1_pred_c = x1_pred[..., s:s + crop]
+            x1_tgt_c = x1_tgt[..., s:s + crop]
+        else:
+            x1_pred_c, x1_tgt_c = x1_pred, x1_tgt
+        # Decode in DAC's native dtype (preserve grad), STFT in fp32 (cuFFT needs it)
+        pred_wav = dac_model.decode(x1_pred_c.to(dac_dtype)).squeeze(1)  # [B, samples], grad
+        with torch.no_grad():
+            tgt_wav = dac_model.decode(x1_tgt_c.to(dac_dtype)).squeeze(1)
+        wav_loss = waveform_spectral_loss(
+            pred_wav.float(), tgt_wav.float(),
+            energy_adaptive=wav_spectral_adaptive,
+        )
+        loss = loss + wav_spectral_weight * wav_loss.to(loss.dtype)
 
     return loss
 

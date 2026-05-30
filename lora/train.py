@@ -321,13 +321,19 @@ def multi_resolution_spectral_loss(predicted, target, window_sizes=(4, 16, 64), 
 def compute_channel_weights(all_latents, mode):
     """Per-channel MSE weights from dataset latent statistics.
 
+    NOTE: empirically, the DAC-VAE latents for this model are bimodal — ~120 of 128
+    channels are near-unit-variance (std ~0.84-1.27) and ~8 are dead (std ~0.013,
+    unused codec dims). The real channels are already well-conditioned, so channel
+    weighting has little leverage; the dead channels carry no signal and MUST NOT be
+    up-weighted (their velocity target is pure noise). HF lives in low-energy content
+    distributed across the healthy channels, not in identifiable low-variance channels
+    — use the waveform_spectral_loss for HF, not channel weighting.
+
     Modes:
         "off"      -> None (uniform)
-        "variance" -> weight proportional to per-channel variance, clamp [0.5, 2.0].
-                      Up-weights high-variance (low-frequency bulk) channels. Legacy.
-        "inverse"  -> weight proportional to 1/std, clamp [0.5, 4.0]. Up-weights the
-                      low-variance channels that carry high-frequency detail (which
-                      plain MSE ignores). Counters diffusion spectral bias for HF.
+        "variance" -> weight proportional to per-channel variance, clamp [0.5, 2.0]. Legacy.
+        "inverse"  -> weight proportional to 1/std among LIVE channels (clamp [0.5, 4.0]),
+                      dead channels pinned to 1.0 so their noise is never amplified.
 
     Args:
         all_latents: [N, 128, T] stacked dataset latents
@@ -343,7 +349,11 @@ def compute_channel_weights(all_latents, mode):
         return (ch_var / ch_var.mean()).clamp(0.5, 2.0)
     if mode == "inverse":
         ch_std = all_latents.std(dim=(0, 2))
-        return (ch_std.mean() / (ch_std + 1e-6)).clamp(0.5, 4.0)
+        med = ch_std.median()
+        dead = ch_std < 0.1 * med  # unused codec dims — predicting their noise is futile
+        w = (med / (ch_std + 1e-6)).clamp(0.5, 4.0)
+        w[dead] = 1.0
+        return w
     raise ValueError(f"Unknown channel_weight_mode: {mode!r}")
 
 
@@ -563,7 +573,7 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
 
 @torch.no_grad()
 def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
-                         num_steps=50, seed=42, cfg_scale=5.0):
+                         num_steps=50, seed=42, cfg_scale=4.5):
     """Generate an audio sample for evaluation during training.
 
     Uses classifier-free guidance (CFG) matching the inference pipeline.

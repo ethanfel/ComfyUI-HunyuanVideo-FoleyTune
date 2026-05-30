@@ -32,20 +32,27 @@ def test_channel_weights_variance_upweights_high_variance():
     assert float(w.min()) >= 0.5 and float(w.max()) <= 2.0
 
 
-def test_channel_weights_inverse_upweights_low_variance():
-    lat = _latents_with_channel_spread()
+def test_channel_weights_inverse_upweights_live_low_variance():
+    """A live but low-variance channel is up-weighted above a high-variance one."""
+    torch.manual_seed(0)
+    x = torch.randn(4, 128, 50)
+    scales = torch.ones(128)
+    scales[10] = 0.4   # live, low-variance channel (above dead threshold)
+    scales[20] = 1.6   # high-variance channel
+    lat = x * scales.view(1, 128, 1)
     w = compute_channel_weights(lat, "inverse")
     assert w.shape == (128,)
-    # inverse mode must up-weight the LOW-variance (HF-carrying) channel
-    assert w[0] > w[-1]
+    assert w[10] > w[20]
     assert float(w.min()) >= 0.5 and float(w.max()) <= 4.0
 
 
-def test_channel_weights_inverse_clamps_dead_channels():
-    """A near-zero-variance channel must not blow up past the clamp ceiling."""
+def test_channel_weights_inverse_pins_dead_channels_to_one():
+    """Dead (near-zero-variance) channels must be pinned to 1.0, never amplified —
+    their velocity target is pure noise and up-weighting it injects noise gradient."""
     lat = _latents_with_channel_spread()
     lat[:, 0, :] = 1e-6  # truly dead channel
     w = compute_channel_weights(lat, "inverse")
+    assert float(w[0]) == pytest.approx(1.0)
     assert float(w.max()) <= 4.0
     assert torch.isfinite(w).all()
 

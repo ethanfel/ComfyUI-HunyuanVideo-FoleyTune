@@ -33,3 +33,6 @@ praat-parselmouth
 matplotlib
 prodigyopt
 prodigy-plus-schedule-free
+
+# Post-hoc bandwidth extension (FoleyTune BWE node — HF restoration on generated audio)
+universr @ git+https://github.com/woongzip1/UniverSR.git

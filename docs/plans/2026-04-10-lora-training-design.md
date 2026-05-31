@@ -1799,3 +1799,83 @@ cos_sim improved HF on pure moaning stems (finding #81) but not on mixed content
 84. **Constant schedule + Prodigy beats cosine** — PBC 0.652 vs 0.630, with better HF retention (0.0054 vs 0.0032). Prodigy's `d` adaptation is sufficient — cosine decay on top forces premature LR collapse
 85. **cos_sim_weight doesn't help mixed content** — only benefits pure sustained signals (moaning stems). For mixed datasets, constant schedule is the better HF preservation mechanism
 86. **Updated recommended config** — constant schedule replaces cosine for Prodigy-based training. Full config: vd=0, noise_offset=0.03, rank 64, schedule_type=constant, Prodigy, ~50-65 steps/clip
+
+### HF Recovery — Spectral Losses, Waveform Loss & Post-hoc BWE (May 2026)
+
+The persistent muffling (HF energy >4kHz ~0.005 vs bright ground truth ~0.045) was investigated end-to-end on the front-facing dataset. **Conclusion: HF cannot be recovered in training; the fix is post-hoc bandwidth extension (UniverSR). Train for sync, brighten afterward.**
+
+#### Diagnosis — it's a loss problem, not a ceiling
+
+Decoded the ground-truth DAC latents directly and measured HF on the waveform:
+
+| Source | HF energy ratio (>4kHz) |
+|---|---|
+| GT training audio (raw) | 0.055 |
+| GT after DAC round-trip | 0.045 (codec keeps ~82%) |
+| Model generations | ~0.005 |
+
+The codec is **not** the bottleneck — there is ~9× headroom. The collapse is the **spectral bias of diffusion** (arXiv:2503.03206 / 2505.11278): HF modes are low-energy/low-variance, converge orders of magnitude slower, and training *longer* makes HF *worse* — which matches every sweep. Channel-variance check: the 128 DAC latent channels are bimodal — ~120 healthy (std 0.84–1.27) + 8 dead (std ~0.013, unused codec dims); HF is **not** isolated in identifiable low-variance channels, so per-channel weighting has no usable handle on it.
+
+#### Sweep4 — latent-domain multi-resolution STFT loss (FAILED)
+
+Applied an STFT loss over the DAC latent channels' time axis (weights 0.02–0.1, ± min-SNR, ± two-phase timestep switch). No HF gain at any weight; higher weights just slowed PBC convergence. **Root cause: the latent time axis runs at 50fps (Nyquist 25Hz) and the channels are not frequency-organized — a latent STFT is mathematically blind to 4–24kHz audio.** Do not retry any latent-STFT variant.
+
+#### Channel weighting — inverse-variance (NO LEVERAGE)
+
+Added `channel_weight_mode=inverse` (weight ∝ 1/std, dead-channel-safe: dead pinned to 1.0). Since HF isn't concentrated in low-variance channels, it has little effect; the legacy `variance` mode is actively backwards (up-weights the LF bulk). Neither recovers HF.
+
+#### Sweep5 — waveform-domain decode loss
+
+Wired up a loss that reconstructs the predicted clean latent (x̂1 = xt − t·v_pred), decodes a crop through the DAC (differentiable, frozen `copy.deepcopy` to escape ComfyUI inference-tensor errors; cuFFT needs fp32) every N steps, and applies a multi-res STFT loss on the **real 48kHz waveform** with >4kHz emphasis. This is the only loss that can *see* audio HF. HF measured directly on generated WAVs (avg over converged checkpoints, ×1000):
+
+| Experiment | wav weight | adaptive | clip | Best PBC | TRAIN HF | EVAL HF |
+|---|---|---|---|---|---|---|
+| baseline (constant) | — | — | — | **0.652** | 4.10 | 1.45 |
+| wav01 | 0.1 | yes | — | 0.610 | 1.99 | 1.09 |
+| **wav01_flat** | 0.1 | **no** | — | 0.614 | 2.90 | **2.98** |
+| wav02 | 0.2 | yes | — | 0.593 | 0.72 | 0.39 |
+| clip_wav01 | 0.1 | yes | [0.05,0.95] | 0.577 | 2.15 | 1.73 |
+
+Findings: the **flat** HF term beats the **energy-adaptive** one (the `1/√mag` weighting dilutes the signal); more wav weight hurts both PBC and HF; metric-wise no variant beat the baseline. But the per-clip HF metric is noisy and single-clip — **perceptually, wav01_flat is excellent** (see verdict below).
+
+#### Sweep6 — combining timestep clipping + flat waveform loss (NO GAIN)
+
+Tested whether a gentle flat wav loss on the sync-optimized clipped base would brighten it (so BWE works less):
+
+| Experiment | clip | wav (flat) | Best PBC | TRAIN HF | EVAL HF |
+|---|---|---|---|---|---|
+| tmin005_tmax095 (ref) | [0.05,0.95] | — | 0.626 | 3.56 | 1.83 |
+| clipflat_wav005 | [0.05,0.95] | 0.05 | 0.628 | 1.53 | 4.62 |
+| clipflat_wav01 | [0.05,0.95] | 0.10 | 0.613 | 1.74 | 2.26 |
+
+Flat wav at 0.05 is **harmless to sync** (PBC 0.628 ≈ pure tmin 0.626; far better than adaptive clip_wav01 @0.577) but does **not** reliably brighten the base — dimmer on the in-distribution clip, brighter on the OOD clip, net wash. The combination = pure tmin with extra complexity, no benefit. **Do not combine tmin + wav.**
+
+#### Solution — post-hoc bandwidth extension via UniverSR (`FoleyTuneBWE` node)
+
+UniverSR (ICASSP 2026, vocoder-free flow matching in the complex STFT domain) restores HF on the already-generated 48kHz audio. Validated settings for foley: **`input_sr=16000`, `guidance_scale=3.0`, `ode_steps=4`** — regenerates only the top octave (>8kHz), reading as natural air. Notes:
+- cfg defaults (1.5) are a no-op; `input_sr=8000`/cfg≥3 over-brightens and sounds "a bit artificial"; cfg>4 = hiss.
+- UniverSR caps ~0.01 HF on foley (won't reach the 0.045 ceiling) and isn't seeded (HF varies run-to-run); a wet/dry `blend` knob dials it back.
+- Node is torchcodec-safe (downsamples via `functional.resample`, no torchaudio file I/O — torch 2.11 envs route save/load through a fragile torchcodec backend).
+- Requires `universr` in the ComfyUI env (in `requirements.txt`).
+
+#### FINAL PERCEPTUAL VERDICT — pipeline of record
+
+With UniverSR BWE applied, listening A/B (the real arbiter — the logged HF metric never captured the perceptual picture):
+
+- **`tmin005_tmax095` @13k + BWE  ≈  `wav01_flat` @16k + BWE** — **equal quality, both perfectly usable, different sonic character.** Both clearly beat the plain constant baseline once brightened.
+- **`clipflat_wav005` (tmin+flat-wav combo) is inferior** in sound quality — confirms sweep6's "no gain" and that combining the two losses degrades rather than helps.
+- The right architecture is **separation of concerns**: optimize *training* for sync (timestep clipping is fine, accept the muffling), restore HF *post-hoc* with BWE. Don't fight the spectral bias in the loss.
+
+Production checkpoints (each → FoleyTuneBWE cfg3.0/input_sr16000):
+- `frontfacing_tmin005_tmax095/adapter_step13000.pt` (primary)
+- `frontfacing_wav01_flat/adapter_step16000.pt` (equal alternative, different character)
+- `frontfacing_noclap_16k_constant/adapter_step11000.pt` (plain baseline — usable but dimmer/less sync without BWE)
+
+#### Findings
+
+87. **HF collapse is the spectral bias of diffusion, not a codec/data ceiling** — ~9× headroom (GT roundtrip 0.045 vs model 0.005); low-energy HF modes converge slowest and degrade with more training
+88. **Latent-domain spectral loss is mathematically blind** — DAC latent axis is 50fps (25Hz Nyquist); an STFT over it cannot represent 4–24kHz audio. Never retry
+89. **Waveform decode loss: flat HF term > energy-adaptive**, and more weight hurts; metric-neutral but wav01_flat is perceptually excellent. Inverse channel weighting has no leverage (HF not in low-var channels)
+90. **Don't combine timestep-clipping + waveform loss** — flat@0.05 is sync-harmless but adds no brightness; the combo (clipflat_wav005) is perceptually inferior
+91. **HF is recovered post-hoc, not in training** — UniverSR BWE at input_sr=16000/cfg3.0 is the fix; train for sync, brighten afterward (FoleyTuneBWE node)
+92. **Production pipeline** — tmin005_tmax095@13k (or wav01_flat@16k, equal) + UniverSR BWE. Both beat the plain baseline; the tmin model's only weakness (muffling) is exactly what BWE fixes

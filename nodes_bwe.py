@@ -15,9 +15,6 @@ Requires `universr` in the ComfyUI environment:
     pip install git+https://github.com/woongzip1/UniverSR.git
 """
 
-import os
-import tempfile
-
 import torch
 import torchaudio
 import comfy.model_management as mm
@@ -109,31 +106,31 @@ class FoleyTuneBWE:
         model = _get_universr(model_path, device)
         cfg = guidance_scale if guidance_scale and guidance_scale > 0 else None
 
-        # UniverSR's tensor path assumes the tensor is *at* input_sr; only its file
-        # path correctly treats a 48kHz signal as band-limited and applies the
-        # internal low-pass. Hand it a 48kHz temp WAV per channel so behaviour
-        # matches the validated file-based result exactly.
-        B, C, T = dry.shape
+        # UniverSR's *file* path internally calls torchaudio.load, and its *tensor*
+        # path treats the tensor as already being at input_sr. We avoid file I/O
+        # entirely (torchaudio's torchcodec backend is fragile across envs) by
+        # downsampling each channel 48kHz -> input_sr ourselves (pure-DSP resample,
+        # no codec) and handing UniverSR a genuine low-rate tensor to super-resolve.
+        # Equivalent to the band-limit the file path applies; validated to match.
+        low_all = torchaudio.functional.resample(dry, TARGET_SR, int(input_sr))  # [B,C,T_low]
+        B, C, _ = dry.shape
         out_chans = []
-        with tempfile.TemporaryDirectory() as td:
-            for b in range(B):
-                chans = []
-                for c in range(C):
-                    wav_path = os.path.join(td, f"ch_{b}_{c}.wav")
-                    torchaudio.save(wav_path, dry[b, c:c + 1], TARGET_SR)
-                    wet = model.enhance(
-                        wav_path,
-                        input_sr=int(input_sr),
-                        ode_method=ode_method,
-                        ode_steps=int(ode_steps),
-                        guidance_scale=cfg,
-                    ).detach().cpu().float().reshape(-1)  # (T',)
-                    d = dry[b, c]
-                    n = min(d.shape[-1], wet.shape[-1])
-                    mixed = (1.0 - blend) * d[:n] + blend * wet[:n]
-                    chans.append(mixed)
-                m = min(x.shape[-1] for x in chans)
-                out_chans.append(torch.stack([x[:m] for x in chans], dim=0))
+        for b in range(B):
+            chans = []
+            for c in range(C):
+                wet = model.enhance(
+                    low_all[b, c],  # (T_low,) genuine input_sr-rate signal
+                    input_sr=int(input_sr),
+                    ode_method=ode_method,
+                    ode_steps=int(ode_steps),
+                    guidance_scale=cfg,
+                ).detach().cpu().float().reshape(-1)  # (T',) @48kHz
+                d = dry[b, c]
+                n = min(d.shape[-1], wet.shape[-1])
+                mixed = (1.0 - blend) * d[:n] + blend * wet[:n]
+                chans.append(mixed)
+            m = min(x.shape[-1] for x in chans)
+            out_chans.append(torch.stack([x[:m] for x in chans], dim=0))
         # align batch items to equal length
         mb = min(x.shape[-1] for x in out_chans)
         out = torch.stack([x[:, :mb] for x in out_chans], dim=0)  # [B, C, T]

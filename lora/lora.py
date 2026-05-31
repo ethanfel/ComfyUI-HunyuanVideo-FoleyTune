@@ -53,6 +53,55 @@ FOLEY_TARGET_PRESETS = {
         "v_cond_mlp.fc1",
         "v_cond_mlp.fc2",
     ),
+    # all_attn_mlp + the SYNC-INJECTION path: the adaLN modulation linears in
+    # every block (audio_mod/v_cond_mod in triple blocks, modulation in single
+    # blocks — this is where Synchformer sync features are gated into each block),
+    # plus the sync-feature input projection (sync_in.0). Note: `modulation.linear`
+    # also matches the 36 single-stream blocks, so this adapts their gating even
+    # though their attention/MLP stay frozen. Use lower rank (~32) + dropout.
+    "all_attn_mlp_sync": (
+        "audio_self_attn_qkv",
+        "audio_self_proj",
+        "audio_cross_q",
+        "audio_cross_proj",
+        "text_cross_kv",
+        "v_cond_attn_qkv",
+        "v_cond_self_proj",
+        "v_cond_cross_q",
+        "v_cond_cross_proj",
+        "audio_mlp.fc1",
+        "audio_mlp.fc2",
+        "v_cond_mlp.fc1",
+        "v_cond_mlp.fc2",
+        "audio_mod.linear",
+        "v_cond_mod.linear",
+        "modulation.linear",
+        "sync_in.0",
+    ),
+    # all_attn_mlp_sync + the SINGLE-STREAM block attention (linear_qkv) — the
+    # previously-frozen back 2/3 of the network. Their MLP/proj are Conv1d-based
+    # (ChannelLastConv1d / ConvMLP) and still NOT wrapped (needs conv-LoRA).
+    # Highest coverage available without conv-LoRA. Use lower rank (~32) + dropout.
+    "all_blocks_sync": (
+        "audio_self_attn_qkv",
+        "audio_self_proj",
+        "audio_cross_q",
+        "audio_cross_proj",
+        "text_cross_kv",
+        "v_cond_attn_qkv",
+        "v_cond_self_proj",
+        "v_cond_cross_q",
+        "v_cond_cross_proj",
+        "audio_mlp.fc1",
+        "audio_mlp.fc2",
+        "v_cond_mlp.fc1",
+        "v_cond_mlp.fc2",
+        "audio_mod.linear",
+        "v_cond_mod.linear",
+        "modulation.linear",
+        "sync_in.0",
+        "linear_qkv",
+    ),
 }
 
 

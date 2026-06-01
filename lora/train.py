@@ -429,7 +429,8 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
                        spectral_weight=0.0,
                        dac_model=None, wav_spectral_weight=0.0,
                        wav_spectral_crop=64, wav_spectral_adaptive=True,
-                       compute_wav_spectral=False):
+                       compute_wav_spectral=False,
+                       cfm_lambda=0.0):
     """Compute flow matching velocity prediction loss.
 
     Args:
@@ -498,6 +499,15 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
     v_target = v_target.to(device=device, dtype=dtype)
 
     mse_unreduced = F.mse_loss(v_pred, v_target, reduction='none')
+
+    # Contrastive Flow Matching (ΔFM, arXiv:2506.05350): subtract λ × MSE to a
+    # DIFFERENT batch sample's velocity target. Pushes the predicted flow away
+    # from other samples' flows, preventing the conditional-mean collapse that
+    # over-smooths high-capacity fits. Reduces to plain FM at λ=0.
+    if cfm_lambda > 0 and B > 1:
+        idx = torch.roll(torch.arange(B, device=v_pred.device), shifts=1)  # idx[i] != i
+        mse_neg = F.mse_loss(v_pred, v_target[idx], reduction='none')
+        mse_unreduced = mse_unreduced - cfm_lambda * mse_neg
 
     if channel_weights is not None:
         mse_unreduced = channel_weights.view(1, -1, 1).to(device=device, dtype=dtype) * mse_unreduced

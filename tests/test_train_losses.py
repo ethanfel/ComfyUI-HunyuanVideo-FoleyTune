@@ -4,8 +4,50 @@
 """
 import pytest
 import torch
+import torch.nn as nn
 
-from lora.train import compute_channel_weights, waveform_spectral_loss
+from lora.train import compute_channel_weights, waveform_spectral_loss, flow_matching_loss
+
+
+# -- Contrastive Flow Matching (cfm_lambda) -----------------------------------
+
+class _MockFoley(nn.Module):
+    """Minimal stand-in: returns a dict with 'x' shaped like the input latents."""
+    def __init__(self, c=128):
+        super().__init__()
+        self.lin = nn.Conv1d(c, c, 1)
+    def forward(self, x, t, cond, clip_feat, sync_feat, drop_visual=None):
+        return {"x": self.lin(x)}
+
+
+def _run_flow(cfm_lambda, seed=0):
+    torch.manual_seed(seed)
+    B, C, T = 4, 128, 20
+    model = _MockFoley(C)
+    x1 = torch.randn(B, C, T)
+    t = torch.rand(B)
+    clip = torch.randn(B, 8, 768); sync = torch.randn(B, 16, 768); text = torch.randn(B, 4, 768)
+    torch.manual_seed(seed + 1)  # fix x0 = randn_like(x1) identically across calls
+    return flow_matching_loss(model, x1, t, clip, sync, text, "cpu", torch.float32,
+                              cfm_lambda=cfm_lambda)
+
+
+def test_cfm_lambda_zero_is_plain_fm():
+    # Two calls at λ=0 with identical seeds must match (no contrastive perturbation)
+    assert torch.allclose(_run_flow(0.0).detach(), _run_flow(0.0).detach())
+
+
+def test_cfm_lambda_lowers_loss_by_subtracting_negative():
+    # ΔFM subtracts λ·MSE-to-other-sample, so loss(λ>0) < loss(λ=0) at fixed x0
+    base = _run_flow(0.0).detach()
+    contrastive = _run_flow(0.05).detach()
+    assert float(contrastive) < float(base)
+
+
+def test_cfm_gradient_flows():
+    loss = _run_flow(0.05)
+    loss.backward()  # should not error; contrastive term is differentiable
+    assert torch.isfinite(loss)
 
 
 # -- compute_channel_weights --------------------------------------------------

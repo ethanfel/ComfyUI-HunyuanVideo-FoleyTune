@@ -885,6 +885,10 @@ class FoleyTuneLoRATrainer:
                     "default": "off",
                     "tooltip": "Per-channel MSE weighting. 'variance' up-weights high-variance LF-bulk channels (legacy). 'inverse' up-weights low-variance channels that carry HF detail — counters diffusion spectral bias. 'off' = uniform.",
                 }),
+                "cfm_lambda": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 0.5, "step": 0.01,
+                    "tooltip": "Contrastive Flow Matching (arXiv:2506.05350). Subtracts lambda x MSE to a different batch sample's velocity target, pushing predicted flows apart to prevent conditional-mean over-smoothing (the 'messy'/flat high-PBC failure mode). 0.05 recommended. 0 = plain FM.",
+                }),
                 "channel_loss_weight": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "DEPRECATED — use channel_weight_mode. When true and mode is off, applies legacy 'variance' weighting.",
@@ -956,6 +960,7 @@ class FoleyTuneLoRATrainer:
               cos_sim_weight=0.0, spectral_weight=0.0, hf_phase_switch=0.0,
               wav_spectral_weight=0.0, wav_spectral_every=8, wav_spectral_crop=64,
               wav_spectral_adaptive=True, channel_weight_mode="off",
+              cfm_lambda=0.0,
               channel_loss_weight=False,
               temporal_variance_weight=0.0,
               tv_gate_sigma=0.3, vd_curriculum_ratio=0.0,
@@ -983,7 +988,7 @@ class FoleyTuneLoRATrainer:
             noise_offset, min_snr_gamma, ema_decay,
             cos_sim_weight, spectral_weight, hf_phase_switch,
             wav_spectral_weight, wav_spectral_every, wav_spectral_crop,
-            wav_spectral_adaptive, channel_weight_mode, channel_loss_weight,
+            wav_spectral_adaptive, channel_weight_mode, cfm_lambda, channel_loss_weight,
             temporal_variance_weight, tv_gate_sigma, vd_curriculum_ratio,
             t_min, t_max, optimizer_type,
             visual_dropout_prob,
@@ -1000,7 +1005,7 @@ class FoleyTuneLoRATrainer:
                      noise_offset, min_snr_gamma, ema_decay,
                      cos_sim_weight, spectral_weight, hf_phase_switch,
                      wav_spectral_weight, wav_spectral_every, wav_spectral_crop,
-                     wav_spectral_adaptive, channel_weight_mode, channel_loss_weight,
+                     wav_spectral_adaptive, channel_weight_mode, cfm_lambda, channel_loss_weight,
                      temporal_variance_weight, tv_gate_sigma, vd_curriculum_ratio,
                      t_min, t_max, optimizer_type,
                      visual_dropout_prob,
@@ -1199,6 +1204,7 @@ class FoleyTuneLoRATrainer:
             "wav_spectral_crop": wav_spectral_crop,
             "wav_spectral_adaptive": wav_spectral_adaptive,
             "channel_weight_mode": channel_weight_mode,
+            "cfm_lambda": cfm_lambda,
             "channel_loss_weight": channel_loss_weight,
             "temporal_variance_weight": temporal_variance_weight,
             "tv_gate_sigma": tv_gate_sigma,
@@ -1352,6 +1358,7 @@ class FoleyTuneLoRATrainer:
                 wav_spectral_crop=wav_spectral_crop,
                 wav_spectral_adaptive=wav_spectral_adaptive,
                 compute_wav_spectral=_do_wav,
+                cfm_lambda=cfm_lambda,
             )
             loss = loss / grad_accum
             loss.backward()
@@ -1678,7 +1685,7 @@ class FoleyTuneLoRAScheduler:
         "noise_offset": 0.0, "min_snr_gamma": 0.0, "ema_decay": 0.0,
         "cos_sim_weight": 0.0, "spectral_weight": 0.0, "hf_phase_switch": 0.0,
         "wav_spectral_weight": 0.0, "wav_spectral_every": 8, "wav_spectral_crop": 64,
-        "wav_spectral_adaptive": True, "channel_weight_mode": "off", "channel_loss_weight": False,
+        "wav_spectral_adaptive": True, "channel_weight_mode": "off", "cfm_lambda": 0.0, "channel_loss_weight": False,
         "temporal_variance_weight": 0.0, "tv_gate_sigma": 0.3, "vd_curriculum_ratio": 0.0,
         "t_min": 0.0, "t_max": 1.0, "optimizer_type": "prodigy",
         "prodigy_d_coef": 1.0, "prodigy_growth_rate": 0.0,
@@ -2236,6 +2243,7 @@ class FoleyTuneLoRAScheduler:
                             wav_spectral_crop=_wav_crop,
                             wav_spectral_adaptive=_wav_adaptive,
                             compute_wav_spectral=_do_wav,
+                            cfm_lambda=config.get("cfm_lambda", 0.0),
                         )
                         loss = loss / config["grad_accum"]
                         loss.backward()

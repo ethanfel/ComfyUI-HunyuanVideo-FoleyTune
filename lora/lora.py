@@ -102,6 +102,34 @@ FOLEY_TARGET_PRESETS = {
         "sync_in.0",
         "linear_qkv",
     ),
+    # all_blocks_sync + the single-stream blocks' Conv1d layers (attention output
+    # proj `linear1` and the ConvMLP `linear2.w1/w2/w3`) — the bulk of the back 2/3
+    # that LoRALinear can't reach. Wrapped via LoRAConv1d. FULL single-block
+    # coverage. Use lower rank (~32) + dropout; this is the largest target set.
+    "all_blocks_conv": (
+        "audio_self_attn_qkv",
+        "audio_self_proj",
+        "audio_cross_q",
+        "audio_cross_proj",
+        "text_cross_kv",
+        "v_cond_attn_qkv",
+        "v_cond_self_proj",
+        "v_cond_cross_q",
+        "v_cond_cross_proj",
+        "audio_mlp.fc1",
+        "audio_mlp.fc2",
+        "v_cond_mlp.fc1",
+        "v_cond_mlp.fc2",
+        "audio_mod.linear",
+        "v_cond_mod.linear",
+        "modulation.linear",
+        "sync_in.0",
+        "linear_qkv",
+        "linear1",
+        "linear2.w1",
+        "linear2.w2",
+        "linear2.w3",
+    ),
 }
 
 
@@ -179,6 +207,68 @@ class LoRALinear(nn.Module):
         return base_out + lora_out * self.scaling
 
 
+class LoRAConv1d(nn.Module):
+    """Conv1d wrapper with frozen base + trainable low-rank conv adapter.
+
+    LoRA path: up(down(x)). `down` (lora_A) mirrors the base conv geometry
+    (kernel/stride/padding/dilation) so its output length matches the base, and
+    `up` (lora_B) is a 1x1 conv, zero-initialised so the wrapper is a no-op at
+    init. Handles ChannelLastConv1d ([B,T,C] I/O) as well as plain nn.Conv1d
+    ([B,C,T]). Params are named lora_A / lora_B (conv kernels) so they round-trip
+    through the same get_lora_state_dict / load_lora path as LoRALinear.
+
+    Used to adapt the single-stream blocks' ConvMLP/output-proj layers, which are
+    Conv1d-based and thus invisible to LoRALinear.
+    """
+
+    def __init__(
+        self,
+        base: nn.Conv1d,
+        rank: int,
+        alpha: float,
+        dropout: float = 0.0,
+        init_mode: str = "standard",  # accepted for API parity; conv uses standard init
+        use_rslora: bool = False,
+    ):
+        super().__init__()
+        self.base = base
+        self.rank = rank
+        self.alpha = alpha
+        self.channel_last = "ChannelLast" in type(base).__name__
+        self.stride = base.stride
+        self.padding = base.padding
+        self.dilation = base.dilation
+
+        self.scaling = alpha / math.sqrt(rank) if use_rslora else alpha / rank
+        self.lora_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+        c_in, c_out = base.in_channels, base.out_channels
+        k = base.kernel_size[0] if isinstance(base.kernel_size, tuple) else base.kernel_size
+        param_dtype = base.weight.dtype
+        if param_dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            param_dtype = torch.bfloat16
+        dev = base.weight.device
+
+        # lora_A = down kernel [r, c_in, k] (mirrors base geometry); lora_B = up 1x1 [c_out, r, 1]
+        self.lora_A = nn.Parameter(torch.empty(rank, c_in, k, device=dev, dtype=param_dtype))
+        self.lora_B = nn.Parameter(torch.empty(c_out, rank, 1, device=dev, dtype=param_dtype))
+
+        for p in self.base.parameters():
+            p.requires_grad = False
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+
+    def forward(self, x):
+        base_out = self.base(x)
+        z = x.permute(0, 2, 1) if self.channel_last else x
+        z = self.lora_dropout(z)
+        z = F.conv1d(z, self.lora_A, stride=self.stride, padding=self.padding, dilation=self.dilation)
+        z = F.conv1d(z, self.lora_B)  # 1x1 up-projection
+        if self.channel_last:
+            z = z.permute(0, 2, 1)
+        return base_out + z * self.scaling
+
+
 # ── Model-level operations ──────────────────────────────────────────────────
 
 def apply_lora(
@@ -214,7 +304,9 @@ def apply_lora(
             hasattr(module, 'kind') and getattr(module, 'kind', None) == 'linear'
             and hasattr(module, 'weight')
         )
-        if not is_linear:
+        # Conv1d (incl. ChannelLastConv1d subclass) — single-stream ConvMLP/proj layers
+        is_conv = isinstance(module, nn.Conv1d)
+        if not (is_linear or is_conv):
             continue
         if not any(name.endswith(suffix) for suffix in target_suffixes):
             continue
@@ -228,10 +320,16 @@ def apply_lora(
             parent = model
             attr_name = parts[0]
 
-        lora_layer = LoRALinear(
-            module, rank=rank, alpha=alpha,
-            dropout=dropout, init_mode=init_mode, use_rslora=use_rslora,
-        )
+        if is_conv:
+            lora_layer = LoRAConv1d(
+                module, rank=rank, alpha=alpha,
+                dropout=dropout, init_mode=init_mode, use_rslora=use_rslora,
+            )
+        else:
+            lora_layer = LoRALinear(
+                module, rank=rank, alpha=alpha,
+                dropout=dropout, init_mode=init_mode, use_rslora=use_rslora,
+            )
         setattr(parent, attr_name, lora_layer)
         n_wrapped += 1
 
@@ -336,8 +434,14 @@ def merge_lora_into_weights(
         else:
             continue
 
-        A = pair["A"].float()  # [rank, in]
-        B = pair["B"].float()  # [out, rank]
+        A = pair["A"].float()  # [rank, in]  (Linear)  or  [rank, in, k]  (Conv1d)
+        B = pair["B"].float()  # [out, rank]            or  [out, rank, 1]
+        if A.ndim == 3 or B.ndim == 3:
+            # Conv1d LoRA — weight-space merge of a kernel-mixing adapter is not a
+            # simple B@A; skip rather than corrupt. (Stacking conv-LoRA is unsupported;
+            # load it as the sole adapter via the wrap path instead.)
+            logger.warning(f"merge_lora: skipping conv LoRA layer {module_name} (stacking conv-LoRA unsupported)")
+            continue
         delta = (B @ A) * scaling * strength
         weight.data += delta.to(weight.dtype)
         n_merged += 1

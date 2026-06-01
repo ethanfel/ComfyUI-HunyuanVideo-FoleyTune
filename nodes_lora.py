@@ -1690,6 +1690,7 @@ class FoleyTuneLoRAScheduler:
         "t_min": 0.0, "t_max": 1.0, "optimizer_type": "prodigy",
         "prodigy_d_coef": 1.0, "prodigy_growth_rate": 0.0,
         "prodigy_safeguard_warmup": True,
+        "prodigy_steps": 0, "use_cautious": False, "schedulefree_c": 0, "use_orthograd": False,
         "visual_dropout_prob": 0.5,
         "gradient_checkpointing": False,
         "freeze_blocks": 0,
@@ -1999,10 +2000,16 @@ class FoleyTuneLoRAScheduler:
                         for pg in param_groups:
                             pg.pop("lr", None)
                         _d_coef = config.get("prodigy_d_coef", 1.0)
+                        _pp_steps = int(config.get("prodigy_steps", 0))      # 0 = adapt d forever; >0 freezes LR after N steps
+                        _pp_caut = bool(config.get("use_cautious", False))   # cautious updates (sign-aligned only)
+                        _pp_sfc = float(config.get("schedulefree_c", 0))     # schedule-free averaging constant (0 = default)
+                        _pp_ortho = bool(config.get("use_orthograd", False)) # orthogonal-gradient regularization
                         optimizer = ProdigyPlusScheduleFree(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
-                                                           d_coef=_d_coef)
+                                                           d_coef=_d_coef, prodigy_steps=_pp_steps,
+                                                           use_cautious=_pp_caut, schedulefree_c=_pp_sfc,
+                                                           use_orthograd=_pp_ortho)
                         optimizer.train()
-                        logger.info(f"[{exp_id}] Using Prodigy+ Schedule-Free (d_coef={_d_coef}, wd=0.01)")
+                        logger.info(f"[{exp_id}] Using Prodigy+ Schedule-Free (d_coef={_d_coef}, prodigy_steps={_pp_steps}, cautious={_pp_caut}, sf_c={_pp_sfc}, orthograd={_pp_ortho}, wd=0.01)")
                     else:
                         optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
 

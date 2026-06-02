@@ -165,28 +165,23 @@ class FoleyTuneVideoFileManager:
     """Rename / delete the video selected on a connected FoleyTune Video Loader (Upload).
 
     Wire this node's ``file_manager`` output into the loader's optional ``file_manager``
-    input. The rename field + button and the delete button (added in JS) then act on the
+    input. The rename field (an autocomplete input suggesting existing file names) + button
+    and the delete button are added in JS (``web/js/FoleyTuneVideo.js``) and act on the
     loader's currently selected ``video``, calling the server routes in this module.
     The node itself is a no-op at graph-execution time.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "new_name": ("STRING", {"default": "",
-                             "placeholder": "new name (extension kept automatically)",
-                             "tooltip": "Type a new base name, then click 'rename file'. "
-                                        "The original extension is preserved."}),
-            },
-        }
+        # The rename field and buttons are JS-only DOM widgets; no server-side inputs.
+        return {"required": {}}
 
     RETURN_TYPES = ("FOLEYTUNE_FILEMGR",)
     RETURN_NAMES = ("file_manager",)
     FUNCTION = "noop"
     CATEGORY = "FoleyTune"
 
-    def noop(self, new_name=""):
+    def noop(self):
         return (None,)
 
 

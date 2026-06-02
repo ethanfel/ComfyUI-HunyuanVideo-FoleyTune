@@ -3,6 +3,9 @@ import { api } from "../../../scripts/api.js";
 
 const VIDEO_EXTENSIONS = ["webm", "mp4", "mkv", "gif", "mov", "avi"];
 
+// Unique datalist id per file-manager node instance (node.id is unstable at creation).
+let _ftRenameSeq = 0;
+
 function fitHeight(node) {
     node.setSize([node.size[0], node.computeSize([node.size[0], node.size[1]])[1]]);
     node?.graph?.setDirtyCanvas(true);
@@ -192,6 +195,55 @@ function addFileManagerWidgets(nodeType) {
             widget.callback?.(widget.value);
         }
 
+        // Rename field: an <input> with a <datalist> that suggests existing file base
+        // names (extension stripped) from the connected loader, filtered by prefix.
+        const listId = `ft-rename-list-${_ftRenameSeq++}`;
+        const wrap = document.createElement("div");
+        wrap.style.width = "100%";
+        const input = document.createElement("input");
+        input.type = "text";
+        input.placeholder = "new name (extension kept automatically)";
+        input.autocomplete = "off";
+        input.setAttribute("list", listId);
+        input.style.cssText =
+            "width:100%;box-sizing:border-box;background:#222;color:#ddd;" +
+            "border:1px solid #444;border-radius:4px;padding:2px 6px;font-size:12px;";
+        const datalist = document.createElement("datalist");
+        datalist.id = listId;
+        wrap.appendChild(input);
+        wrap.appendChild(datalist);
+        node._ftRenameInput = input;
+
+        function refreshSuggestions() {
+            const loader = getLoader();
+            const typed = input.value.trim().toLowerCase();
+            datalist.innerHTML = "";
+            if (!loader) return;
+            const bases = new Set();
+            for (const v of (loader.widget.options?.values || [])) {
+                const base = v.replace(/\s*\[[^\]]*\]$/, "").replace(/\.[^.]+$/, "");
+                if (base) bases.add(base);
+            }
+            for (const base of [...bases].sort()) {
+                if (!typed || base.toLowerCase().startsWith(typed)) {
+                    const opt = document.createElement("option");
+                    opt.value = base;
+                    datalist.appendChild(opt);
+                }
+            }
+        }
+        input.addEventListener("focus", refreshSuggestions);
+        input.addEventListener("input", refreshSuggestions);
+
+        const renameWidget = node.addDOMWidget("new_name", "text", wrap, {
+            serialize: false,
+            hideOnZoom: false,
+            getValue() { return input.value; },
+            setValue(v) { input.value = v ?? ""; },
+        });
+        renameWidget.computeSize = function (width) { return [width, 30]; };
+        requestAnimationFrame(() => fitHeight(node));
+
         const renameBtn = node.addWidget("button", "rename file", null, async () => {
             const loader = getLoader();
             if (!loader) {
@@ -200,7 +252,7 @@ function addFileManagerWidgets(nodeType) {
             }
             const oldName = loader.widget.value;
             if (!oldName) { alert("No video is selected on the loader."); return; }
-            const newName = (node.widgets.find((w) => w.name === "new_name")?.value || "").trim();
+            const newName = (node._ftRenameInput?.value || "").trim();
             if (!newName) { alert("Type a new name first."); return; }
 
             let resp;
@@ -226,6 +278,7 @@ function addFileManagerWidgets(nodeType) {
             loader.widget.value = finalName;
             loader.widget.callback?.(finalName);
             loader.node.setDirtyCanvas(true, true);
+            if (node._ftRenameInput) node._ftRenameInput.value = "";
         });
         renameBtn.serialize = false;
 

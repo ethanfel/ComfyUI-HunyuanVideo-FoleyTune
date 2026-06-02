@@ -1879,3 +1879,77 @@ Production checkpoints (each → FoleyTuneBWE cfg3.0/input_sr16000):
 90. **Don't combine timestep-clipping + waveform loss** — flat@0.05 is sync-harmless but adds no brightness; the combo (clipflat_wav005) is perceptually inferior
 91. **HF is recovered post-hoc, not in training** — UniverSR BWE at input_sr=16000/cfg3.0 is the fix; train for sync, brighten afterward (FoleyTuneBWE node)
 92. **Production pipeline** — tmin005_tmax095@13k (or wav01_flat@16k, equal) + UniverSR BWE. Both beat the plain baseline; the tmin model's only weakness (muffling) is exactly what BWE fixes
+
+### Breaking the Sync Plateau — Expanded LoRA Targets & the Optimizer Journey (June 2026)
+
+A deep-research wave + many sweeps (7–15) on the front-facing set produced a genuinely better base than the tmin recipe above — and a clear methodology. **Net result: `all_blocks_sync` + Prodigy+ (schedule-free) + early checkpoint → BWE beats `tmin@13k + BWE` on BOTH sync and HF.**
+
+#### Diagnosis: the LoRA was training only 1/3 of the network
+
+Verified from the trained-weight keys: the `all_attn_mlp` preset only matched the **18 TwoStreamCABlocks** (234 layers). **All 36 SingleStreamBlocks, `sync_in`, and the `ModulateDiT` adaLN layers were frozen** — i.e. only **18 of 54 blocks**, and the entire **sync-injection path** (sync_in + per-block modulation, where Synchformer features gate in) plus the **back-2/3 refinement stack** never adapted. This is the root cause of the PBC ~0.65 plateau: a better loss can't help layers that aren't trainable. (MMAudio's ablation independently shows sync is governed by conditioning *injection*, ~10× more than by the objective.)
+
+#### Expanded-target presets (broke the plateau)
+
+New presets in `lora/lora.py` (+ `LoRAConv1d` for the Conv1d-based single-block MLPs):
+- `all_attn_mlp_sync` — adds `audio_mod.linear`/`v_cond_mod.linear`/`modulation.linear` + `sync_in.0` (the injection path)
+- `all_blocks_sync` — + single-block `linear_qkv` (back-2/3 attention)
+- `all_blocks_conv` — + single-block `linear1`/`linear2.w{1,2,3}` ConvMLPs (full single-block coverage)
+
+sweep8 (clean r64 test vs the 0.652 baseline): **`sync_r64` 0.680, `blocks_r64` 0.675, `blocks_r32_drop` 0.705** — all beat baseline. Most of the gain is the **sync-injection path alone** (sync-only ≈ full). Two further findings: expanded targets **want lower rank** (r32+dropout > r64 — reverses the original-targets result; more breadth wants less depth); and training the back 2/3 **renders cleaner at any given sync level** (PBC 0.45 sounds clean with expanded targets where it didn't with limited targets — cleanliness is a separate axis from PBC, owned by the refinement stack).
+
+#### The metric/ear divergence (the throughline)
+
+- **PBC↔misalignment:** self-PBC of GT vs time-shifted-GT maps 0.90@10ms → 0.70@40ms; our 0.65 ≈ ~50ms. Real headroom — but **PBC Goodharts past ~0.66**: pushing it further over-smooths into "messy." **Select the EARLY checkpoint, not peak PBC.**
+- **TV (`temporal_variance` ≈ GT 1.29)** is the dynamics/quality signal; over-smoothing = TV collapse (conditional-mean prediction).
+- **MCD rising = the overtraining/timbre-drift tell.**
+- **The ear overruled the metrics ~5× this session** — PBC/TV/MCD all point past the perceptual peak. Every real decision came from listening; trust the ear, use metrics as coarse guides.
+
+#### Add-ons that washed out (don't re-pursue)
+
+- **Contrastive Flow Matching (`cfm_lambda`, ΔFM, arXiv:2506.05350):** a wash vs plain FM at fixed LR. The sweep9 "great @3k" was early-checkpoint + fast convergence (amplified by a Prodigy LR runaway), not the contrastive term. Also discovered: **Prodigy's monotonic `d` RUNS AWAY under ΔFM's no-floor contrastive loss** (LR climbed 5→7.3e-4) — use fixed-LR AdamW for ΔFM.
+- **conv-LoRA (`all_blocks_conv`):** adapting the single-block ConvMLPs gave *worse* MCD (timbre drift); base better by ear. More capacity ≠ better.
+
+#### The optimizer journey → Prodigy+
+
+The over-smoothing is an **overtraining** effect (TV collapses the longer you train), so what matters is reaching the high-TV sweet spot *before* it sets in:
+- **Prodigy (constant):** ramps LR slowly → reaches good PBC only ~8–10k, by which point TV has already collapsed. Late sweet spot, low TV.
+- **AdamW fixed-LR 5e-4:** converges fast → catches the high-TV sweet spot **early (~2.5k)**. Usable band ~2.5–4k, cut when MCD rises. A real step up.
+- **Prodigy+ (schedule-free) — the winner.** Resurrected from a prior "kills sync" strike (`feedback_pp_sync`). On expanded targets + early checkpoints it: **auto-tunes LR to a stable ~7.25e-4 (no tuning)**, holds **GT-level TV**, climbs PBC, low MCD; window ~3–3.5k. **A/B: PP base beats old `tmin@13k` on BOTH sync and HF (brighter natively → smaller BWE lift).**
+- **PP mechanism:** schedule-free = weight averaging → **stabilizes early** (clean high-TV window) but **over-smooths late** (averaging accumulates → metrics↑ / perceptual↓). This IS the original "PP over-optimizes fidelity" finding, just delayed by the new regime. **Grab it early (~3–3.5k); the late metrics lie.**
+
+#### PP knob tuning — flavors, not ceiling
+
+Exposed in the sweep runner: `prodigy_steps`, `use_cautious`, `schedulefree_c`, `use_orthograd`.
+- **`use_cautious`:** same ceiling ~1k steps earlier (cautious@2.5k ≈ plain@3.5k), brighter — faster-not-better.
+- **`schedulefree_c`** (averaging-window dial, Refined SF-Adam arXiv:2507.09846): produced **flavors, not a ceiling move** — `c=20` @3–4k = warmer + great sync (equal-but-different); `sfc5` topped TV/MCD metrics but the ear rejected it (predicted "higher c widens window" did NOT hold). `c=20+cautious` worse.
+- **`prodigy_steps`/`use_orthograd`:** change LR/update dynamics, not the averaging → null on the ceiling.
+- **Conclusion: PP optimizer-tuning is tapped out.** Knobs color the output; the ceiling is found.
+
+#### Production recipe & candidate stable
+
+```
+target: all_blocks_sync            # train the whole net + sync-injection path
+rank 32, alpha 32, lora_dropout 0.05
+optimizer: prodigy_plus (schedule-free, d_coef 1) — auto-LR ~7.25e-4, NO tuning
+schedule: constant, warmup 200, vd 0, noise_offset 0.03, logit_normal_sigma 0.8
+steps ~5000, save_every 500 — PICK ~3-3.5k BY EAR (later over-smooths via averaging)
+→ FoleyTuneBWE (cfg 3.0, input_sr 16000) for brightness
+```
+**Flavor stable (equal quality, different character; all → BWE):** `pp_cautious`@2.5–3.5k (brighter), `pp_sfc20`@3–4k (warmer), `pp_d1`@3.5k (neutral). Exported to `/media/unraid/loras/Foley/`.
+
+**Remaining untapped frontier = inference-side** (best-of-N seed re-ranking, CFG/steps/sampler tuning). Training side is tapped: loss (washed out), optimizer (ceiling found), data (hand-curated), HF (BWE-solved).
+
+#### Findings
+
+93. **LoRA was training only 18/54 blocks** — `all_attn_mlp` froze all 36 single-stream blocks + `sync_in` + modulation (the sync-injection path). Root cause of the PBC plateau; verified from trained-weight keys
+94. **Expanded targets (`all_blocks_sync`) broke the plateau** (PBC→0.70) AND render cleaner at any sync level (back-2/3 refinement). Most of the sync gain is the injection path (modulation+sync_in) alone
+95. **Expanded targets want LOWER rank** — r32+dropout > r64 (reverses the original-targets finding; more breadth → less depth)
+96. **PBC Goodharts past ~0.66** — pushing it over-smooths ("messy"). Select EARLY; TV≈GT + low MCD are the real signals; the ear beats all metrics (overruled ~5×)
+97. **ΔFM is a wash at fixed LR; Prodigy `d` runs away under it (no-floor loss) → use fixed LR for ΔFM. conv-LoRA washed out (worse timbre). More capacity ≠ better**
+98. **Optimizer matters via convergence TIMING vs the over-smoothing** — Prodigy ramps too slow (good PBC only after TV collapses); AdamW-fixed-LR catches the early high-TV sweet spot
+99. **Prodigy+ (schedule-free) is the best base on expanded targets** — auto-LR ~7.25e-4 (no tuning), holds GT-level TV, window ~3-3.5k. Overturns the old "PP kills sync" (that was late checkpoints + limited targets)
+100. **PP mechanism: schedule-free averaging stabilizes early / over-smooths late** (metric↑/perceptual↓) — grab early; late metrics lie
+101. **PP base + BWE beats old tmin@13k + BWE on BOTH sync and HF** (brighter natively → smaller BWE lift). New production approach
+102. **PP knob tuning = flavors, not ceiling** — cautious (faster/brighter), schedulefree_c=20 (warmer), equal-but-different; prodigy_steps/orthograd/sfc5 null-or-worse
+103. **Training side is tapped** (loss, optimizer, curated data, HF-via-BWE). Remaining quality frontier = inference-side (best-of-N, CFG/sampler)
+104. **Recipe of record:** `all_blocks_sync` + Prodigy+ (d_coef 1, auto-LR) + r32/dropout 0.05, ~5k, pick ~3-3.5k by ear → BWE. Flavor stable: cautious (bright), sfc20 (warm), plain (neutral)

@@ -1284,6 +1284,9 @@ class FoleyTuneVideoLoaderUpload:
                 "start_time": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 0.1}),
                 "duration": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 0.1,
                              "tooltip": "Duration in seconds (0 = full video)"}),
+                "file_manager": ("FOLEYTUNE_FILEMGR", {
+                    "tooltip": "Optional: connect a FoleyTune Video File Manager to rename "
+                               "or delete the selected video on disk."}),
             },
         }
 
@@ -1293,7 +1296,7 @@ class FoleyTuneVideoLoaderUpload:
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
-    def load_video(self, hunyuan_deps, video, start_time=0.0, duration=0.0):
+    def load_video(self, hunyuan_deps, video, start_time=0.0, duration=0.0, file_manager=None):
         video_path = folder_paths.get_annotated_filepath(video)
         features = _extract_video_features(video_path, hunyuan_deps, start_time, duration)
 

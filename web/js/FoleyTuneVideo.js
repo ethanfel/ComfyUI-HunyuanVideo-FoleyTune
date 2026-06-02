@@ -153,6 +153,102 @@ function addUploadWidget(nodeType) {
     };
 }
 
+function addFileManagerWidgets(nodeType) {
+    const onNodeCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+        onNodeCreated?.apply(this, arguments);
+
+        const node = this;
+
+        // Find the FoleyTuneVideoLoaderUpload this node feeds, plus its `video` widget.
+        function getLoader() {
+            const out = node.outputs?.[0];
+            if (!out?.links?.length) return null;
+            for (const linkId of out.links) {
+                const link = node.graph?.links?.[linkId];
+                if (!link) continue;
+                const target = node.graph.getNodeById(link.target_id);
+                const widget = target?.widgets?.find((w) => w.name === "video");
+                if (widget) return { node: target, widget };
+            }
+            return null;
+        }
+
+        function selectAfterRemoval(widget, removed) {
+            const values = widget.options?.values || [];
+            const idx = values.indexOf(removed);
+            if (idx >= 0) values.splice(idx, 1);
+            widget.value = values[0] || "";
+            widget.callback?.(widget.value);
+        }
+
+        const renameBtn = node.addWidget("button", "rename file", null, async () => {
+            const loader = getLoader();
+            if (!loader) {
+                alert("Connect this node's output to a FoleyTune Video Loader (Upload) input.");
+                return;
+            }
+            const oldName = loader.widget.value;
+            if (!oldName) { alert("No video is selected on the loader."); return; }
+            const newName = (node.widgets.find((w) => w.name === "new_name")?.value || "").trim();
+            if (!newName) { alert("Type a new name first."); return; }
+
+            let resp;
+            try {
+                resp = await api.fetchApi("/foleytune/rename_input", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name: oldName, new_name: newName }),
+                });
+            } catch (e) {
+                alert("Rename request failed: " + e);
+                return;
+            }
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) { alert("Rename failed: " + (data.error || resp.status)); return; }
+
+            const finalName = data.name;
+            const values = loader.widget.options?.values || [];
+            const idx = values.indexOf(oldName);
+            if (idx >= 0) values[idx] = finalName;
+            else if (!values.includes(finalName)) values.push(finalName);
+            loader.widget.value = finalName;
+            loader.widget.callback?.(finalName);
+            loader.node.setDirtyCanvas(true, true);
+        });
+        renameBtn.serialize = false;
+
+        const deleteBtn = node.addWidget("button", "delete file", null, async () => {
+            const loader = getLoader();
+            if (!loader) {
+                alert("Connect this node's output to a FoleyTune Video Loader (Upload) input.");
+                return;
+            }
+            const name = loader.widget.value;
+            if (!name) { alert("No video is selected on the loader."); return; }
+            if (!confirm(`Delete "${name}"?\nIt will be moved to the trash (recoverable).`)) return;
+
+            let resp;
+            try {
+                resp = await api.fetchApi("/foleytune/delete_input", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ name }),
+                });
+            } catch (e) {
+                alert("Delete request failed: " + e);
+                return;
+            }
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) { alert("Delete failed: " + (data.error || resp.status)); return; }
+
+            selectAfterRemoval(loader.widget, name);
+            loader.node.setDirtyCanvas(true, true);
+        });
+        deleteBtn.serialize = false;
+    };
+}
+
 app.registerExtension({
     name: "FoleyTune.VideoNodes",
     async beforeRegisterNodeDef(nodeType, nodeData) {
@@ -165,6 +261,9 @@ app.registerExtension({
         }
         if (nodeData?.name === "FoleyTuneVideoCombiner") {
             addVideoPreview(nodeType);
+        }
+        if (nodeData?.name === "FoleyTuneVideoFileManager") {
+            addFileManagerWidgets(nodeType);
         }
     },
 });

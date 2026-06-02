@@ -8,6 +8,14 @@ function fitHeight(node) {
     node?.graph?.setDirtyCanvas(true);
 }
 
+// Keep a video combo's values in the same A->Z order the Python loader produces
+// with sorted(os.listdir(...)), so the live list matches the post-refresh list.
+// Plain Array.sort() compares by UTF-16 code unit, matching Python's sorted() for
+// ASCII filenames (uppercase before lowercase) — do NOT use localeCompare here.
+function sortFileWidget(widget) {
+    widget?.options?.values?.sort();
+}
+
 function addVideoPreview(nodeType) {
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
@@ -100,6 +108,7 @@ function addUploadWidget(nodeType) {
                 if (!pathWidget.options.values.includes(data.name)) {
                     pathWidget.options.values.push(data.name);
                 }
+                sortFileWidget(pathWidget);
                 pathWidget.value = data.name;
                 pathWidget.callback?.(data.name);
             }
@@ -125,6 +134,7 @@ function addUploadWidget(nodeType) {
                 if (!pathWidget.options.values.includes(data.name)) {
                     pathWidget.options.values.push(data.name);
                 }
+                sortFileWidget(pathWidget);
                 pathWidget.value = data.name;
                 pathWidget.callback?.(data.name);
             }
@@ -212,6 +222,7 @@ function addFileManagerWidgets(nodeType) {
             const idx = values.indexOf(oldName);
             if (idx >= 0) values[idx] = finalName;
             else if (!values.includes(finalName)) values.push(finalName);
+            sortFileWidget(loader.widget);
             loader.widget.value = finalName;
             loader.widget.callback?.(finalName);
             loader.node.setDirtyCanvas(true, true);

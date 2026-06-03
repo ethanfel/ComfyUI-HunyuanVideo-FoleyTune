@@ -342,16 +342,26 @@ class FoleyTuneDependenciesLoader:
             "required": {
                 "vae_name": (get_foley_models(lambda f: "vae" in f),),
                 "synchformer_name": (get_foley_models(lambda f: "synch" in f),),
-                }
+                },
+            "optional": {
+                "encoder_precision": (["fp16", "fp32"], {"default": "fp16",
+                    "tooltip": "Storage dtype for the SigLIP2 / CLAP / Synchformer feature encoders "
+                               "(NOT the DAC VAE, which stays fp32). fp16 ~halves their resident CPU/VRAM "
+                               "footprint with negligible effect on the conditioning features. "
+                               "Use fp32 only to reproduce older feature caches exactly."}),
+                },
             }
 
     RETURN_TYPES = ("FOLEYTUNE_DEPS",)
     FUNCTION = "load_dependencies"
     CATEGORY = "FoleyTune"
 
-    def load_dependencies(self, vae_name, synchformer_name):
+    def load_dependencies(self, vae_name, synchformer_name, encoder_precision="fp16"):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+        # Half-precision storage for the visual/text encoders. The DAC VAE is kept fp32
+        # (quality-critical and explicitly cast to fp32 at decode time), so it is excluded.
+        enc_dtype = torch.float16 if encoder_precision == "fp16" else torch.float32
         deps = {}
 
         # Load local model files (VAE, Synchformer) — auto-download if missing
@@ -359,7 +369,10 @@ class FoleyTuneDependenciesLoader:
         synchformer_sd = load_torch_file(ensure_model_downloaded(synchformer_name), device=offload_device)
         syncformer_model = Synchformer()
         syncformer_model.load_state_dict(synchformer_sd, strict=False)
-        deps['syncformer_model'] = syncformer_model.to(offload_device).eval()
+        # Synchformer is shipped in fp16 and always runs under autocast(fp16); keeping it
+        # fp32 just upcasts the weights and doubles its resident footprint for no benefit.
+        deps['syncformer_model'] = syncformer_model.to(device=offload_device, dtype=enc_dtype).eval()
+        del synchformer_sd
 
         # Define pure tensor-based v2 preprocessing pipelines
         # SigLIP2 pipeline: The input is a (C,H,W) uint8 tensor.
@@ -377,10 +390,11 @@ class FoleyTuneDependenciesLoader:
             v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ])
 
-        # Load models from Hugging Face
-        deps['siglip2_model'] = AutoModel.from_pretrained("google/siglip2-base-patch16-512", low_cpu_mem_usage=True).to(offload_device).eval()
+        # Load models from Hugging Face (in enc_dtype to halve resident memory).
+        # low_cpu_mem_usage + torch_dtype loads directly at the target precision (no fp32 spike).
+        deps['siglip2_model'] = AutoModel.from_pretrained("google/siglip2-base-patch16-512", low_cpu_mem_usage=True, torch_dtype=enc_dtype).to(offload_device).eval()
         deps['clap_tokenizer'] = AutoTokenizer.from_pretrained("laion/larger_clap_general")
-        deps['clap_model'] = ClapTextModelWithProjection.from_pretrained("laion/larger_clap_general", low_cpu_mem_usage=True).to(offload_device).eval()
+        deps['clap_model'] = ClapTextModelWithProjection.from_pretrained("laion/larger_clap_general", low_cpu_mem_usage=True, torch_dtype=enc_dtype).to(offload_device).eval()
 
         deps['device'] = device
 

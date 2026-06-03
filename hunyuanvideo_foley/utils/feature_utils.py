@@ -65,6 +65,9 @@ def encode_video_with_siglip2(x: torch.Tensor, model_dict, batch_size: int = -1)
     b, t, c, h, w = x.shape
     if batch_size < 0:
         batch_size = b * t
+    # Match the encoder's storage dtype (it may be fp16) so pixel_values don't
+    # trip a dtype mismatch when the model is loaded in half precision.
+    x = x.to(dtype=next(model_dict.siglip2_model.parameters()).dtype)
     x = rearrange(x, "b t c h w -> (b t) c h w")
     outputs = []
     for i in range(0, b * t, batch_size):

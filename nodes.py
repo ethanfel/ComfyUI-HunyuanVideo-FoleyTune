@@ -1389,8 +1389,22 @@ class FoleyTuneVideoCombiner:
         output_filename = f"{filename}_{counter:05}{src_ext}"
         output_path = os.path.join(full_output_folder, output_filename)
 
-        waveform = audio["waveform"][0].cpu().numpy()
+        waveform = audio["waveform"][0].cpu().numpy()  # [C, T]
         sample_rate = audio["sample_rate"]
+
+        # The latent grid (audio_frame_rate=50) can't represent arbitrary durations
+        # exactly: int(duration * 50) floors, so generated audio is up to ~20ms shorter
+        # than the source video. With "-c:v copy -shortest", even a few-ms shortfall makes
+        # ffmpeg truncate the copied video to the previous frame/GOP boundary — dropping
+        # whole frames (e.g. 5.06s clip -> 4.81s). Pad the audio with trailing silence up
+        # to the source video duration so the muxed video keeps its full length.
+        try:
+            src_samples = int(round(_ffprobe_video_info(source_video)["duration"] * sample_rate))
+            if waveform.shape[1] < src_samples:
+                pad = np.zeros((waveform.shape[0], src_samples - waveform.shape[1]), dtype=waveform.dtype)
+                waveform = np.concatenate([waveform, pad], axis=1)
+        except Exception as e:
+            logger.warning(f"Could not pad audio to video duration ({e}); muxing as-is.")
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_wav = tmp.name

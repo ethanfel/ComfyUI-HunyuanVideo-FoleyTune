@@ -27,6 +27,10 @@ function addVideoPreview(nodeType) {
         const node = this;
         const container = document.createElement("div");
         container.style.width = "100%";
+        // Stay collapsed until a video's metadata actually loads. Otherwise an
+        // empty <video controls> element renders its ~150px intrinsic size as a
+        // black placeholder box (e.g. a combiner that hasn't been executed yet).
+        container.hidden = true;
 
         const videoEl = document.createElement("video");
         videoEl.controls = true;
@@ -49,15 +53,33 @@ function addVideoPreview(nodeType) {
 
         previewWidget.computeSize = function (width) {
             if (this.aspectRatio && !container.hidden) {
-                const height = (node.size[0] - 20) / this.aspectRatio + 10;
-                return [width, Math.max(height, 0)];
+                let height = (node.size[0] - 20) / this.aspectRatio + 10;
+                if (!(height > 0)) height = 0;
+                // The DOM-widget layer sizes the <video> element to
+                // (computedHeight - 2*margin). With the default 10px margin,
+                // computedHeight = height + 10 makes the element exactly
+                // (node.size[0]-20)/aspectRatio tall — the video's intrinsic
+                // height — so it neither overflows the node nor leaves a gap.
+                // It must be set here, not just returned: the frontend reads
+                // widget.computedHeight directly (defaulting to 50 -> a ~30px
+                // box) when no layout pass has refreshed it.
+                this.computedHeight = height + 10;
+                return [width, height];
             }
+            // No video / hidden: collapse the DOM-widget box completely. The
+            // element height is (computedHeight - 2*margin); setting it to
+            // 2*margin yields a 0px box so no empty black player is shown.
+            this.computedHeight = 2 * (this.margin ?? 10);
             return [width, -4];
         };
 
         videoEl.addEventListener("loadedmetadata", () => {
-            previewWidget.aspectRatio = videoEl.videoWidth / videoEl.videoHeight;
-            container.hidden = false;
+            const aspectRatio = videoEl.videoWidth / videoEl.videoHeight;
+            previewWidget.aspectRatio = aspectRatio;
+            // Only reveal when there's an actual video track to show; a file
+            // with no video dimensions gives a NaN/0 ratio and would otherwise
+            // un-hide an empty 0-height box.
+            container.hidden = !(aspectRatio > 0);
             fitHeight(node);
         });
 

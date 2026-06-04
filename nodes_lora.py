@@ -1567,6 +1567,12 @@ class FoleyTuneLoRALoaderPath:
 
     @staticmethod
     def _load(hunyuan_model, adapter_path, strength):
+        # Each LoRA switch builds a fresh deepcopy of the base model. Once ComfyUI has
+        # released the previously-built copy, reclaim its memory before allocating the new
+        # one so alternating adapters doesn't let stale copies / reserved VRAM pile up.
+        gc.collect()
+        mm.soft_empty_cache()
+
         ckpt = _load_adapter_checkpoint(adapter_path)
 
         # Handle both raw state_dict and wrapped checkpoint formats
@@ -1641,6 +1647,14 @@ class FoleyTuneLoRALoaderPath:
             logger.info(f"Loaded LoRA adapter: {n_wrapped} layers, rank={rank}, strength={strength}")
 
         prompts = "\n".join(meta.get("prompts", []))
+
+        # Keep the freshly built adapter model on the offload device at rest; the sampler
+        # moves it to GPU only when needed. Drop the adapter state dict and return any free
+        # cached VRAM blocks so switching adapters doesn't accumulate in CPU/VRAM.
+        model.to(mm.unet_offload_device())
+        del ckpt, state_dict
+        gc.collect()
+        mm.soft_empty_cache()
         return (model, prompts)
 
 

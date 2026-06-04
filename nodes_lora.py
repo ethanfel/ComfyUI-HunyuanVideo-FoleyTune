@@ -2759,12 +2759,108 @@ class FoleyTuneCheckpointFinalizer:
         return (out_path,)
 
 
+class FoleyTuneAudioRefTrainer:
+    """Train a reference-audio projection adapter (B2) on a FROZEN FoleyTune model.
+
+    Learns to turn a reference clip's CLAP audio embedding into a calibrated conditioning
+    token, so reference influence becomes semantically precise (vs. the training-free
+    zero-pad bridge). Each training reference is a centroid of multiple same-performer clips,
+    with a two-stage anti-copy-paste curriculum. Output: a .pt projector loaded by
+    FoleyTuneAudioRefProjectorLoader and fed to FoleyTuneChunkedSampler.reference_projector.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "hunyuan_model": ("FOLEYTUNE_MODEL",),
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
+                "data_dir": ("STRING", {"default": ""}),
+                "output_dir": ("STRING", {"default": ""}),
+                "steps": ("INT", {"default": 3000, "min": 100, "max": 50000}),
+                "lr": ("FLOAT", {"default": 1e-4, "min": 1e-6, "max": 1e-2, "step": 1e-5}),
+                "grad_accum": ("INT", {"default": 4, "min": 1, "max": 64}),
+                "k_tokens": ("INT", {"default": 1, "min": 1, "max": 8,
+                             "tooltip": "Number of conditioning tokens the projector emits."}),
+                "k_clips": ("INT", {"default": 3, "min": 1, "max": 16,
+                             "tooltip": "Clips averaged into each training reference centroid (match inference)."}),
+                "stage1_frac": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.05,
+                             "tooltip": "Fraction of training using Stage I (may include the target's own clip); "
+                                        "after this, Stage II uses different same-performer clips (anti copy-paste)."}),
+                "timestep_mode": (["logit_normal", "uniform", "curriculum"], {"default": "logit_normal"}),
+                "precision": (["bf16", "fp16", "fp32"], {"default": "bf16"}),
+                "save_every": ("INT", {"default": 500, "min": 50, "max": 10000}),
+                "seed": ("INT", {"default": 42}),
+            },
+            "optional": {
+                "performer_source": (["none", "json", "prompt_regex"], {"default": "none",
+                             "tooltip": "How to group clips by performer for multi-clip references. "
+                                        "'none' -> self-reference only (no cross-clip generalization)."}),
+                "performer_json": ("STRING", {"default": "",
+                             "tooltip": "Path to JSON: either {clip_name: performer} or {performer: [clip_names]}."}),
+                "performer_regex": ("STRING", {"default": r"\b([a-z]{2,4})\b",
+                             "tooltip": "Regex (first group) extracting a performer tag from each clip's prompt."}),
+                "hidden": ("INT", {"default": 1024, "min": 128, "max": 4096, "step": 128}),
+                "min_snr_gamma": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 20.0, "step": 1.0}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("projector_path",)
+    FUNCTION = "train"
+    CATEGORY = "FoleyTune"
+
+    def _build_performer_of(self, source, performer_json, performer_regex):
+        from .lora.train_audio_ref import performer_from_map, performer_from_prompt
+        if source == "json":
+            if not performer_json or not os.path.exists(performer_json):
+                raise FileNotFoundError(f"performer_json not found: {performer_json!r}")
+            with open(performer_json) as f:
+                data = json.load(f)
+            # Accept {performer: [names]} (invert) or {name: performer}.
+            if data and all(isinstance(v, list) for v in data.values()):
+                name_to_perf = {name: perf for perf, names in data.items() for name in names}
+            else:
+                name_to_perf = dict(data)
+            return performer_from_map(name_to_perf)
+        if source == "prompt_regex":
+            return performer_from_prompt(performer_regex)
+        return None
+
+    def train(self, hunyuan_model, hunyuan_deps, data_dir, output_dir, steps, lr,
+              grad_accum, k_tokens, k_clips, stage1_frac, timestep_mode, precision,
+              save_every, seed, performer_source="none", performer_json="",
+              performer_regex=r"\b([a-z]{2,4})\b", hidden=1024, min_snr_gamma=0.0):
+        from .lora.train_audio_ref import train_audio_ref_projector
+
+        device = mm.get_torch_device()
+        hunyuan_model.to(device)
+        cond_dim = int(getattr(hunyuan_model, "condition_dim", 768) or 768)
+        performer_of = self._build_performer_of(performer_source, performer_json, performer_regex)
+        loss_kwargs = {"min_snr_gamma": min_snr_gamma} if min_snr_gamma > 0 else {}
+
+        # Exit ComfyUI's inference_mode so gradients flow to the projector.
+        with torch.inference_mode(False), torch.enable_grad():
+            train_audio_ref_projector(
+                hunyuan_model, hunyuan_deps, cond_dim, data_dir, output_dir,
+                steps=steps, lr=lr, grad_accum=grad_accum, k_tokens=k_tokens,
+                hidden=hidden, k_clips=k_clips, stage1_frac=stage1_frac,
+                timestep_mode=timestep_mode, precision=precision,
+                performer_of=performer_of, save_every=save_every, seed=seed,
+                loss_kwargs=loss_kwargs,
+            )
+        final_path = os.path.join(output_dir, "audioref_final.pt")
+        logger.info(f"[audioref] trainer node done -> {final_path}")
+        return (final_path,)
+
+
 # --- Node Mappings -----------------------------------------------------------
 
 NODE_CLASS_MAPPINGS = {
     "FoleyTuneFeatureExtractor": FoleyTuneFeatureExtractor,
     "FoleyTuneBatchFeatureExtractor": FoleyTuneBatchFeatureExtractor,
     "FoleyTuneLoRATrainer": FoleyTuneLoRATrainer,
+    "FoleyTuneAudioRefTrainer": FoleyTuneAudioRefTrainer,
     "FoleyTuneLoRALoader": FoleyTuneLoRALoader,
     "FoleyTuneLoRALoaderPath": FoleyTuneLoRALoaderPath,
     "FoleyTuneLoRAScheduler": FoleyTuneLoRAScheduler,
@@ -2777,6 +2873,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneFeatureExtractor": "FoleyTune Feature Extractor",
     "FoleyTuneBatchFeatureExtractor": "FoleyTune Batch Feature Extractor",
     "FoleyTuneLoRATrainer": "FoleyTune LoRA Trainer",
+    "FoleyTuneAudioRefTrainer": "FoleyTune Audio-Ref Trainer (B2)",
     "FoleyTuneLoRALoader": "FoleyTune LoRA Loader",
     "FoleyTuneLoRALoaderPath": "FoleyTune LoRA Loader (Path)",
     "FoleyTuneLoRAScheduler": "FoleyTune LoRA Scheduler",

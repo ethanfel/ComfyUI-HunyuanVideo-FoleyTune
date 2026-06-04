@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from inspect import cleandoc
 from loguru import logger
 from torchvision.transforms import v2
-from transformers import AutoTokenizer, AutoModel, ClapTextModelWithProjection
+from transformers import AutoTokenizer, AutoModel, ClapTextModelWithProjection, ClapAudioModelWithProjection, ClapFeatureExtractor
 from accelerate import init_empty_weights
 
 from huggingface_hub import hf_hub_download
@@ -85,7 +85,7 @@ try:
     from hunyuanvideo_foley.models.dac_vae.model.dac import DAC
     from hunyuanvideo_foley.models.synchformer import Synchformer
     from hunyuanvideo_foley.models.hifi_foley import HunyuanVideoFoley
-    from hunyuanvideo_foley.utils.feature_utils import encode_video_with_siglip2, encode_video_with_sync, encode_text_feat
+    from hunyuanvideo_foley.utils.feature_utils import encode_video_with_siglip2, encode_video_with_sync, encode_text_feat, encode_audio_clap, clap_centroid
 except ImportError as e:
     logger.error(f"Failed to import HunyuanVideo-Foley modules: {e}")
     logger.error("Please ensure the ComfyUI_HunyuanVideoFoley custom node is installed correctly.")
@@ -395,6 +395,11 @@ class FoleyTuneDependenciesLoader:
         deps['siglip2_model'] = AutoModel.from_pretrained("google/siglip2-base-patch16-512", low_cpu_mem_usage=True, torch_dtype=enc_dtype).to(offload_device).eval()
         deps['clap_tokenizer'] = AutoTokenizer.from_pretrained("laion/larger_clap_general")
         deps['clap_model'] = ClapTextModelWithProjection.from_pretrained("laion/larger_clap_general", low_cpu_mem_usage=True, torch_dtype=enc_dtype).to(offload_device).eval()
+        # Audio tower of the same CLAP model + its mel feature extractor — used only for
+        # optional reference-audio conditioning (FoleyTuneChunkedSampler.reference_audio).
+        # Loaded here so it shares the offload lifecycle of the other feature encoders.
+        deps['clap_audio_model'] = ClapAudioModelWithProjection.from_pretrained("laion/larger_clap_general", low_cpu_mem_usage=True, torch_dtype=enc_dtype).to(offload_device).eval()
+        deps['clap_feature_extractor'] = ClapFeatureExtractor.from_pretrained("laion/larger_clap_general")
 
         deps['device'] = device
 
@@ -437,6 +442,21 @@ class FoleyTuneChunkedSampler:
                 "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
                              "tooltip": "1.0=full generation from noise, 0.0=keep original. "
                                         "Uses sigma-based mapping for smooth control across the full range."}),
+                "reference_audio": ("AUDIO", {"tooltip": "Optional reference clip whose global sonic character "
+                                              "(e.g. a performer's voice) nudges generation, while the video still "
+                                              "drives timing/sync. Encoded with CLAP and injected as a cross-attention "
+                                              "token. Use a low reference_strength for subtle variation. For multiple "
+                                              "clips, use FoleyTuneReferenceAudio -> reference_embed instead."}),
+                "reference_embed": ("FOLEYTUNE_REF_EMBED", {"tooltip": "Precomputed reference embedding (centroid of "
+                                              "several clips) from FoleyTuneReferenceAudio. Takes precedence over "
+                                              "reference_audio. Apply with reference_strength > 0."}),
+                "reference_projector": ("FOLEYTUNE_REF_PROJECTOR", {"tooltip": "Optional trained projector "
+                                              "(FoleyTuneAudioRefProjectorLoader). When connected, the reference is "
+                                              "injected via the learned adapter instead of the training-free bridge; "
+                                              "set reference_strength ~1.0."}),
+                "reference_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                             "tooltip": "Influence of the reference (0=off). ~0.1-0.2 = subtle de-homogenizing nudge "
+                                        "on top of a LoRA; higher pushes harder but may degrade. Sync is unaffected."}),
                 "force_offload": ("BOOLEAN", {"default": True}),
             }
         }
@@ -457,6 +477,10 @@ class FoleyTuneChunkedSampler:
         sampler_options=None,
         init_audio=None,
         denoise=1.0,
+        reference_audio=None,
+        reference_embed=None,
+        reference_projector=None,
+        reference_strength=0.0,
         force_offload=True,
     ):
         opts = sampler_options or {}
@@ -548,6 +572,36 @@ class FoleyTuneChunkedSampler:
                     init_latents = init_latents[:, :, :expected_frames]
             logger.info(f"Audio2Audio: encoded init_audio to latents {init_latents.shape}, denoise={denoise}")
 
+        # Encode reference audio to a CLAP audio embedding (global character nudge).
+        # Independent of init_audio: the video still drives timing/sync; this only colors
+        # the sonic character. Skipped entirely when strength is 0 to avoid the cost.
+        ref_audio_embed = None
+        if reference_strength > 0 and reference_embed is not None:
+            # Precomputed centroid from FoleyTuneReferenceAudio (multiple clips).
+            ref_audio_embed = reference_embed["embed"].to(device)
+            logger.info(f"Reference embed (precomputed centroid): {tuple(ref_audio_embed.shape)}, "
+                        f"strength={reference_strength}")
+        elif reference_strength > 0 and reference_audio is not None:
+            # Single (or equal-length batched) clip encoded inline; batches are averaged.
+            ref_waveform = reference_audio["waveform"]
+            ref_sr = reference_audio["sample_rate"]
+            if ref_waveform.dim() == 2:
+                ref_waveform = ref_waveform.unsqueeze(0)
+            if ref_sr != 48000:
+                ref_waveform = torchaudio.functional.resample(ref_waveform, ref_sr, 48000)
+            hunyuan_deps["clap_audio_model"].to(device)
+            try:
+                ref_audio_embed = encode_audio_clap(ref_waveform, model_dict_for_process)
+            finally:
+                hunyuan_deps["clap_audio_model"].to(offload_device)
+            logger.info(f"Reference audio: encoded CLAP embedding {tuple(ref_audio_embed.shape)}, "
+                        f"strength={reference_strength}")
+
+        # Optional trained projector (learned bridge); else the training-free bridge is used.
+        ref_projector = None
+        if reference_projector is not None and reference_strength > 0:
+            ref_projector = reference_projector["projector"].to(device).eval()
+
         # Run chunked denoising
         decoded_waveform, sample_rate = chunked_denoise_process(
             features=features,
@@ -563,6 +617,9 @@ class FoleyTuneChunkedSampler:
             init_latents=init_latents,
             strength=denoise,
             noise_blend=noise_blend,
+            ref_audio_embed=ref_audio_embed,
+            reference_strength=reference_strength,
+            ref_projector=ref_projector,
         )
 
         waveform_batch = decoded_waveform.float().cpu()
@@ -1173,6 +1230,109 @@ class FoleyTuneStyleTransfer:
         audio_out = {"waveform": audio.float().cpu(), "sample_rate": 48000}
         return (audio_out,)
 
+class FoleyTuneReferenceAudio:
+    """Encode one or more reference clips into a single CLAP audio embedding (centroid).
+
+    Averaging several clips of the same source (e.g. a performer) yields a more robust
+    'character prototype' than any single clip — it reinforces the consistent voice and
+    averages out per-clip noise. Feed the output to FoleyTuneChunkedSampler.reference_embed.
+    Connect individual clips and/or point `folder` at a directory of audio files.
+    """
+    AUDIO_EXTS = (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
+            },
+            "optional": {
+                "audio_1": ("AUDIO",),
+                "audio_2": ("AUDIO",),
+                "audio_3": ("AUDIO",),
+                "audio_4": ("AUDIO",),
+                "folder": ("STRING", {"default": "", "tooltip": "Optional directory of audio files; every clip "
+                                      "in it is encoded and averaged into the centroid (alongside any connected "
+                                      "audio inputs)."}),
+            },
+        }
+
+    RETURN_TYPES = ("FOLEYTUNE_REF_EMBED",)
+    RETURN_NAMES = ("reference_embed",)
+    FUNCTION = "encode"
+    CATEGORY = "FoleyTune"
+    DESCRIPTION = ("Encode one or more reference clips into a single CLAP audio embedding "
+                   "(spherical centroid) for FoleyTuneChunkedSampler.reference_embed.")
+
+    def encode(self, hunyuan_deps, audio_1=None, audio_2=None, audio_3=None, audio_4=None, folder=""):
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+
+        model_dict = AttributeDict(dict(hunyuan_deps))
+        model_dict["device"] = device
+
+        def _to_48k(wav, sr):
+            if wav.dim() == 2:
+                wav = wav.unsqueeze(0)   # [C, N] -> [1, C, N]
+            wav = wav[:1]                # one clip per input
+            if sr != 48000:
+                wav = torchaudio.functional.resample(wav, sr, 48000)
+            return wav
+
+        clips = [_to_48k(a["waveform"], a["sample_rate"])
+                 for a in (audio_1, audio_2, audio_3, audio_4) if a is not None]
+
+        if folder:
+            if not os.path.isdir(folder):
+                raise FileNotFoundError(f"reference folder not found: {folder}")
+            files = sorted(f for f in os.listdir(folder) if f.lower().endswith(self.AUDIO_EXTS))
+            for f in files:
+                wav, sr = torchaudio.load(os.path.join(folder, f))
+                clips.append(_to_48k(wav, sr))
+
+        if not clips:
+            raise ValueError("FoleyTuneReferenceAudio: connect at least one audio input or set `folder`.")
+
+        hunyuan_deps["clap_audio_model"].to(device)
+        try:
+            embeds = [encode_audio_clap(c, model_dict) for c in clips]  # each [1, 512]
+        finally:
+            hunyuan_deps["clap_audio_model"].to(offload_device)
+        centroid = clap_centroid(embeds)  # [1, 512]
+        mm.soft_empty_cache()
+        logger.info(f"Reference bank: averaged {len(clips)} clip(s) -> CLAP centroid {tuple(centroid.shape)}")
+        return ({"embed": centroid.cpu()},)
+
+
+class FoleyTuneAudioRefProjectorLoader:
+    """Load a trained reference-audio projector (.pt from FoleyTuneAudioRefTrainer).
+
+    Output connects to FoleyTuneChunkedSampler.reference_projector, switching reference
+    conditioning from the training-free bridge to the learned (calibrated) adapter.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "projector_path": ("STRING", {"default": "", "tooltip": "Path to audioref_*.pt"}),
+            },
+        }
+
+    RETURN_TYPES = ("FOLEYTUNE_REF_PROJECTOR",)
+    RETURN_NAMES = ("reference_projector",)
+    FUNCTION = "load"
+    CATEGORY = "FoleyTune"
+
+    def load(self, projector_path):
+        from .lora.audio_ref_projector import load_projector
+        if not projector_path or not os.path.exists(projector_path):
+            raise FileNotFoundError(f"projector not found: {projector_path!r}")
+        projector, meta = load_projector(projector_path, map_location="cpu")
+        logger.info(f"Loaded reference projector: {projector.config}, meta={meta}")
+        return ({"projector": projector},)
+
+
 class FoleyTuneSamplerOptions:
     """Optional settings for the FoleyTune Chunked Sampler.
 
@@ -1467,6 +1627,8 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneInpainter": FoleyTuneInpainter,
     "FoleyTuneFeatureBlender": FoleyTuneFeatureBlender,
     "FoleyTuneStyleTransfer": FoleyTuneStyleTransfer,
+    "FoleyTuneReferenceAudio": FoleyTuneReferenceAudio,
+    "FoleyTuneAudioRefProjectorLoader": FoleyTuneAudioRefProjectorLoader,
     "FoleyTuneSamplerOptions": FoleyTuneSamplerOptions,
     "FoleyTuneVideoLoader": FoleyTuneVideoLoader,
     "FoleyTuneVideoLoaderUpload": FoleyTuneVideoLoaderUpload,
@@ -1483,6 +1645,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneInpainter": "FoleyTune Inpainter",
     "FoleyTuneFeatureBlender": "FoleyTune Feature Blender",
     "FoleyTuneStyleTransfer": "FoleyTune Style Transfer",
+    "FoleyTuneReferenceAudio": "FoleyTune Reference Audio (CLAP centroid)",
+    "FoleyTuneAudioRefProjectorLoader": "FoleyTune Audio-Ref Projector Loader",
     "FoleyTuneSamplerOptions": "FoleyTune Sampler Options",
     "FoleyTuneVideoLoader": "FoleyTune Video Loader",
     "FoleyTuneVideoLoaderUpload": "FoleyTune Video Loader (Upload)",

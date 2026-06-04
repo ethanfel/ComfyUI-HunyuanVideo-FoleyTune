@@ -113,6 +113,56 @@ def _pad_or_trim_time(x, T_fixed: int):
     return F.pad(x, (0, 0, 0, T_fixed - T_cur))
 
 
+def _append_reference_token(text_rep, uncond_rep, ref_embed, strength, projector=None):
+    """Append a reference-audio conditioning token to the (already padded) text K/V sequence.
+
+    Two bridges from the reference CLAP audio embedding (shared 512-d space) to the model's
+    text-hidden space:
+      * LEARNED (projector given): a trained AudioRefProjector maps 512 -> k x D calibrated
+        tokens (semantically precise). `strength` scales the tokens (1.0 = as-trained).
+      * TRAINING-FREE (projector None): zero-pad 512->D, scale to a typical real-text-token
+        norm times `strength`, append one token. A consistent-per-reference perturbation
+        (good for de-homogenizing a LoRA's voice), not a calibrated prompt.
+    In both cases a neutral (zero) token block is appended to the unconditional branch so the
+    two halves keep matching length and classifier-free guidance carries the reference.
+
+    text_rep / uncond_rep: [B, T, D] (D == condition_dim, e.g. 768)
+    ref_embed: normalized CLAP audio embedding, shape [.., 512] or None
+    strength: float; <= 0 or ref_embed is None -> no-op
+    projector: optional trained AudioRefProjector (lora.audio_ref_projector)
+    """
+    if ref_embed is None or strength <= 0:
+        return text_rep, uncond_rep
+    B, T, D = text_rep.shape
+
+    if projector is not None:
+        # Learned path: projector emits k calibrated tokens in the text-hidden space.
+        p_dtype = next(projector.parameters()).dtype
+        tokens = projector(ref_embed.reshape(1, -1).to(device=text_rep.device, dtype=p_dtype))
+        tokens = tokens.to(device=text_rep.device, dtype=text_rep.dtype) * strength  # [1, k, D]
+        if tokens.shape[0] == 1 and B > 1:
+            tokens = tokens.expand(B, -1, -1)
+        k = tokens.shape[1]
+        zero = torch.zeros(B, k, D, device=uncond_rep.device, dtype=uncond_rep.dtype)
+        return torch.cat([text_rep, tokens], dim=1), torch.cat([uncond_rep, zero], dim=1)
+
+    ref = ref_embed.reshape(-1).to(device=text_rep.device, dtype=text_rep.dtype)
+    tok = torch.zeros(D, device=text_rep.device, dtype=text_rep.dtype)
+    n = min(ref.numel(), D)
+    tok[:n] = ref[:n]
+    tok = tok / (tok.norm() + 1e-6)
+    # Scale to the mean norm of the REAL (non-pad) text tokens so `strength` ~= fraction
+    # of one text token's magnitude; pad tokens are zero and excluded to avoid dilution.
+    # Norms are computed in fp32 — a sum over D squared activations can overflow fp16.
+    token_norms = text_rep.float().norm(dim=-1)             # [B, T], fp32
+    real = (token_norms > 1e-6).float()
+    mean_norm = (token_norms * real).sum() / real.sum().clamp(min=1.0)
+    tok = tok * mean_norm.to(tok.dtype) * strength
+    tok = tok.view(1, 1, D).expand(B, 1, D)
+    zero_tok = torch.zeros(B, 1, D, device=uncond_rep.device, dtype=uncond_rep.dtype)
+    return torch.cat([text_rep, tok], dim=1), torch.cat([uncond_rep, zero_tok], dim=1)
+
+
 def prepare_latents_with_generator(scheduler, batch_size, num_channels_latents, length, dtype, device, generator=None):
     """Creates the initial random noise tensor using a specified torch.Generator for reproducibility."""
     shape = (batch_size, num_channels_latents, int(length))
@@ -196,6 +246,9 @@ def denoise_process_with_generator(
     inpaint_mask=None,
     inpaint_original=None,
     inpaint_noise=None,
+    ref_audio_embed=None,
+    reference_strength=0.0,
+    ref_projector=None,
 ):
     """
     An adaptation of the original denoise_process that accepts a torch.Generator for seeding,
@@ -268,6 +321,12 @@ def denoise_process_with_generator(
     # Normalize shapes for compile reuse
     text_feat_rep   = _pad_or_trim_time(text_feat_rep,   T_fixed)
     uncond_text_rep = _pad_or_trim_time(uncond_text_rep, T_fixed)
+
+    # Optional reference-audio conditioning token (appended after padding so it is never
+    # trimmed by the text bucket; T -> T+1, kept under the model's max_text_len).
+    text_feat_rep, uncond_text_rep = _append_reference_token(
+        text_feat_rep, uncond_text_rep, ref_audio_embed, reference_strength, ref_projector
+    )
 
     uncond_siglip2_feat = model_dict.foley_model.get_empty_clip_sequence(bs=batch_size, len=siglip2_feat_rep.shape[1]).to(device)
     uncond_syncformer_feat = model_dict.foley_model.get_empty_sync_sequence(bs=batch_size, len=syncformer_feat_rep.shape[1]).to(device)
@@ -550,6 +609,9 @@ def chunked_denoise_process(
     init_latents=None,
     strength=1.0,
     noise_blend=0.0,
+    ref_audio_embed=None,
+    reference_strength=0.0,
+    ref_projector=None,
 ):
     """Chunked denoising with overlap stitching for long-form generation.
 
@@ -604,6 +666,8 @@ def chunked_denoise_process(
             visual, text, chunk_dur, model_dict, cfg,
             guidance_scale, num_inference_steps, batch_size, sampler, generator,
             init_latents=chunk_init, strength=strength, noise_blend=noise_blend,
+            ref_audio_embed=ref_audio_embed, reference_strength=reference_strength,
+            ref_projector=ref_projector,
         )
 
     # --- Multi-chunk: set up per-chunk schedulers and latents ---
@@ -685,6 +749,11 @@ def chunked_denoise_process(
         T_fixed = min(77, cap) if T_cur <= 77 else min(128, cap)
         text_rep = _pad_or_trim_time(text_rep, T_fixed)
         uncond_rep = _pad_or_trim_time(uncond_rep, T_fixed)
+
+        # Optional reference-audio conditioning token (same global token for every chunk).
+        text_rep, uncond_rep = _append_reference_token(
+            text_rep, uncond_rep, ref_audio_embed, reference_strength, ref_projector
+        )
 
         uncond_clip = model_dict.foley_model.get_empty_clip_sequence(
             bs=batch_size, len=siglip2_rep.shape[1]

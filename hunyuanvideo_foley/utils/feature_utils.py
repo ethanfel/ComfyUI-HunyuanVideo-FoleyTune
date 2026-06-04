@@ -141,6 +141,59 @@ def encode_text_feat(text: List[str], model_dict):
     return outputs.last_hidden_state, outputs.attentions
 
 
+def clap_centroid(embeds):
+    """Spherical centroid of L2-normalized CLAP embeddings -> [1, 512].
+
+    Averaging several clips of the same source reinforces its consistent character and
+    averages out per-clip noise (specific words, room tone, one-off sounds) — a more
+    robust 'performer prototype' than any single clip. Accepts a list/tuple of [.., 512]
+    tensors or a [K, 512] tensor.
+    """
+    if isinstance(embeds, (list, tuple)):
+        embeds = torch.cat([e.reshape(1, -1) for e in embeds], dim=0)  # [K, 512]
+    elif embeds.dim() == 1:
+        embeds = embeds.unsqueeze(0)
+    c = embeds.mean(dim=0, keepdim=True)
+    c = c / (c.norm(dim=-1, keepdim=True) + 1e-6)
+    return c
+
+
+@torch.no_grad()
+def encode_audio_clap(waveform, model_dict):
+    """Encode reference waveform(s) into a normalized CLAP audio embedding [1, 512].
+
+    Uses no_grad (not inference_mode) so the embedding is a normal tensor that can later be
+    fed as a frozen input to the trainable AudioRefProjector during B2 training; harmless at
+    inference (where the whole denoise loop already runs under inference_mode).
+
+    Accepts a single clip ([N], [C, N], [1, C, N]) or a batch of equal-length clips
+    ([B, C, N]); multiple clips are reduced to a spherical centroid (see clap_centroid).
+    The returned embedding lives in CLAP's shared (audio<->text aligned) projection space
+    and is later bridged into a cross-attention token. Channel 0 is taken as mono; CLAP
+    operates at 48kHz, so `waveform` must already be resampled to 48k.
+    """
+    fe = model_dict.clap_feature_extractor
+    audio_model = model_dict.clap_audio_model
+    w = waveform
+    if w.dim() == 1:
+        w = w.view(1, 1, -1)
+    elif w.dim() == 2:
+        w = w.unsqueeze(0)  # [C, N] -> [1, C, N]
+    p_dtype = next(audio_model.parameters()).dtype
+    embs = []
+    for b in range(w.shape[0]):
+        audio = w[b, 0].float().cpu().numpy()  # mono (channel 0) for clip b
+        inputs = fe(audio, sampling_rate=48000, return_tensors="pt")
+        inputs = {
+            k: (v.to(model_dict.device, p_dtype) if v.is_floating_point() else v.to(model_dict.device))
+            for k, v in inputs.items()
+        }
+        emb = audio_model(**inputs).audio_embeds  # [1, 512]
+        emb = emb / (emb.norm(dim=-1, keepdim=True) + 1e-6)
+        embs.append(emb)
+    return clap_centroid(embs)
+
+
 def feature_process(video_path, prompt, model_dict, cfg, neg_prompt=None):
     visual_feats, audio_len_in_s = encode_video_features(video_path, model_dict)
     if neg_prompt is None:

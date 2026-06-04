@@ -344,11 +344,11 @@ class FoleyTuneDependenciesLoader:
                 "synchformer_name": (get_foley_models(lambda f: "synch" in f),),
                 },
             "optional": {
-                "encoder_precision": (["fp16", "fp32"], {"default": "fp16",
+                "encoder_precision": (["fp32", "fp16"], {"default": "fp32",
                     "tooltip": "Storage dtype for the SigLIP2 / CLAP / Synchformer feature encoders "
-                               "(NOT the DAC VAE, which stays fp32). fp16 ~halves their resident CPU/VRAM "
-                               "footprint with negligible effect on the conditioning features. "
-                               "Use fp32 only to reproduce older feature caches exactly."}),
+                               "(NOT the DAC VAE, which stays fp32). Default fp32 matches the original "
+                               "behavior. Opt into fp16 to ~halve the encoders' resident CPU/VRAM "
+                               "footprint with negligible effect on the conditioning features."}),
                 },
             }
 
@@ -356,7 +356,7 @@ class FoleyTuneDependenciesLoader:
     FUNCTION = "load_dependencies"
     CATEGORY = "FoleyTune"
 
-    def load_dependencies(self, vae_name, synchformer_name, encoder_precision="fp16"):
+    def load_dependencies(self, vae_name, synchformer_name, encoder_precision="fp32"):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         # Half-precision storage for the visual/text encoders. The DAC VAE is kept fp32

@@ -306,7 +306,8 @@ class FoleyTuneFeatureExtractor:
                               "tooltip": "Ignored when video_features is connected (fps comes from the video loader)."}),
                 "duration": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 3600.0, "step": 0.1,
                               "tooltip": "Ignored when video_features is connected. Connect the loader's duration output to keep them in sync."}),
-                "cache_dir": ("STRING", {"default": ""}),
+                "cache_dir": ("STRING", {"default": "",
+                              "tooltip": "Directory for the .npz feature caches. Leave empty to use ComfyUI's temp folder (cleared on restart)."}),
                 "name": ("STRING", {"default": "clip",
                           "tooltip": "Base name for auto-incremented files (e.g. clip -> clip_001.npz)"}),
             },
@@ -331,7 +332,10 @@ class FoleyTuneFeatureExtractor:
 
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
-        cache_dir = Path(cache_dir)
+        # An empty cache_dir would resolve to the process CWD (the ComfyUI root),
+        # littering it with .npz files. Fall back to ComfyUI's temp directory.
+        cache_dir = cache_dir.strip()
+        cache_dir = Path(cache_dir) if cache_dir else Path(folder_paths.get_temp_directory())
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Auto-increment filename

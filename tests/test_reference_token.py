@@ -85,6 +85,21 @@ def test_appends_one_token_each_branch():
     assert torch.equal(u_out[:, :T, :], uncond)
 
 
+def test_n_tokens_appends_multiple_identical():
+    B, T, D, n = 2, 6, 768, 5
+    text = _make_text(B, T, D)
+    uncond = _make_text(B, T, D)
+    ref = torch.randn(512)
+    t_out, u_out = _append_reference_token(text, uncond, ref, 0.5, n_tokens=n)
+    assert t_out.shape == (B, T + n, D)
+    assert u_out.shape == (B, T + n, D)
+    # appended tokens are all identical
+    for i in range(T, T + n):
+        assert torch.allclose(t_out[:, i], t_out[:, T])
+    # uncond appended block is all zeros
+    assert torch.count_nonzero(u_out[:, T:]) == 0
+
+
 def test_uncond_appended_token_is_zero():
     text = _make_text()
     uncond = _make_text()

@@ -454,9 +454,14 @@ class FoleyTuneChunkedSampler:
                                               "(FoleyTuneAudioRefProjectorLoader). When connected, the reference is "
                                               "injected via the learned adapter instead of the training-free bridge; "
                                               "set reference_strength ~1.0."}),
-                "reference_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                             "tooltip": "Influence of the reference (0=off). ~0.1-0.2 = subtle de-homogenizing nudge "
-                                        "on top of a LoRA; higher pushes harder but may degrade. Sync is unaffected."}),
+                "reference_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 8.0, "step": 0.05,
+                             "tooltip": "Influence of the reference (0=off). With the training-free bridge the effect "
+                                        "is weak on this video-dominated model; crank toward 2-8 (and raise "
+                                        "reference_tokens) to test for any effect. With a trained projector, ~1.0."}),
+                "reference_tokens": ("INT", {"default": 1, "min": 1, "max": 16,
+                             "tooltip": "Number of identical reference tokens appended to the text K/V (training-free "
+                                        "bridge only). More tokens = more attention mass for the reference direction. "
+                                        "Try 4-16 alongside a high reference_strength."}),
                 "force_offload": ("BOOLEAN", {"default": True}),
             }
         }
@@ -481,6 +486,7 @@ class FoleyTuneChunkedSampler:
         reference_embed=None,
         reference_projector=None,
         reference_strength=0.0,
+        reference_tokens=1,
         force_offload=True,
     ):
         opts = sampler_options or {}
@@ -620,6 +626,7 @@ class FoleyTuneChunkedSampler:
             ref_audio_embed=ref_audio_embed,
             reference_strength=reference_strength,
             ref_projector=ref_projector,
+            reference_tokens=reference_tokens,
         )
 
         waveform_batch = decoded_waveform.float().cpu()

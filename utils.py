@@ -113,7 +113,7 @@ def _pad_or_trim_time(x, T_fixed: int):
     return F.pad(x, (0, 0, 0, T_fixed - T_cur))
 
 
-def _append_reference_token(text_rep, uncond_rep, ref_embed, strength, projector=None):
+def _append_reference_token(text_rep, uncond_rep, ref_embed, strength, projector=None, n_tokens=1):
     """Append a reference-audio conditioning token to the (already padded) text K/V sequence.
 
     Two bridges from the reference CLAP audio embedding (shared 512-d space) to the model's
@@ -158,8 +158,12 @@ def _append_reference_token(text_rep, uncond_rep, ref_embed, strength, projector
     real = (token_norms > 1e-6).float()
     mean_norm = (token_norms * real).sum() / real.sum().clamp(min=1.0)
     tok = tok * mean_norm.to(tok.dtype) * strength
-    tok = tok.view(1, 1, D).expand(B, 1, D)
-    zero_tok = torch.zeros(B, 1, D, device=uncond_rep.device, dtype=uncond_rep.dtype)
+    # Append n_tokens identical copies: more attention mass for the reference direction
+    # (softmax over N identical keys ~= N x the single-token weight). Kept under the text
+    # budget by the node's reference_tokens cap.
+    n = max(1, int(n_tokens))
+    tok = tok.view(1, 1, D).expand(B, n, D)
+    zero_tok = torch.zeros(B, n, D, device=uncond_rep.device, dtype=uncond_rep.dtype)
     return torch.cat([text_rep, tok], dim=1), torch.cat([uncond_rep, zero_tok], dim=1)
 
 
@@ -249,6 +253,7 @@ def denoise_process_with_generator(
     ref_audio_embed=None,
     reference_strength=0.0,
     ref_projector=None,
+    reference_tokens=1,
 ):
     """
     An adaptation of the original denoise_process that accepts a torch.Generator for seeding,
@@ -325,7 +330,8 @@ def denoise_process_with_generator(
     # Optional reference-audio conditioning token (appended after padding so it is never
     # trimmed by the text bucket; T -> T+1, kept under the model's max_text_len).
     text_feat_rep, uncond_text_rep = _append_reference_token(
-        text_feat_rep, uncond_text_rep, ref_audio_embed, reference_strength, ref_projector
+        text_feat_rep, uncond_text_rep, ref_audio_embed, reference_strength, ref_projector,
+        n_tokens=reference_tokens,
     )
 
     uncond_siglip2_feat = model_dict.foley_model.get_empty_clip_sequence(bs=batch_size, len=siglip2_feat_rep.shape[1]).to(device)
@@ -612,6 +618,7 @@ def chunked_denoise_process(
     ref_audio_embed=None,
     reference_strength=0.0,
     ref_projector=None,
+    reference_tokens=1,
 ):
     """Chunked denoising with overlap stitching for long-form generation.
 
@@ -667,7 +674,7 @@ def chunked_denoise_process(
             guidance_scale, num_inference_steps, batch_size, sampler, generator,
             init_latents=chunk_init, strength=strength, noise_blend=noise_blend,
             ref_audio_embed=ref_audio_embed, reference_strength=reference_strength,
-            ref_projector=ref_projector,
+            ref_projector=ref_projector, reference_tokens=reference_tokens,
         )
 
     # --- Multi-chunk: set up per-chunk schedulers and latents ---
@@ -752,7 +759,8 @@ def chunked_denoise_process(
 
         # Optional reference-audio conditioning token (same global token for every chunk).
         text_rep, uncond_rep = _append_reference_token(
-            text_rep, uncond_rep, ref_audio_embed, reference_strength, ref_projector
+            text_rep, uncond_rep, ref_audio_embed, reference_strength, ref_projector,
+            n_tokens=reference_tokens,
         )
 
         uncond_clip = model_dict.foley_model.get_empty_clip_sequence(

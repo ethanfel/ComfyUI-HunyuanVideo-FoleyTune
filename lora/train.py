@@ -114,39 +114,50 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16, clip
     torch.cuda.empty_cache()
     gc.collect()
 
-    # Enforce fixed sequence lengths across all clips (required for batching with torch.cat)
+    # Enforce consistent sequence lengths for batching with torch.cat.
+    #   - clip_features (SigLIP2) and sync_features (Synchformer) are FIXED-length by
+    #     design (video frames at a fixed fps). A clip with an off length is a malformed
+    #     source clip (e.g. cut a frame short). DROP + LOG it rather than truncating the
+    #     whole dataset down to one bad clip (which also mismatches across combined dirs
+    #     and crashes at batch time). Keep the modal length, drop the outliers.
+    #   - latents (audio length) + text_embedding genuinely vary -> truncate to min.
     if dataset:
-        # Normalize latent lengths
-        latent_lengths = [d["latents"].shape[-1] for d in dataset]
-        target_lat = min(latent_lengths)
+        from collections import Counter
+        clip_mode = Counter(d["clip_features"].shape[1] for d in dataset).most_common(1)[0][0]
+        sync_mode = Counter(d["sync_features"].shape[1] for d in dataset).most_common(1)[0][0]
+        bad = [d for d in dataset
+               if d["clip_features"].shape[1] != clip_mode
+               or d["sync_features"].shape[1] != sync_mode]
+        if bad:
+            for d in bad:
+                logger.warning(
+                    f"  DROP malformed clip {d['name']}: clip_len={d['clip_features'].shape[1]} "
+                    f"sync_len={d['sync_features'].shape[1]} (expected clip={clip_mode}, sync={sync_mode}) "
+                    f"-- ignoring")
+            bad_names = {d["name"] for d in bad}
+            dataset = [d for d in dataset if d["name"] not in bad_names]
+            logger.warning(f"Dropped {len(bad)} malformed clip(s) with off-length features; {len(dataset)} remain")
+
+        # sync_features must be a multiple of 8 for the model -- pad the (now-uniform) length up
+        target_sync = ((sync_mode + 7) // 8) * 8
+        if target_sync != sync_mode:
+            for d in dataset:
+                seq = d["sync_features"].shape[1]
+                if seq < target_sync:
+                    d["sync_features"] = F.pad(d["sync_features"], (0, 0, 0, target_sync - seq))
+                elif seq > target_sync:
+                    d["sync_features"] = d["sync_features"][:, :target_sync, :]
+
+        # latents + text_embedding genuinely vary -> truncate to min
+        target_lat = min(d["latents"].shape[-1] for d in dataset)
         for d in dataset:
             d["latents"] = d["latents"][..., :target_lat]
-        logger.info(f"Latents normalized to length {target_lat}")
-
-        # Normalize clip_features (SigLIP2) sequence lengths — dim 1
-        clip_lens = [d["clip_features"].shape[1] for d in dataset]
-        target_clip = min(clip_lens)
-        for d in dataset:
-            d["clip_features"] = d["clip_features"][:, :target_clip, :]
-
-        # Normalize sync_features (Synchformer) sequence lengths — dim 1, pad to multiple of 8
-        sync_lens = [d["sync_features"].shape[1] for d in dataset]
-        target_sync = min(sync_lens)
-        target_sync = ((target_sync + 7) // 8) * 8  # model requires multiple of 8
-        for d in dataset:
-            seq = d["sync_features"].shape[1]
-            if seq > target_sync:
-                d["sync_features"] = d["sync_features"][:, :target_sync, :]
-            elif seq < target_sync:
-                d["sync_features"] = F.pad(d["sync_features"], (0, 0, 0, target_sync - seq))
-
-        # Normalize text_embedding (CLAP) sequence lengths — dim 1
-        text_lens = [d["text_embedding"].shape[1] for d in dataset]
-        target_text = min(text_lens)
+        target_text = min(d["text_embedding"].shape[1] for d in dataset)
         for d in dataset:
             d["text_embedding"] = d["text_embedding"][:, :target_text, :]
 
-        logger.info(f"Features normalized: clip={target_clip}, sync={target_sync}, text={target_text}")
+        logger.info(f"Features: clip={clip_mode}, sync={target_sync}, text={target_text}, "
+                    f"latents={target_lat} ({len(dataset)} clips)")
 
     logger.info(f"Prepared dataset: {len(dataset)} clips from {data_dir}")
     return dataset

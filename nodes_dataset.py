@@ -160,13 +160,21 @@ class FoleyTuneDatasetLUFSNormalizer:
         return {
             "required": {
                 "dataset": (FOLEYTUNE_AUDIO_DATASET,),
+                "mode": (["per_clip_lufs", "global_peak", "global_lufs"], {
+                    "default": "per_clip_lufs",
+                    "tooltip": "per_clip_lufs: each clip independently to target_lufs (EQUALIZES clips — flattens "
+                               "inter-clip dynamics and over-boosts quiet/breathy clips). "
+                               "global_peak: ONE gain so the dataset's loudest true-peak hits true_peak_dbtp — "
+                               "PRESERVES relative loudness between clips (breath stays quiet) + guarantees headroom. "
+                               "global_lufs: ONE gain referencing the LOUDEST clip to target_lufs, then peak-limited.",
+                }),
                 "target_lufs": ("FLOAT", {
                     "default": -23.0, "min": -40.0, "max": -6.0, "step": 0.5,
-                    "tooltip": "Target integrated loudness in LUFS. -23 is EBU R128 standard.",
+                    "tooltip": "Target integrated loudness in LUFS. Used by per_clip_lufs and global_lufs.",
                 }),
                 "true_peak_dbtp": ("FLOAT", {
                     "default": -1.0, "min": -6.0, "max": 0.0, "step": 0.5,
-                    "tooltip": "True peak ceiling in dBTP. Applied after LUFS gain.",
+                    "tooltip": "True peak ceiling in dBTP. The TARGET for global_peak; a safety ceiling for the others.",
                 }),
             }
         }
@@ -180,13 +188,48 @@ class FoleyTuneDatasetLUFSNormalizer:
         "Skips clips that are too short for LUFS measurement (< 0.4 s)."
     )
 
-    def normalize(self, dataset, target_lufs: float, true_peak_dbtp: float):
+    def normalize(self, dataset, mode, target_lufs: float, true_peak_dbtp: float):
         import pyloudnorm as pyln
 
         tp_linear = 10.0 ** (true_peak_dbtp / 20.0)
+
+        # ── GLOBAL modes: ONE gain for the whole dataset → relative loudness PRESERVED ──
+        if mode in ("global_peak", "global_lufs"):
+            if mode == "global_peak":
+                max_peak = max((item["waveform"][0].abs().max().item() for item in dataset), default=0.0)
+                gain_linear = (tp_linear / max_peak) if max_peak > 0 else 1.0
+            else:  # global_lufs — reference the LOUDEST clip's integrated loudness
+                louds = []
+                for item in dataset:
+                    wav_np = item["waveform"][0].permute(1, 0).double().numpy()
+                    if wav_np.shape[1] == 1:
+                        wav_np = wav_np[:, 0]
+                    try:
+                        l = pyln.Meter(item["sample_rate"]).integrated_loudness(wav_np)
+                        if np.isfinite(l):
+                            louds.append(l)
+                    except Exception:
+                        pass
+                ref = max(louds) if louds else target_lufs
+                gain_linear = 10.0 ** ((target_lufs - ref) / 20.0)
+
+            out = [dict(item, waveform=(item["waveform"][0] * gain_linear).unsqueeze(0)) for item in dataset]
+            # single global true-peak safety ceiling
+            mp = max((o["waveform"][0].abs().max().item() for o in out), default=0.0)
+            if mp > tp_linear and mp > 0:
+                extra = tp_linear / mp
+                out = [dict(o, waveform=(o["waveform"][0] * extra).unsqueeze(0)) for o in out]
+                gain_linear *= extra
+            print(
+                f"[FoleyTuneDatasetLUFSNormalizer] {mode}: ONE gain {20.0 * np.log10(max(gain_linear, 1e-9)):+.1f} dB "
+                f"applied to all {len(dataset)} clips — relative loudness PRESERVED, peak <= {true_peak_dbtp} dBTP",
+                flush=True,
+            )
+            return (out,)
+
+        # ── per_clip_lufs (original): each clip independently to target_lufs ──
         out = []
         skipped = 0
-
         for item in dataset:
             wav = item["waveform"][0]  # [C, L]
             sr = item["sample_rate"]
@@ -222,7 +265,7 @@ class FoleyTuneDatasetLUFSNormalizer:
             out.append(new_item)
 
         print(
-            f"[FoleyTuneDatasetLUFSNormalizer] {len(dataset) - skipped}/{len(dataset)} clips normalized  "
+            f"[FoleyTuneDatasetLUFSNormalizer] per_clip_lufs: {len(dataset) - skipped}/{len(dataset)} clips normalized  "
             f"target={target_lufs} LUFS  TP={true_peak_dbtp} dBTP  skipped={skipped}",
             flush=True,
         )

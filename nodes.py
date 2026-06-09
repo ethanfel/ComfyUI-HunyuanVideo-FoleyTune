@@ -107,6 +107,21 @@ from .utils import (
 
 _VIDEO_EXTENSIONS = {'webm', 'mp4', 'mkv', 'gif', 'mov', 'avi', 'flv', 'wmv'}
 
+# Cache the (immutable) Hunyuan config so we don't re-read + re-parse the YAML on
+# every loader/sampler/inpainter execution.
+_HUNYUAN_CFG_CACHE = {}
+
+def _load_hunyuan_cfg():
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "configs", "hunyuanvideo-foley-xxl.yaml")
+    cfg = _HUNYUAN_CFG_CACHE.get(config_path)
+    if cfg is None:
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Hunyuan config file not found at {config_path}")
+        cfg = load_yaml(config_path)
+        _HUNYUAN_CFG_CACHE[config_path] = cfg
+    return cfg
+
 def _ffprobe_video_info(video_path: str) -> dict:
     """Get video duration, fps, width, height via ffprobe."""
     cmd = [
@@ -258,10 +273,7 @@ class FoleyTuneModelLoader:
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}.get(precision, torch.bfloat16)
 
         model_path = ensure_model_downloaded(model_name)
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "hunyuanvideo-foley-xxl.yaml")
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Hunyuan config file not found at {config_path}")
-        cfg = load_yaml(config_path)
+        cfg = _load_hunyuan_cfg()
 
         # Load weights onto the offload device first to save VRAM
         state_dict = load_torch_file(model_path, device=offload_device)
@@ -362,6 +374,11 @@ class FoleyTuneDependenciesLoader:
         # Half-precision storage for the visual/text encoders. The DAC VAE is kept fp32
         # (quality-critical and explicitly cast to fp32 at decode time), so it is excluded.
         enc_dtype = torch.float16 if encoder_precision == "fp16" else torch.float32
+        # fp16 is purely a VRAM optimization for CUDA. On CPU it yields no memory win and
+        # many fp16 kernels are unsupported or far slower than fp32 — force fp32 there.
+        if enc_dtype == torch.float16 and device.type != "cuda":
+            logger.info("encoder_precision=fp16 ignored on non-CUDA device; loading encoders in fp32.")
+            enc_dtype = torch.float32
         deps = {}
 
         # Load local model files (VAE, Synchformer) — auto-download if missing
@@ -476,11 +493,7 @@ class FoleyTuneChunkedSampler:
         if hasattr(hunyuan_model, "_seen_compile_signatures"):
             hunyuan_model._seen_compile_signatures.clear()
 
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "configs", "hunyuanvideo-foley-xxl.yaml")
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Config not found at {config_path}")
-        hunyuan_cfg = load_yaml(config_path)
+        hunyuan_cfg = _load_hunyuan_cfg()
 
         rng = torch.Generator(device="cpu").manual_seed(seed)
         duration = features["duration"]
@@ -493,14 +506,13 @@ class FoleyTuneChunkedSampler:
         for i, (ts, te) in enumerate(chunks):
             logger.info(f"  Chunk {i}: [{ts:.1f}, {te:.1f}]s ({te-ts:.1f}s)")
 
-        # Apply torch.compile if configured
-        if torch_compile_cfg is not None and not getattr(hunyuan_model, "_blocks_are_compiled", False):
-            try:
-                hunyuan_model = FoleyTuneTorchCompile._apply_torch_compile(
-                    hunyuan_model, torch_compile_cfg
-                )
-            except Exception as e:
-                logger.error(f"TorchCompile failed: {e}")
+        # Reconcile torch.compile with the requested config: compile, recompile on a
+        # config change, or revert to eager when the Torch Compile node is removed.
+        hunyuan_model = FoleyTuneTorchCompile._reconcile_compile(hunyuan_model, torch_compile_cfg)
+        if (torch_compile_cfg is not None and block_swap_args is not None
+                and block_swap_args.get("blocks_to_swap", 0) > 0):
+            logger.warning("torch.compile + BlockSwap active: moving compiled blocks across devices "
+                           "each step can trigger recompiles/guard failures and may erase compile gains.")
 
         # Place model on device
         if block_swap_args is not None:
@@ -511,6 +523,9 @@ class FoleyTuneChunkedSampler:
                 block_swap_debug=block_swap_args.get("block_swap_debug", False),
             )
         else:
+            # Clear any stale block-swap config from a prior run before full-GPU placement,
+            # otherwise forward() would keep offloading blocks the user no longer asked to swap.
+            hunyuan_model.disable_block_swap()
             hunyuan_model.to(device)
 
         # Build model_dict
@@ -793,6 +808,72 @@ class FoleyTuneTorchCompile:
         model._blocks_are_compiled = True
         return model
 
+    @staticmethod
+    def _compile_signature(compile_cfg):
+        """Canonical, hashable signature of a compile config (None if not compiling)."""
+        if compile_cfg is None:
+            return None
+        return (
+            compile_cfg.get("backend", "inductor"),
+            compile_cfg.get("mode", "default"),
+            compile_cfg.get("dynamic", False),
+            bool(compile_cfg.get("fullgraph", False)),
+        )
+
+    @staticmethod
+    def _decompile_blocks(model: nn.Module):
+        """Undo _apply_torch_compile: restore the original eager blocks.
+
+        torch.compile wraps each block in an OptimizedModule that keeps the
+        original under ._orig_mod (sharing the same parameters), so we can swap
+        the eager module back in and drop the compiled wrapper.
+        """
+        if not getattr(model, "_blocks_are_compiled", False):
+            return model
+        for blocks in (model.triple_blocks, model.single_blocks):
+            for i, block in enumerate(blocks):
+                orig = getattr(block, "_orig_mod", None)
+                if orig is not None:
+                    blocks[i] = orig
+        model._blocks_are_compiled = False
+        model._compile_signature = None
+        for attr in ("_compilation_progress_counter", "_total_blocks_to_compile",
+                     "_seen_compile_signatures"):
+            if hasattr(model, attr):
+                delattr(model, attr)
+        logger.info("Reverted torch.compile: transformer blocks restored to eager mode.")
+        return model
+
+    @staticmethod
+    def _reconcile_compile(model: nn.Module, compile_cfg):
+        """Make the model's compile state match the requested config.
+
+        The model object is cached and reused across runs, so compile state must
+        track the node, not stick forever:
+          - cfg None while compiled      -> revert to eager (node was removed)
+          - cfg unchanged vs current     -> no-op (reuse the warm compile)
+          - cfg changed                  -> recompile with the new settings
+          - cfg set while not compiled   -> compile
+        """
+        want = FoleyTuneTorchCompile._compile_signature(compile_cfg)
+        if getattr(model, "_blocks_are_compiled", False):
+            # "__unknown__" forces a decompile for a model compiled before signature
+            # tracking existed, so a stale compile can never get stuck on.
+            have = getattr(model, "_compile_signature", "__unknown__")
+        else:
+            have = None
+        if want == have:
+            return model
+        if have is not None:
+            FoleyTuneTorchCompile._decompile_blocks(model)
+        if want is not None:
+            try:
+                model = FoleyTuneTorchCompile._apply_torch_compile(model, compile_cfg)
+                model._compile_signature = want
+            except Exception as e:
+                logger.error(f"TorchCompile failed: {e}")
+        return model
+
 class FoleyTuneBlockSwap:
     @classmethod
     def INPUT_TYPES(cls):
@@ -922,9 +1003,7 @@ class FoleyTuneInpainter:
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "configs", "hunyuanvideo-foley-xxl.yaml")
-        hunyuan_cfg = load_yaml(config_path)
+        hunyuan_cfg = _load_hunyuan_cfg()
 
         rng = torch.Generator(device="cpu").manual_seed(seed)
         audio_frame_rate = hunyuan_cfg.model_config.model_kwargs.audio_frame_rate
@@ -943,14 +1022,12 @@ class FoleyTuneInpainter:
         if init_sr != 48000:
             init_waveform = torchaudio.functional.resample(init_waveform, init_sr, 48000)
 
-        # Apply torch.compile if configured
-        if torch_compile_cfg is not None and not getattr(hunyuan_model, "_blocks_are_compiled", False):
-            try:
-                hunyuan_model = FoleyTuneTorchCompile._apply_torch_compile(
-                    hunyuan_model, torch_compile_cfg
-                )
-            except Exception as e:
-                logger.error(f"TorchCompile failed: {e}")
+        # Reconcile torch.compile with the requested config (compile / recompile / revert to eager).
+        hunyuan_model = FoleyTuneTorchCompile._reconcile_compile(hunyuan_model, torch_compile_cfg)
+        if (torch_compile_cfg is not None and block_swap_args is not None
+                and block_swap_args.get("blocks_to_swap", 0) > 0):
+            logger.warning("torch.compile + BlockSwap active: moving compiled blocks across devices "
+                           "each step can trigger recompiles/guard failures and may erase compile gains.")
 
         # Place model
         if block_swap_args is not None:
@@ -961,6 +1038,8 @@ class FoleyTuneInpainter:
                 block_swap_debug=block_swap_args.get("block_swap_debug", False),
             )
         else:
+            # Clear any stale block-swap config from a prior run before full-GPU placement.
+            hunyuan_model.disable_block_swap()
             hunyuan_model.to(device)
 
         model_dict = AttributeDict(dict(hunyuan_deps))

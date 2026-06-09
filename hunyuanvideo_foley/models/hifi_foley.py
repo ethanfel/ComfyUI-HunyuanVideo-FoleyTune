@@ -611,6 +611,19 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
         logger.info(f"Blocks on {self.main_device} (GPU): {total_main_memory:.2f} MB")
         logger.info("-------------------------------")
 
+    def disable_block_swap(self):
+        """Clear block-swap state so forward() stops swapping.
+
+        block_swap() stores ``blocks_to_swap`` on the model, and forward() gates
+        on it (``is_swapping = blocks_to_swap > 0``). Because the model object is
+        cached and reused across runs, simply *disconnecting* the BlockSwap node
+        leaves that attribute set — so forward() would keep offloading blocks the
+        user no longer asked to swap. Callers that place the model fully on-device
+        must call this first to neutralize a stale config.
+        """
+        self.blocks_to_swap = 0
+        self.prefetch_blocks = 0
+
     def get_empty_string_sequence(self, bs=None) -> torch.Tensor:
         if bs is None:
             return self.empty_string_feat
@@ -633,6 +646,20 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
 
     def build_rope_for_audio_visual(self, audio_emb_len, visual_cond_len):
         assert self.patch_size == 1
+        # RoPE tables depend only on (audio_emb_len, visual_cond_len, device) and are
+        # identical across every denoising step — caching them avoids rebuilding on
+        # the GPU each forward and keeps them on the model's real device (also fixes a
+        # multi-GPU mismatch, since get_nd_rotary_pos_embed builds on cuda:0). Cache
+        # only for inference; training (grad enabled) keeps the fresh-build path so a
+        # cached inference tensor never enters an autograd graph.
+        _use_cache = not torch.is_grad_enabled()
+        _dev = self.empty_clip_feat.device
+        _key = (int(audio_emb_len), int(visual_cond_len), str(_dev))
+        if _use_cache:
+            _cache = self.__dict__.setdefault("_rope_av_cache", {})
+            _hit = _cache.get(_key)
+            if _hit is not None:
+                return _hit
         # ======================================== Build RoPE for audio tokens ======================================
         target_ndim = 1  # n-d RoPE
         rope_sizes = [audio_emb_len]
@@ -665,10 +692,28 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
             theta_rescale_factor=1.0,
             freq_scaling=1.0 * audio_emb_len / visual_cond_len,
         )
-        return freqs_cos, freqs_sin, v_freqs_cos, v_freqs_sin
+        if _use_cache:
+            # Re-materialize as normal (non-inference) tensors so they can be safely
+            # reused across separate inference_mode forwards.
+            with torch.inference_mode(False), torch.no_grad():
+                result = tuple(t.to(_dev).contiguous().clone()
+                               for t in (freqs_cos, freqs_sin, v_freqs_cos, v_freqs_sin))
+            _cache[_key] = result
+            return result
+        return (freqs_cos.to(_dev), freqs_sin.to(_dev),
+                v_freqs_cos.to(_dev), v_freqs_sin.to(_dev))
 
     def build_rope_for_interleaved_audio_visual(self, total_len):
         assert self.patch_size == 1
+        # Same cache rationale as build_rope_for_audio_visual (inference only).
+        _use_cache = not torch.is_grad_enabled()
+        _dev = self.empty_clip_feat.device
+        _key = (int(total_len), str(_dev))
+        if _use_cache:
+            _cache = self.__dict__.setdefault("_rope_il_cache", {})
+            _hit = _cache.get(_key)
+            if _hit is not None:
+                return _hit
         # ========================== Build RoPE for audio tokens ========================
         target_ndim = 1  # n-d RoPE
         rope_sizes = [total_len]
@@ -684,7 +729,13 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
             use_real=True,
             theta_rescale_factor=1.0,
         )
-        return freqs_cos, freqs_sin
+        if _use_cache:
+            with torch.inference_mode(False), torch.no_grad():
+                result = (freqs_cos.to(_dev).contiguous().clone(),
+                          freqs_sin.to(_dev).contiguous().clone())
+            _cache[_key] = result
+            return result
+        return freqs_cos.to(_dev), freqs_sin.to(_dev)
 
     def set_attn_mode(self, new_mode):
         for block in self.triple_blocks:

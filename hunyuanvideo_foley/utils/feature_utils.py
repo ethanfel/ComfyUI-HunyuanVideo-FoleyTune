@@ -97,14 +97,18 @@ def encode_video_with_sync(x: torch.Tensor, model_dict, batch_size: int = -1):
     segments = []
     for i in range(num_segments):
         segments.append(x[:, i * step_size : i * step_size + segment_size])
-    x = torch.stack(segments, dim=1).cuda()  # (B, num_segments, segment_size, 3, 224, 224)
+    # Use the model's actual device (not a hardcoded cuda:0): keeps features on the
+    # right GPU on multi-GPU rigs and doesn't crash on CPU/MPS.
+    dev = next(model_dict.syncformer_model.parameters()).device
+    x = torch.stack(segments, dim=1).to(dev)  # (B, num_segments, segment_size, 3, 224, 224)
 
     outputs = []
     if batch_size < 0:
         batch_size = b * num_segments
     x = rearrange(x, "b s t c h w -> (b s) 1 t c h w")
+    use_amp = (dev.type == "cuda")
     for i in range(0, b * num_segments, batch_size):
-        with torch.autocast(device_type="cuda", enabled=True, dtype=torch.half):
+        with torch.autocast(device_type=dev.type, enabled=use_amp, dtype=torch.half):
             outputs.append(model_dict.syncformer_model(x[i : i + batch_size]))
     x = torch.cat(outputs, dim=0)  # [b * num_segments, 1, 8, 768]
     x = rearrange(x, "(b s) 1 t d -> b (s t) d", b=b)

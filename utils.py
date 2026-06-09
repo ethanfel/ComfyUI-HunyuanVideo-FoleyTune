@@ -124,20 +124,32 @@ def prepare_latents_with_generator(scheduler, batch_size, num_channels_latents, 
 
 
 def _find_start_step(sigmas, strength):
-    """Map a2a strength to the correct starting step via sigma lookup.
+    """Map a2a strength to the starting step via sigma lookup.
 
-    Instead of the naive `steps - int(steps * strength)` which maps linearly
-    to step indices, this finds the step whose sigma is closest to the target.
-    With non-linear sigma schedules (sd3 shift, flux shift) the difference
-    is significant — linear mapping over- or under-noises by up to 15%.
+    Returns ``(start_step, sigma_used)`` where ``sigma_used`` is the scheduler's
+    *grid* sigma at ``start_step`` — NOT the raw ``strength``. The initial latent
+    must be noised to the exact sigma the scheduler assumes on its first step;
+    using the raw strength (which lands between grid points) noises the latent
+    slightly more than the scheduler expects and causes a sub-step discontinuity
+    on the first a2a step. Snapping to the grid sigma removes it.
+
+    Instead of the naive `steps - int(steps * strength)` which maps linearly to
+    step indices, this finds the first grid step whose sigma is <= the target.
+    With non-linear sigma schedules (sd3 shift, flux shift) that difference is
+    significant — linear mapping over- or under-noises by up to ~15%.
     """
-    sigma_target = strength
-    # sigmas are in decreasing order (1.0 → 0.0)
-    # Find first index where sigma <= target (that's where we start denoising)
+    # sigmas has num_steps+1 entries; timesteps has num_steps. Keep at least one
+    # denoising step so the slice timesteps[start_step:] is never empty.
+    n_steps = len(sigmas) - 1
+    start = n_steps - 1
+    # sigmas are in decreasing order (1.0 → 0.0): first index with sigma <= target.
     for i in range(len(sigmas)):
-        if sigmas[i] <= sigma_target:
-            return i, sigma_target
-    return len(sigmas) - 1, sigma_target
+        if sigmas[i] <= strength:
+            start = i
+            break
+    start = max(0, min(start, n_steps - 1))
+    sigma_used = float(sigmas[start])
+    return start, sigma_used
 
 
 def _blend_reference_noise(gaussian_noise, init_latents, noise_blend):
@@ -280,6 +292,14 @@ def denoise_process_with_generator(
         pre_sync_input = syncformer_feat_rep
         pre_text_input = text_feat_rep
 
+    # Cast the CFG-invariant conditioning to the model's compute dtype ONCE.
+    # These tensors are constant across denoising steps (only the latent changes),
+    # so re-casting them every step — as the old loop did — was pure allocator churn.
+    compute_dtype = next(model_dict.foley_model.parameters()).dtype
+    pre_siglip2_input = pre_siglip2_input.to(dtype=compute_dtype)
+    pre_sync_input = pre_sync_input.to(dtype=compute_dtype)
+    pre_text_input = pre_text_input.to(dtype=compute_dtype)
+
     pbar = ProgressBar(len(timesteps))
     with torch.inference_mode():
         for i, t in enumerate(timesteps):
@@ -296,29 +316,20 @@ def denoise_process_with_generator(
             t_expand = t.expand(latent_input.shape[0]).contiguous()
             # -----------------------------------------------------------------------------
 
-            # Use precomputed conditional/unconditional features (no per-step rebuild)
-            siglip2_feat_input = pre_siglip2_input
-            syncformer_feat_input = pre_sync_input
-            text_feat_input = pre_text_input
-
-            # Match inputs to the model's actual compute dtype to avoid matmul dtype mismatches
-            compute_dtype = next(model_dict.foley_model.parameters()).dtype
+            # CFG-invariant features were cast once above; only the latent changes.
             latent_input = latent_input.to(dtype=compute_dtype)
-            siglip2_feat_input = siglip2_feat_input.to(dtype=compute_dtype)
-            syncformer_feat_input = syncformer_feat_input.to(dtype=compute_dtype)
-            text_feat_input = text_feat_input.to(dtype=compute_dtype)
 
             # Predict the noise residual
             if compute_dtype in (torch.float16, torch.bfloat16):
                 with torch.autocast(device_type=latent_input.device.type, dtype=compute_dtype):
                     noise_pred = model_dict.foley_model(
-                        x=latent_input, t=t_expand, cond=text_feat_input,
-                        clip_feat=siglip2_feat_input, sync_feat=syncformer_feat_input
+                        x=latent_input, t=t_expand, cond=pre_text_input,
+                        clip_feat=pre_siglip2_input, sync_feat=pre_sync_input
                     )["x"]
             else:
                 noise_pred = model_dict.foley_model(
-                    x=latent_input, t=t_expand, cond=text_feat_input,
-                    clip_feat=siglip2_feat_input, sync_feat=syncformer_feat_input
+                    x=latent_input, t=t_expand, cond=pre_text_input,
+                    clip_feat=pre_siglip2_input, sync_feat=pre_sync_input
                 )["x"]
 
             if guidance_scale > 1.0:
@@ -669,6 +680,8 @@ def chunked_denoise_process(
         timesteps = timesteps[a2a_start_step:]
 
     # --- Precompute per-chunk CFG features ---
+    # Cast conditioning to the compute dtype once here; it's constant across steps.
+    compute_dtype = next(model_dict.foley_model.parameters()).dtype
     chunk_cfg_inputs = []
     for i in range(len(chunks)):
         vis = chunk_visual_feats[i]
@@ -703,7 +716,9 @@ def chunked_denoise_process(
             cfg_text = text_rep
 
         chunk_cfg_inputs.append({
-            "clip": cfg_clip, "sync": cfg_sync, "text": cfg_text,
+            "clip": cfg_clip.to(dtype=compute_dtype),
+            "sync": cfg_sync.to(dtype=compute_dtype),
+            "text": cfg_text.to(dtype=compute_dtype),
         })
 
     # --- Denoising loop ---
@@ -725,15 +740,14 @@ def chunked_denoise_process(
                 latent_input = torch.cat([latents] * 2) if guidance_scale > 1.0 else latents
                 t_expand = t.expand(latent_input.shape[0]).contiguous()
 
-                compute_dtype = next(model_dict.foley_model.parameters()).dtype
+                # cfg_in tensors were cast to compute_dtype at build time; only the latent changes.
                 latent_input = latent_input.to(dtype=compute_dtype)
 
                 if compute_dtype in (torch.float16, torch.bfloat16):
                     with torch.autocast(device_type=device.type, dtype=compute_dtype):
                         noise_pred = model_dict.foley_model(
-                            x=latent_input, t=t_expand, cond=cfg_in["text"].to(compute_dtype),
-                            clip_feat=cfg_in["clip"].to(compute_dtype),
-                            sync_feat=cfg_in["sync"].to(compute_dtype),
+                            x=latent_input, t=t_expand, cond=cfg_in["text"],
+                            clip_feat=cfg_in["clip"], sync_feat=cfg_in["sync"],
                         )["x"]
                 else:
                     noise_pred = model_dict.foley_model(

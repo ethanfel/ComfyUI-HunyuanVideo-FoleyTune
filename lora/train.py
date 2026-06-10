@@ -712,7 +712,9 @@ def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
                 clip_feat=cfg_clip,
                 sync_feat=cfg_sync,
             )["x"]
-        v_uncond, v_cond = v_pred.chunk(2)
+        # CFG combine in fp32 (parity with production denoise loops; the
+        # scheduler integrates in fp32 internally)
+        v_uncond, v_cond = v_pred.float().chunk(2)
         v_guided = v_uncond + cfg_scale * (v_cond - v_uncond)
         latents = scheduler.step(v_guided, t, latents)[0]
 

@@ -217,6 +217,13 @@ def denoise_process_with_generator(
     device = model_dict.device
 
     shift = getattr(model_dict.foley_model, '_flow_shift_override', cfg.diffusion_config.sample_flow_shift)
+    if (hasattr(model_dict.foley_model, '_flow_shift_override')
+            and shift != cfg.diffusion_config.sample_flow_shift):
+        # The override is a model attribute, so it survives removal of the
+        # ModelSampling node — surface it so a stale value can't act silently.
+        logger.warning(f"Flow shift override {shift} active (ModelSampling node; sticky on the loaded "
+                       f"model — set shift back to {cfg.diffusion_config.sample_flow_shift} or reload "
+                       f"the model to clear it)")
     scheduler = FlowMatchDiscreteScheduler(
         shift=shift,
         solver=sampler
@@ -255,31 +262,36 @@ def denoise_process_with_generator(
     text_feat_rep = text_feats['text_feat'].repeat(batch_size, 1, 1)
     uncond_text_rep = text_feats['uncond_text_feat'].repeat(batch_size, 1, 1)
 
-    # --- PAD EMBEDDINGS TOKENZIER ---
+    # --- TEXT SEQUENCE LENGTH ---
 
-    T_cur_len = int(text_feat_rep.shape[1])
-    cap   = _caps(model_dict, cfg)
+    T_cond = int(text_feat_rep.shape[1])
+    T_uncond = int(uncond_text_rep.shape[1])
+    cap = _caps(model_dict, cfg)
 
-    # Two-bucket policy: 77 normally, 128 if prompt exceeds 77 (respect hard caps)
-    if T_cur_len <= 77:
-        T_fixed = min(77, cap)
+    if getattr(model_dict.foley_model, "_blocks_are_compiled", False):
+        # torch.compile path: pad to a fixed bucket so the text shape stays
+        # stable across prompts and compiled graphs are reused.
+        # Two-bucket policy: 77 normally, 128 if prompt exceeds 77 (respect hard caps)
+        T_fixed = min(77, cap) if T_cond <= 77 else min(128, cap)
+        # Cache once per session to avoid flapping if prompts bounce around;
+        # stick to the bigger bucket once it's triggered.
+        if not hasattr(model_dict.foley_model, "_text_len_fixed"):
+            model_dict.foley_model._text_len_fixed = T_fixed
+        else:
+            model_dict.foley_model._text_len_fixed = max(model_dict.foley_model._text_len_fixed, T_fixed)
+        T_use = model_dict.foley_model._text_len_fixed
+        logger.info(f"Using T_FIXED bucket: {T_use} (prompt had {T_cond} tokens; cap {cap})")
     else:
-        T_fixed = min(128, cap)
+        # Eager path: natural token length, capped like the reference pipeline.
+        # Training, training-eval and the original pipeline all run text at its
+        # natural length; bucketing to 77 fed the attention dozens of zero-pad
+        # tokens the model never saw in (LoRA) training (use_attention_mask is
+        # False, so padding IS attended).
+        T_use = max(T_cond, T_uncond) if guidance_scale > 1.0 else T_cond
+        T_use = min(T_use, cap)
 
-    # Cache once per session to avoid flapping if prompts bounce around
-    if not hasattr(model_dict.foley_model, "_text_len_fixed"):
-        model_dict.foley_model._text_len_fixed = T_fixed
-    # If you prefer “sticky first bucket,” comment the next line.
-    else:
-        # stick to bigger bucket if it's triggered
-        model_dict.foley_model._text_len_fixed = max(model_dict.foley_model._text_len_fixed, T_fixed)
-
-    T_fixed = model_dict.foley_model._text_len_fixed
-    logger.info(f"Using T_FIXED bucket: {T_fixed} (prompt had {T_cur_len} tokens; cap {cap})")
-
-    # Normalize shapes for compile reuse
-    text_feat_rep   = _pad_or_trim_time(text_feat_rep,   T_fixed)
-    uncond_text_rep = _pad_or_trim_time(uncond_text_rep, T_fixed)
+    text_feat_rep   = _pad_or_trim_time(text_feat_rep,   T_use)
+    uncond_text_rep = _pad_or_trim_time(uncond_text_rep, T_use)
 
     uncond_siglip2_feat = model_dict.foley_model.get_empty_clip_sequence(bs=batch_size, len=siglip2_feat_rep.shape[1]).to(device)
     uncond_syncformer_feat = model_dict.foley_model.get_empty_sync_sequence(bs=batch_size, len=syncformer_feat_rep.shape[1]).to(device)
@@ -333,7 +345,9 @@ def denoise_process_with_generator(
                 )["x"]
 
             if guidance_scale > 1.0:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                # CFG combine in fp32 (the reference pipeline upcasts before the
+                # combine; the scheduler integrates in fp32 anyway)
+                noise_pred_uncond, noise_pred_text = noise_pred.float().chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
             # Scheduler step
@@ -622,6 +636,11 @@ def chunked_denoise_process(
     # FlowMatchDiscreteScheduler.step() increments an internal _step_index.
     chunk_schedulers = []
     shift = getattr(model_dict.foley_model, '_flow_shift_override', cfg.diffusion_config.sample_flow_shift)
+    if (hasattr(model_dict.foley_model, '_flow_shift_override')
+            and shift != cfg.diffusion_config.sample_flow_shift):
+        logger.warning(f"Flow shift override {shift} active (ModelSampling node; sticky on the loaded "
+                       f"model — set shift back to {cfg.diffusion_config.sample_flow_shift} or reload "
+                       f"the model to clear it)")
     for _ in chunks:
         sched = FlowMatchDiscreteScheduler(
             shift=shift,
@@ -692,12 +711,18 @@ def chunked_denoise_process(
         text_rep = txt["text_feat"].repeat(batch_size, 1, 1)
         uncond_rep = txt["uncond_text_feat"].repeat(batch_size, 1, 1)
 
-        # Pad/trim text to fixed bucket
-        T_cur = text_rep.shape[1]
+        # Text length: fixed bucket under torch.compile (shape stability),
+        # natural length otherwise (matches training — see denoise_process_with_generator)
+        T_cond = text_rep.shape[1]
+        T_uncond = uncond_rep.shape[1]
         cap = _caps(model_dict, cfg)
-        T_fixed = min(77, cap) if T_cur <= 77 else min(128, cap)
-        text_rep = _pad_or_trim_time(text_rep, T_fixed)
-        uncond_rep = _pad_or_trim_time(uncond_rep, T_fixed)
+        if getattr(model_dict.foley_model, "_blocks_are_compiled", False):
+            T_use = min(77, cap) if T_cond <= 77 else min(128, cap)
+        else:
+            T_use = max(T_cond, T_uncond) if guidance_scale > 1.0 else T_cond
+            T_use = min(T_use, cap)
+        text_rep = _pad_or_trim_time(text_rep, T_use)
+        uncond_rep = _pad_or_trim_time(uncond_rep, T_use)
 
         uncond_clip = model_dict.foley_model.get_empty_clip_sequence(
             bs=batch_size, len=siglip2_rep.shape[1]
@@ -756,7 +781,8 @@ def chunked_denoise_process(
                     )["x"]
 
                 if guidance_scale > 1.0:
-                    uncond_pred, text_pred = noise_pred.chunk(2)
+                    # CFG combine in fp32 (matches reference; scheduler integrates fp32)
+                    uncond_pred, text_pred = noise_pred.float().chunk(2)
                     noise_pred = uncond_pred + guidance_scale * (text_pred - uncond_pred)
 
                 chunk_latents[c_idx] = chunk_schedulers[c_idx].step(noise_pred, t, latents)[0]

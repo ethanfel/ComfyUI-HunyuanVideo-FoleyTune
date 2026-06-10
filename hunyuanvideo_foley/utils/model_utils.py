@@ -477,7 +477,8 @@ def denoise_process(visual_feats, text_feats, audio_len_in_s, model_dict, cfg, g
         audio = model_dict.dac_model.decode(latents)
         audio = audio.float().cpu()
 
-    audio = audio[:, :int(audio_len_in_s*model_dict.dac_model.sample_rate)]
+    # DAC decode returns [B, 1, T] — trim the TIME axis (dim 2, not dim 1)
+    audio = audio[:, :, :int(audio_len_in_s*model_dict.dac_model.sample_rate)]
     sample_rate = model_dict.dac_model.sample_rate
 
     if hasattr(model_dict, 'manager') and hasattr(model_dict.manager, 'release_inference_models'):

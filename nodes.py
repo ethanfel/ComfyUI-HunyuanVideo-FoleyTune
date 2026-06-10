@@ -547,7 +547,7 @@ class FoleyTuneChunkedSampler:
             if init_waveform.dim() == 2:
                 init_waveform = init_waveform.unsqueeze(0)
             if init_waveform.shape[1] > 1:
-                init_waveform = init_waveform[:, :1, :]  # take first channel
+                init_waveform = init_waveform.mean(dim=1, keepdim=True)  # downmix like training prep
             if init_sr != 48000:
                 init_waveform = torchaudio.functional.resample(init_waveform, init_sr, 48000)
             init_latents = encode_audio_to_latents(init_waveform, hunyuan_deps["dac_model"], device)
@@ -1018,7 +1018,7 @@ class FoleyTuneInpainter:
         if init_waveform.dim() == 2:
             init_waveform = init_waveform.unsqueeze(0)
         if init_waveform.shape[1] > 1:
-            init_waveform = init_waveform[:, :1, :]
+            init_waveform = init_waveform.mean(dim=1, keepdim=True)  # downmix like training prep
         if init_sr != 48000:
             init_waveform = torchaudio.functional.resample(init_waveform, init_sr, 48000)
 
@@ -1212,7 +1212,7 @@ class FoleyTuneStyleTransfer:
             if wav.dim() == 2:
                 wav = wav.unsqueeze(0)
             if wav.shape[1] > 1:
-                wav = wav[:, :1, :]
+                wav = wav.mean(dim=1, keepdim=True)  # downmix like training prep
             if sr != 48000:
                 wav = torchaudio.functional.resample(wav, sr, 48000)
             return wav

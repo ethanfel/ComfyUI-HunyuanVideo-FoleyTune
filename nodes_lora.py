@@ -1306,10 +1306,14 @@ class FoleyTuneLoRATrainer:
             _save_spectrogram(ref_wav_np, 48000, samples_path / "reference")
 
         # Production-parity eval CFG: CLAP-encode the negative prompt for the
-        # uncond branch instead of the legacy zero embedding (empty = legacy)
+        # uncond branch instead of the legacy zero embedding (empty = legacy).
+        # CLAP weights are inference tensors (created under ComfyUI's inference
+        # mode) and cannot forward inside this inference_mode(False) region —
+        # re-enter inference mode for the encode, then launder the output
+        # through numpy so the embedding is a normal tensor usable in training.
         eval_uncond = None
         if eval_negative_prompt:
-            with torch.no_grad():
+            with torch.inference_mode():
                 hunyuan_deps.clap_model.to(device)
                 _neg_inputs = hunyuan_deps.clap_tokenizer(
                     [eval_negative_prompt], padding=True, truncation=True, max_length=100,
@@ -1318,8 +1322,9 @@ class FoleyTuneLoRATrainer:
                 _neg_out = hunyuan_deps.clap_model(
                     **_neg_inputs, output_hidden_states=True, return_dict=True
                 )
-                eval_uncond = _neg_out.last_hidden_state.cpu().float()
+                _neg_emb = _neg_out.last_hidden_state.float().cpu()
                 hunyuan_deps.clap_model.to(mm.unet_offload_device())
+            eval_uncond = torch.from_numpy(_neg_emb.numpy().copy())
             logger.info(f"Eval uncond text: CLAP({eval_negative_prompt!r}) {tuple(eval_uncond.shape)}")
 
         # Waveform spectral loss needs the DAC decoder resident on GPU (frozen) for
@@ -1942,7 +1947,12 @@ class FoleyTuneLoRAScheduler:
             if not neg_prompt:
                 return None
             if neg_prompt not in _neg_embed_cache:
-                with torch.no_grad():
+                # CLAP weights are inference tensors (created under ComfyUI's
+                # inference mode) and cannot forward inside the training block's
+                # inference_mode(False) region — re-enter inference mode for the
+                # encode, then launder the output through numpy so the cached
+                # embedding is a normal tensor usable during training.
+                with torch.inference_mode():
                     hunyuan_deps.clap_model.to(device)
                     _inputs = hunyuan_deps.clap_tokenizer(
                         [neg_prompt], padding=True, truncation=True, max_length=100,
@@ -1951,8 +1961,9 @@ class FoleyTuneLoRAScheduler:
                     _out = hunyuan_deps.clap_model(
                         **_inputs, output_hidden_states=True, return_dict=True
                     )
-                    _neg_embed_cache[neg_prompt] = _out.last_hidden_state.cpu().float()
+                    _emb = _out.last_hidden_state.float().cpu()
                     hunyuan_deps.clap_model.to(mm.unet_offload_device())
+                _neg_embed_cache[neg_prompt] = torch.from_numpy(_emb.numpy().copy())
                 logger.info(f"Eval uncond text: CLAP({neg_prompt!r}) "
                             f"{tuple(_neg_embed_cache[neg_prompt].shape)}")
             return _neg_embed_cache[neg_prompt]

@@ -163,6 +163,39 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16, clip
     return dataset
 
 
+def harmonize_dataset(dataset):
+    """Align feature lengths across a dataset combined from multiple directories.
+
+    prepare_dataset() enforces consistent lengths within ONE directory, but when
+    several directories are concatenated (multi-dataset_json sweeps) their
+    lengths can still disagree — e.g. folders with different clip durations —
+    which crashes torch.cat at batch-assembly time, possibly hours into a run.
+    Tail-truncate every modality to its global minimum; the cuts stay
+    audio/visual-consistent because each modality's minimum comes from the same
+    shortest clips.
+    """
+    if not dataset:
+        return dataset
+    for key, dim, label in (("latents", -1, "latent"),
+                            ("clip_features", 1, "clip"),
+                            ("sync_features", 1, "sync")):
+        lengths = {d[key].shape[dim] for d in dataset}
+        if len(lengths) <= 1:
+            continue
+        target = min(lengths)
+        if key == "sync_features":
+            target = (target // 8) * 8  # model requires sync length % 8 == 0
+        n_cut = sum(1 for d in dataset if d[key].shape[dim] > target)
+        logger.warning(f"Combined dataset has mismatched {label} lengths {sorted(lengths)} "
+                       f"— truncating {n_cut} clip(s) to {target}")
+        for d in dataset:
+            if key == "latents":
+                d[key] = d[key][..., :target]
+            else:
+                d[key] = d[key][:, :target]
+    return dataset
+
+
 def prepare_single_entry(npz_path: str, dac_model, device, dtype=torch.bfloat16):
     """Load a single NPZ + its audio file and DAC-encode it.
 
@@ -229,8 +262,17 @@ def prepare_single_entry(npz_path: str, dac_model, device, dtype=torch.bfloat16)
 def sample_timesteps(batch_size, mode, device, dtype,
                      sigma=1.0, curriculum_switch=0.6,
                      step=0, start_step=0, total_steps=1000,
-                     t_min=0.0, t_max=1.0):
-    """Sample timesteps t in [t_min, t_max] for flow matching training."""
+                     t_min=0.0, t_max=1.0, t_range_mode="clamp"):
+    """Sample timesteps t in [t_min, t_max] for flow matching training.
+
+    t_range_mode controls how the [t_min, t_max] restriction is applied:
+        "clamp"   — clip out-of-range draws to the boundary. For uniform
+                    sampling this leaves point masses at t_min/t_max (e.g. 5%
+                    of draws each at 0.05/0.95) — the historical behaviour all
+                    pre-2026-06 recipes were validated with.
+        "rescale" — affine-map draws into the range; same exclusion of the
+                    extremes without the boundary spikes.
+    """
     if mode == "logit_normal":
         u = torch.randn(batch_size, device=device, dtype=dtype) * sigma
         t = torch.sigmoid(u)
@@ -244,7 +286,10 @@ def sample_timesteps(batch_size, mode, device, dtype,
     else:  # uniform
         t = torch.rand(batch_size, device=device, dtype=dtype)
     if t_min > 0.0 or t_max < 1.0:
-        t = t.clamp(min=t_min, max=t_max)
+        if t_range_mode == "rescale":
+            t = t_min + (t_max - t_min) * t
+        else:
+            t = t.clamp(min=t_min, max=t_max)
     return t
 
 
@@ -594,10 +639,18 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
 
 @torch.no_grad()
 def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
-                         num_steps=50, seed=42, cfg_scale=4.5):
+                         num_steps=50, seed=42, cfg_scale=4.5,
+                         uncond_text_feat=None):
     """Generate an audio sample for evaluation during training.
 
     Uses classifier-free guidance (CFG) matching the inference pipeline.
+
+    Args:
+        uncond_text_feat: optional [1, seq, 768] CLAP embedding of a negative
+            prompt for the CFG uncond branch — the production inference
+            convention (model_utils.denoise_process encodes e.g. "noisy,
+            harsh"). When None, falls back to the legacy zero embedding,
+            which production never uses.
 
     Returns:
         waveform: [1, samples] numpy array
@@ -621,7 +674,18 @@ def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
     # Build unconditional embeddings for CFG
     uncond_clip = model.get_empty_clip_sequence(bs=1, len=clip_feat.shape[1]).to(device=device, dtype=dtype)
     uncond_sync = model.get_empty_sync_sequence(bs=1, len=sync_feat.shape[1]).to(device=device, dtype=dtype)
-    uncond_text = torch.zeros_like(text_feat)
+    if uncond_text_feat is not None:
+        # Match the cond sequence length for the CFG batch cat. Production
+        # tokenizes [neg, prompt] together so lengths agree there; zero-pad
+        # is the closest stand-in when the negative prompt is shorter.
+        uncond_text = uncond_text_feat.to(device=device, dtype=dtype)
+        seq_c = text_feat.shape[1]
+        if uncond_text.shape[1] < seq_c:
+            uncond_text = F.pad(uncond_text, (0, 0, 0, seq_c - uncond_text.shape[1]))
+        elif uncond_text.shape[1] > seq_c:
+            uncond_text = uncond_text[:, :seq_c]
+    else:
+        uncond_text = torch.zeros_like(text_feat)
 
     # Precompute doubled-batch features
     cfg_clip = torch.cat([uncond_clip, clip_feat])
@@ -720,8 +784,15 @@ def save_loss_curve(losses, path, start_step=0, smoothing=0.95):
 # -- Checkpoint I/O ----------------------------------------------------------
 
 def save_checkpoint(model, optimizer, scheduler, step, meta, path, final=False,
-                    ema_state=None):
-    """Save training checkpoint or final adapter."""
+                    ema_state=None, eval_state=None):
+    """Save training checkpoint or final adapter.
+
+    eval_state: for schedule-free optimizers, the averaged (eval-mode) LoRA
+        weights. `state_dict` keeps the raw train-mode weights so optimizer
+        state stays consistent on resume; inference loaders prefer
+        `eval_state_dict` so a mid-training checkpoint sounds exactly like the
+        eval sample generated alongside it.
+    """
     # PiSSA modifies base weights during init — must save them too
     if meta.get("init_mode") == "pissa":
         state = {"state_dict": get_lora_and_base_state_dict(model), "meta": meta}
@@ -733,6 +804,8 @@ def save_checkpoint(model, optimizer, scheduler, step, meta, path, final=False,
         state["step"] = step
         if ema_state is not None:
             state["ema_state"] = {k: v.cpu() for k, v in ema_state.items()}
+        if eval_state is not None:
+            state["eval_state_dict"] = {k: v.cpu() for k, v in eval_state.items()}
     torch.save(state, path)
 
 

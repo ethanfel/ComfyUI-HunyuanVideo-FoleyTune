@@ -37,7 +37,12 @@ _BLOCK_RE = re.compile(r"^(triple_blocks\.\d+)\.")
 
 
 def _load_adapter_checkpoint(path):
-    """Load a LoRA checkpoint from .safetensors or .pt format."""
+    """Load a LoRA checkpoint from .safetensors or .pt format.
+
+    Schedule-free training checkpoints carry raw train-mode weights in
+    `state_dict` (for resume) and the averaged weights in `eval_state_dict`
+    — merge with the latter, matching what the eval samples were generated with.
+    """
     if path.endswith(".safetensors"):
         state_dict = load_safetensors(path)
         json_path = path.replace(".safetensors", ".json")
@@ -47,7 +52,11 @@ def _load_adapter_checkpoint(path):
             with open(json_path) as f:
                 meta = json.load(f)
         return {"state_dict": state_dict, "meta": meta}
-    return torch.load(path, map_location="cpu", weights_only=False)
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    if isinstance(ckpt, dict) and "eval_state_dict" in ckpt:
+        ckpt = {**ckpt, "state_dict": ckpt["eval_state_dict"]}
+        logger.info("Using schedule-free averaged (eval-mode) weights from checkpoint")
+    return ckpt
 
 
 def _parse_checkpoint(ckpt):

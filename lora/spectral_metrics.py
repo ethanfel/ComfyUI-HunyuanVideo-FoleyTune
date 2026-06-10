@@ -91,6 +91,16 @@ def reference_metrics(gen_wav: np.ndarray, ref_wav: np.ndarray, sr: int) -> dict
     gen_wav = gen_wav[:min_len]
     ref_wav = ref_wav[:min_len]
 
+    # Align levels before comparing: eval samples are RMS-normalised for
+    # listening while references keep their native level (a large offset for
+    # globally-normalised datasets, where clip loudness varies). These metrics
+    # measure spectral/temporal match, not loudness, and a constant gain offset
+    # otherwise dominates LSD/SC/MCD. PBC is gain-invariant either way.
+    gen_rms = np.sqrt(np.mean(gen_wav ** 2))
+    ref_rms = np.sqrt(np.mean(ref_wav ** 2))
+    if gen_rms > 1e-8 and ref_rms > 1e-8:
+        gen_wav = gen_wav * (ref_rms / gen_rms)
+
     n_frames = 1 + (min_len - n_fft) // hop
     if n_frames < 1:
         return {"log_spectral_distance_db": 0.0, "spectral_convergence": 0.0,

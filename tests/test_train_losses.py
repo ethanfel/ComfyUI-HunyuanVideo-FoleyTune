@@ -152,3 +152,97 @@ def test_wav_spectral_adaptive_flag_runs_both():
     b = torch.randn(2, 24000)
     assert float(waveform_spectral_loss(a, b, energy_adaptive=True)) > 0.0
     assert float(waveform_spectral_loss(a, b, energy_adaptive=False)) > 0.0
+
+
+# -- harmonize_dataset (multi-directory length alignment) ----------------------
+
+def _entry(lat_t, clip_t, sync_t, name="c"):
+    return {
+        "latents": torch.randn(1, 128, lat_t),
+        "clip_features": torch.randn(1, clip_t, 768),
+        "sync_features": torch.randn(1, sync_t, 768),
+        "text_embedding": torch.randn(1, 12, 768),
+        "prompt": "p", "name": name,
+    }
+
+
+def test_harmonize_noop_on_uniform_lengths():
+    from lora.train import harmonize_dataset
+    ds = [_entry(500, 80, 200, f"c{i}") for i in range(3)]
+    out = harmonize_dataset(ds)
+    assert all(d["latents"].shape[-1] == 500 for d in out)
+    assert all(d["clip_features"].shape[1] == 80 for d in out)
+    assert all(d["sync_features"].shape[1] == 200 for d in out)
+
+
+def test_harmonize_truncates_cross_dir_mismatch():
+    from lora.train import harmonize_dataset
+    # dir A: 10s clips, dir B: 8s clips — previously crashed torch.cat at batch time
+    ds = [_entry(500, 80, 200, "a"), _entry(400, 64, 160, "b")]
+    out = harmonize_dataset(ds)
+    assert all(d["latents"].shape[-1] == 400 for d in out)
+    assert all(d["clip_features"].shape[1] == 64 for d in out)
+    assert all(d["sync_features"].shape[1] == 160 for d in out)
+    # batch assembly must now work
+    torch.cat([d["latents"] for d in out])
+    torch.cat([d["clip_features"] for d in out])
+    torch.cat([d["sync_features"] for d in out])
+
+
+def test_harmonize_keeps_sync_multiple_of_8():
+    from lora.train import harmonize_dataset
+    ds = [_entry(500, 80, 168, "a"), _entry(480, 78, 164, "b")]
+    out = harmonize_dataset(ds)
+    assert all(d["sync_features"].shape[1] % 8 == 0 for d in out)
+
+
+# -- reference_metrics gain alignment ------------------------------------------
+
+def test_reference_metrics_gain_invariant():
+    import numpy as np
+    from lora.spectral_metrics import reference_metrics
+    rng = np.random.default_rng(0)
+    ref = rng.standard_normal(48000).astype(np.float64) * 0.05
+    gen = ref + rng.standard_normal(48000) * 0.005
+    m_matched = reference_metrics(gen, ref, 48000)
+    # A pure level offset (e.g. -27 dBFS eval norm vs natural-level reference)
+    # must not change the spectral-match metrics
+    m_scaled = reference_metrics(gen * 0.1, ref, 48000)
+    for k in ("log_spectral_distance_db", "spectral_convergence",
+              "mel_cepstral_distortion", "per_band_correlation"):
+        assert abs(m_matched[k] - m_scaled[k]) < 1e-6, k
+
+
+# -- sample_timesteps t_range_mode ---------------------------------------------
+
+def test_t_range_clamp_has_boundary_point_masses():
+    from lora.train import sample_timesteps
+    torch.manual_seed(0)
+    t = sample_timesteps(20000, "uniform", "cpu", torch.float32,
+                         t_min=0.05, t_max=0.95, t_range_mode="clamp")
+    assert float(t.min()) >= 0.05 and float(t.max()) <= 0.95
+    # ~5% of uniform draws land below 0.05 and get clipped to exactly 0.05
+    assert float((t == 0.05).float().mean()) > 0.03
+    assert float((t == 0.95).float().mean()) > 0.03
+
+
+def test_t_range_rescale_removes_point_masses():
+    from lora.train import sample_timesteps
+    torch.manual_seed(0)
+    t = sample_timesteps(20000, "uniform", "cpu", torch.float32,
+                         t_min=0.05, t_max=0.95, t_range_mode="rescale")
+    assert float(t.min()) >= 0.05 and float(t.max()) <= 0.95
+    assert float((t == 0.05).float().mean()) < 0.001
+    assert float((t == 0.95).float().mean()) < 0.001
+    # still uniform-ish over the window: mean near the midpoint
+    assert abs(float(t.mean()) - 0.5) < 0.01
+
+
+def test_t_range_default_is_clamp():
+    from lora.train import sample_timesteps
+    torch.manual_seed(0)
+    a = sample_timesteps(1000, "uniform", "cpu", torch.float32, t_min=0.05, t_max=0.95)
+    torch.manual_seed(0)
+    b = sample_timesteps(1000, "uniform", "cpu", torch.float32,
+                         t_min=0.05, t_max=0.95, t_range_mode="clamp")
+    assert torch.equal(a, b)

@@ -25,7 +25,8 @@ from .lora.lora import (
     FOLEY_TARGET_PRESETS, LoRALinear,
 )
 from .lora.train import (
-    prepare_dataset, prepare_single_entry, sample_timesteps, flow_matching_loss,
+    prepare_dataset, prepare_single_entry, harmonize_dataset,
+    sample_timesteps, flow_matching_loss,
     generate_eval_sample, save_checkpoint, save_meta_json,
     visual_dropout_curriculum, compute_channel_weights,
 )
@@ -34,7 +35,13 @@ from PIL import Image, ImageDraw
 
 
 def _load_adapter_checkpoint(path: str) -> dict:
-    """Load a LoRA checkpoint from .safetensors or .pt format."""
+    """Load a LoRA checkpoint from .safetensors or .pt format.
+
+    Used by inference paths (loader/evaluator), NOT by training resume.
+    Schedule-free checkpoints carry raw train-mode weights in `state_dict`
+    (for resume) and the averaged weights in `eval_state_dict` — prefer the
+    latter so loading a mid-training checkpoint matches its eval sample.
+    """
     if path.endswith(".safetensors"):
         state_dict = load_safetensors(path)
         json_path = path.replace(".safetensors", ".json")
@@ -43,7 +50,11 @@ def _load_adapter_checkpoint(path: str) -> dict:
             with open(json_path) as f:
                 meta = json.load(f)
         return {"state_dict": state_dict, "meta": meta}
-    return torch.load(path, map_location="cpu", weights_only=False)
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    if isinstance(ckpt, dict) and "eval_state_dict" in ckpt:
+        ckpt = {**ckpt, "state_dict": ckpt["eval_state_dict"]}
+        logger.info("Using schedule-free averaged (eval-mode) weights from checkpoint")
+    return ckpt
 
 FOLEYTUNE_AUDIO_DATASET = "FOLEYTUNE_AUDIO_DATASET"
 
@@ -917,6 +928,10 @@ class FoleyTuneLoRATrainer:
                     "default": 1.0, "min": 0.8, "max": 1.0, "step": 0.01,
                     "tooltip": "Maximum timestep for sampling. Avoids near-noise timesteps. 0.95 recommended.",
                 }),
+                "t_range_mode": (["clamp", "rescale"], {
+                    "default": "clamp",
+                    "tooltip": "How to restrict t to [t_min, t_max]. clamp = clip out-of-range draws to the boundary (historical; leaves ~5% point masses at each boundary for uniform sampling). rescale = affine-map into the range, no boundary spikes.",
+                }),
                 "optimizer_type": (["adamw", "prodigy", "prodigy_plus"], {"default": "adamw"}),
                 "prodigy_d_coef": ("FLOAT", {
                     "default": 1.0, "min": 0.01, "max": 10.0, "step": 0.01,
@@ -939,6 +954,10 @@ class FoleyTuneLoRATrainer:
                 "dataset_json": ("STRING", {
                     "default": "",
                     "tooltip": "Path to dataset.json (or comma-separated paths for multiple datasets). When set, uses train/val split instead of scanning data_dir for all .npz files.",
+                }),
+                "eval_negative_prompt": ("STRING", {
+                    "default": "",
+                    "tooltip": "Negative prompt for the eval-sample CFG uncond branch (CLAP-encoded), matching production inference. Empty = legacy zero-embedding uncond. Production default: 'noisy, harsh'.",
                 }),
             },
         }
@@ -968,12 +987,13 @@ class FoleyTuneLoRATrainer:
               channel_loss_weight=False,
               temporal_variance_weight=0.0,
               tv_gate_sigma=0.3, vd_curriculum_ratio=0.0,
-              t_min=0.0, t_max=1.0, optimizer_type="adamw",
+              t_min=0.0, t_max=1.0, t_range_mode="clamp", optimizer_type="adamw",
               visual_dropout_prob=0.0,
               gradient_checkpointing=False,
               freeze_blocks=0,
               resume_from="", dataset_json="",
-              prodigy_d_coef=1.0, prodigy_growth_rate=0.0):
+              prodigy_d_coef=1.0, prodigy_growth_rate=0.0,
+              eval_negative_prompt=""):
 
         import random
         device = mm.get_torch_device()
@@ -998,6 +1018,8 @@ class FoleyTuneLoRATrainer:
             visual_dropout_prob,
             gradient_checkpointing, freeze_blocks, resume_from,
             dataset_json, prodigy_d_coef, prodigy_growth_rate,
+            t_range_mode=t_range_mode,
+            eval_negative_prompt=eval_negative_prompt,
         )
 
     def _train_inner(self, hunyuan_model, hunyuan_deps, data_dir, output_dir, target, rank,
@@ -1015,7 +1037,8 @@ class FoleyTuneLoRATrainer:
                      visual_dropout_prob,
                      gradient_checkpointing, freeze_blocks, resume_from,
                      dataset_json="",
-                     prodigy_d_coef=1.0, prodigy_growth_rate=0.0):
+                     prodigy_d_coef=1.0, prodigy_growth_rate=0.0,
+                     t_range_mode="clamp", eval_negative_prompt=""):
         import random
 
         torch.manual_seed(seed)
@@ -1033,7 +1056,10 @@ class FoleyTuneLoRATrainer:
         val_entry = None
         ds_cfg = None
         dataset_jsons = [p.strip() for p in dataset_json.split(",") if p.strip()] if dataset_json else []
-        dataset_jsons = [p for p in dataset_jsons if os.path.exists(p)]
+        _missing = [p for p in dataset_jsons if not os.path.exists(p)]
+        if _missing:
+            # Silently dropping missing paths would train on a partial dataset
+            raise FileNotFoundError(f"dataset_json path(s) not found: {_missing}")
 
         if dataset_jsons:
             dataset = []
@@ -1053,6 +1079,9 @@ class FoleyTuneLoRATrainer:
                 if ds_cfg is None:
                     ds_cfg = dj_cfg
                     data_dir = dj_dir
+            # Per-dir lengths are uniform but can disagree ACROSS dirs, which
+            # would crash torch.cat at batch-assembly time
+            dataset = harmonize_dataset(dataset)
         else:
             dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype)
 
@@ -1174,6 +1203,12 @@ class FoleyTuneLoRATrainer:
                 steps = start_step + steps
             logger.info(f"Resumed from step {start_step}: {resume_from}")
             del ckpt
+            # Re-seed offset by start_step so the resumed run doesn't replay
+            # the exact batch/noise/timestep sequence from step 0
+            _rng_seed = (seed + start_step) % (2 ** 31)
+            torch.manual_seed(_rng_seed)
+            random.seed(_rng_seed)
+            np.random.seed(_rng_seed)
 
         # -- EMA --
         ema_state = None
@@ -1213,7 +1248,8 @@ class FoleyTuneLoRATrainer:
             "temporal_variance_weight": temporal_variance_weight,
             "tv_gate_sigma": tv_gate_sigma,
             "vd_curriculum_ratio": vd_curriculum_ratio,
-            "t_min": t_min, "t_max": t_max,
+            "t_min": t_min, "t_max": t_max, "t_range_mode": t_range_mode,
+            "eval_negative_prompt": eval_negative_prompt,
             "optimizer_type": optimizer_type,
             "gradient_checkpointing": gradient_checkpointing,
             "freeze_blocks": freeze_blocks,
@@ -1268,6 +1304,23 @@ class FoleyTuneLoRATrainer:
                 ref_wav_np = _ref_dec.squeeze().cpu().numpy()
                 hunyuan_deps.dac_model.cpu()
             _save_spectrogram(ref_wav_np, 48000, samples_path / "reference")
+
+        # Production-parity eval CFG: CLAP-encode the negative prompt for the
+        # uncond branch instead of the legacy zero embedding (empty = legacy)
+        eval_uncond = None
+        if eval_negative_prompt:
+            with torch.no_grad():
+                hunyuan_deps.clap_model.to(device)
+                _neg_inputs = hunyuan_deps.clap_tokenizer(
+                    [eval_negative_prompt], padding=True, truncation=True, max_length=100,
+                    return_tensors="pt",
+                ).to(device)
+                _neg_out = hunyuan_deps.clap_model(
+                    **_neg_inputs, output_hidden_states=True, return_dict=True
+                )
+                eval_uncond = _neg_out.last_hidden_state.cpu().float()
+                hunyuan_deps.clap_model.to(mm.unet_offload_device())
+            logger.info(f"Eval uncond text: CLAP({eval_negative_prompt!r}) {tuple(eval_uncond.shape)}")
 
         # Waveform spectral loss needs the DAC decoder resident on GPU (frozen) for
         # differentiable decode during training.
@@ -1341,7 +1394,7 @@ class FoleyTuneLoRATrainer:
                 batch_size, timestep_mode, device, dtype,
                 sigma=logit_normal_sigma, curriculum_switch=curriculum_switch,
                 step=step, start_step=start_step, total_steps=steps,
-                t_min=eff_t_min, t_max=eff_t_max,
+                t_min=eff_t_min, t_max=eff_t_max, t_range_mode=t_range_mode,
             )
 
             # Forward + loss
@@ -1407,14 +1460,23 @@ class FoleyTuneLoRATrainer:
 
             # Save checkpoint + eval sample
             if (step + 1) % save_every == 0:
+                # Schedule-free optimizers hold raw train-mode weights; also
+                # capture the averaged eval-mode weights so this checkpoint
+                # loads for inference exactly as the eval sample sounds
+                _sf_opt = hasattr(optimizer, 'eval') and hasattr(optimizer, 'train')
+                _eval_sd = None
+                if _sf_opt:
+                    optimizer.eval()
+                    _eval_sd = get_lora_state_dict(model)
+                    optimizer.train()
+
                 # Save with live weights for optimizer consistency on resume
                 ckpt_path = output_path / f"adapter_step{step+1:05d}.pt"
                 save_checkpoint(model, optimizer, scheduler, step + 1, meta, ckpt_path,
-                                ema_state=ema_state)
+                                ema_state=ema_state, eval_state=_eval_sd)
                 _draw_loss_curve(losses, start_step=start_step, smoothed=_smooth_losses(losses), metrics_history=metrics_history).save(str(output_path / "loss.png"))
 
                 # Switch schedule-free optimizer to eval mode (averaged weights)
-                _sf_opt = hasattr(optimizer, 'eval') and hasattr(optimizer, 'train')
                 if _sf_opt:
                     optimizer.eval()
 
@@ -1429,6 +1491,7 @@ class FoleyTuneLoRATrainer:
                 model.eval()
                 wav, sr = generate_eval_sample(
                     model, hunyuan_deps.dac_model, dataset[0], device, dtype,
+                    uncond_text_feat=eval_uncond,
                 )
                 wav_mono = wav.squeeze()
                 wav_t = torch.from_numpy(wav)
@@ -1462,6 +1525,7 @@ class FoleyTuneLoRATrainer:
                 if val_entry is not None:
                     val_wav, val_sr = generate_eval_sample(
                         model, hunyuan_deps.dac_model, val_entry, device, dtype,
+                        uncond_text_feat=eval_uncond,
                     )
                     val_wav_mono = val_wav.squeeze()
                     val_wav_t = torch.from_numpy(val_wav)
@@ -1705,7 +1769,7 @@ class FoleyTuneLoRAScheduler:
         "wav_spectral_weight": 0.0, "wav_spectral_every": 8, "wav_spectral_crop": 64,
         "wav_spectral_adaptive": True, "channel_weight_mode": "off", "cfm_lambda": 0.0, "channel_loss_weight": False,
         "temporal_variance_weight": 0.0, "tv_gate_sigma": 0.3, "vd_curriculum_ratio": 0.0,
-        "t_min": 0.0, "t_max": 1.0, "optimizer_type": "prodigy",
+        "t_min": 0.0, "t_max": 1.0, "t_range_mode": "clamp", "optimizer_type": "prodigy",
         "prodigy_d_coef": 1.0, "prodigy_growth_rate": 0.0,
         "prodigy_safeguard_warmup": True,
         "prodigy_steps": 0, "use_cautious": False, "schedulefree_c": 0, "use_orthograd": False,
@@ -1713,6 +1777,7 @@ class FoleyTuneLoRAScheduler:
         "gradient_checkpointing": False,
         "freeze_blocks": 0,
         "resume_from": "",
+        "eval_negative_prompt": "",
     }
 
     _DEFAULT_SWEEP = {
@@ -1753,6 +1818,12 @@ class FoleyTuneLoRAScheduler:
         for k, v in experiment.items():
             if k not in ("id", "description"):
                 merged[k] = v
+        # Surface typos and inference-only options (e.g. blocks_to_swap) that
+        # the sweep trainer would otherwise silently ignore.
+        unknown = sorted(k for k in merged
+                         if k not in self._PARAM_DEFAULTS and k != "eval_npz")
+        if unknown:
+            logger.warning(f"Sweep config keys not used by the trainer (ignored): {unknown}")
         return merged
 
     def run_sweep(self, hunyuan_model, hunyuan_deps, sweep_json, run_only="all"):
@@ -1806,7 +1877,11 @@ class FoleyTuneLoRAScheduler:
 
         ds_cfg = None
         dataset_jsons = dataset_json if isinstance(dataset_json, list) else [dataset_json] if dataset_json else []
-        dataset_jsons = [p for p in dataset_jsons if p and os.path.exists(p)]
+        dataset_jsons = [p for p in dataset_jsons if p]
+        _missing = [p for p in dataset_jsons if not os.path.exists(p)]
+        if _missing:
+            # Silently dropping missing paths would train on a partial dataset
+            raise FileNotFoundError(f"dataset_json path(s) not found: {_missing}")
 
         if dataset_jsons:
             dataset = []
@@ -1823,6 +1898,9 @@ class FoleyTuneLoRAScheduler:
                 if ds_cfg is None:
                     ds_cfg = dj_cfg
                     data_dir = dj_dir
+            # Per-dir lengths are uniform but can disagree ACROSS dirs, which
+            # would crash torch.cat mid-training (see performer_b_multipos failure)
+            dataset = harmonize_dataset(dataset)
         elif data_dir:
             logger.info(f"Preparing shared dataset from {data_dir}...")
             dataset = prepare_dataset(data_dir, hunyuan_deps.dac_model, device, dtype)
@@ -1854,6 +1932,30 @@ class FoleyTuneLoRAScheduler:
                             dac_model.cpu()
                     return _raw
             return None
+
+        # Production-parity eval CFG: CLAP-encode the negative prompt for the
+        # uncond branch (the inference pipeline's convention) instead of the
+        # legacy zero embedding. Cached per prompt string across experiments.
+        _neg_embed_cache = {}
+
+        def _encode_eval_uncond(neg_prompt):
+            if not neg_prompt:
+                return None
+            if neg_prompt not in _neg_embed_cache:
+                with torch.no_grad():
+                    hunyuan_deps.clap_model.to(device)
+                    _inputs = hunyuan_deps.clap_tokenizer(
+                        [neg_prompt], padding=True, truncation=True, max_length=100,
+                        return_tensors="pt",
+                    ).to(device)
+                    _out = hunyuan_deps.clap_model(
+                        **_inputs, output_hidden_states=True, return_dict=True
+                    )
+                    _neg_embed_cache[neg_prompt] = _out.last_hidden_state.cpu().float()
+                    hunyuan_deps.clap_model.to(mm.unet_offload_device())
+                logger.info(f"Eval uncond text: CLAP({neg_prompt!r}) "
+                            f"{tuple(_neg_embed_cache[neg_prompt].shape)}")
+            return _neg_embed_cache[neg_prompt]
 
         eval_entries = []  # list of {"name": str, "entry": dict, "ref_wav": ndarray|None}
 
@@ -2091,10 +2193,17 @@ class FoleyTuneLoRAScheduler:
                         logger.info(f"[{exp_id}] Channel weights ({_cw_mode}): min={_channel_weights.min():.2f} max={_channel_weights.max():.2f}")
                         del _all_lat
 
+                    # CFG uncond for eval samples: production parity when set,
+                    # legacy zero embedding when empty
+                    _eval_uncond = _encode_eval_uncond(str(config.get("eval_negative_prompt") or ""))
+
                     import random
-                    torch.manual_seed(config["seed"])
-                    random.seed(config["seed"])
-                    np.random.seed(config["seed"])
+                    # Offset by start_step so resumed/extended runs don't replay
+                    # the exact batch/noise/timestep sequence from step 0
+                    _rng_seed = (config["seed"] + start_step) % (2 ** 31)
+                    torch.manual_seed(_rng_seed)
+                    random.seed(_rng_seed)
+                    np.random.seed(_rng_seed)
 
                     losses = []
                     metrics_history = []
@@ -2155,6 +2264,7 @@ class FoleyTuneLoRAScheduler:
                         model.eval()
                         wav0, sr0 = generate_eval_sample(
                             model, hunyuan_deps.dac_model, dataset[0], device, dtype,
+                            uncond_text_feat=_eval_uncond,
                         )
                         wav0_mono = wav0.squeeze()
                         wav0_t = torch.from_numpy(wav0)
@@ -2169,6 +2279,7 @@ class FoleyTuneLoRAScheduler:
                         for _ev in eval_entries:
                             wav0v, sr0v = generate_eval_sample(
                                 model, hunyuan_deps.dac_model, _ev["entry"], device, dtype,
+                                uncond_text_feat=_eval_uncond,
                             )
                             wav0v_mono = wav0v.squeeze()
                             wav0v_t = torch.from_numpy(wav0v)
@@ -2228,6 +2339,17 @@ class FoleyTuneLoRAScheduler:
                         if pad_sync > 0:
                             batch_sync = F.pad(batch_sync, (0, 0, 0, pad_sync))
 
+                        # Optional latent augmentation (parity with FoleyTuneLoRATrainer)
+                        _mixup_alpha = config.get("latent_mixup_alpha", 0.0)
+                        if _mixup_alpha > 0 and bs > 1:
+                            lam = np.random.beta(_mixup_alpha, _mixup_alpha)
+                            perm = torch.randperm(bs)
+                            batch_latents = lam * batch_latents + (1 - lam) * batch_latents[perm]
+
+                        _lat_noise = config.get("latent_noise_sigma", 0.0)
+                        if _lat_noise > 0:
+                            batch_latents = batch_latents + torch.randn_like(batch_latents) * _lat_noise
+
                         _noise_offset = config.get("noise_offset", 0.0)
                         if _noise_offset > 0:
                             offset = torch.randn(batch_latents.shape[0], batch_latents.shape[1], 1, device=device, dtype=dtype) * _noise_offset
@@ -2244,8 +2366,9 @@ class FoleyTuneLoRAScheduler:
                             bs, config["timestep_mode"], device, dtype,
                             sigma=config["logit_normal_sigma"],
                             curriculum_switch=config["curriculum_switch"],
-                            step=step, total_steps=config["steps"],
+                            step=step, start_step=start_step, total_steps=config["steps"],
                             t_min=_eff_t_min, t_max=_eff_t_max,
+                            t_range_mode=config.get("t_range_mode", "clamp"),
                         )
 
                         effective_vd = visual_dropout_curriculum(
@@ -2309,14 +2432,23 @@ class FoleyTuneLoRAScheduler:
                             )
 
                         if (step + 1) % config["save_every"] == 0:
+                            # Schedule-free optimizers hold raw train-mode weights; also
+                            # capture the averaged eval-mode weights so this checkpoint
+                            # loads for inference exactly as the eval sample sounds
+                            _sf_opt = hasattr(optimizer, 'eval') and hasattr(optimizer, 'train')
+                            _eval_sd = None
+                            if _sf_opt:
+                                optimizer.eval()
+                                _eval_sd = get_lora_state_dict(model)
+                                optimizer.train()
+
                             # Save with live weights for optimizer consistency on resume
                             meta = {**config, "steps_completed": step + 1, "prompts": prompts_list}
                             ckpt_path = exp_dir / f"adapter_step{step+1:05d}.pt"
                             save_checkpoint(model, optimizer, lr_sched, step + 1, meta, ckpt_path,
-                                            ema_state=ema_state)
+                                            ema_state=ema_state, eval_state=_eval_sd)
 
                             # Switch schedule-free optimizer to eval mode (averaged weights)
-                            _sf_opt = hasattr(optimizer, 'eval') and hasattr(optimizer, 'train')
                             if _sf_opt:
                                 optimizer.eval()
 
@@ -2334,6 +2466,7 @@ class FoleyTuneLoRAScheduler:
                             model.eval()
                             wav, sr = generate_eval_sample(
                                 model, hunyuan_deps.dac_model, dataset[0], device, dtype,
+                                uncond_text_feat=_eval_uncond,
                             )
                             wav_mono = wav.squeeze()
                             wav_t = torch.from_numpy(wav)
@@ -2356,6 +2489,7 @@ class FoleyTuneLoRAScheduler:
                                 _ev_tag = _ev["name"]
                                 wav_v, sr_v = generate_eval_sample(
                                     model, hunyuan_deps.dac_model, _ev["entry"], device, dtype,
+                                    uncond_text_feat=_eval_uncond,
                                 )
                                 wav_v_mono = wav_v.squeeze()
                                 wav_v_t = torch.from_numpy(wav_v)
@@ -2440,6 +2574,9 @@ class FoleyTuneLoRAScheduler:
             gc.collect()
             torch.cuda.empty_cache()
 
+            # Keep only the latest result per id (re-run failed experiments
+            # previously accumulated duplicate entries in the summary)
+            results = [r for r in results if r.get("id") != exp_id]
             results.append(exp_result)
 
             # Save summary after each experiment
@@ -2740,6 +2877,10 @@ class FoleyTuneCheckpointFinalizer:
             raise ValueError("Not a valid training checkpoint (no state_dict)")
 
         state_dict = ckpt["state_dict"]
+        # Schedule-free checkpoints: prefer the averaged eval-mode weights
+        # (what the eval samples were generated with) over raw train weights
+        if "eval_state_dict" in ckpt:
+            state_dict = ckpt["eval_state_dict"]
         if "ema_state" in ckpt:
             for key, ema_val in ckpt["ema_state"].items():
                 if key in state_dict:
@@ -2748,7 +2889,7 @@ class FoleyTuneCheckpointFinalizer:
         final = {"state_dict": state_dict, "meta": ckpt.get("meta", {})}
 
         removed = []
-        for key in ("optimizer", "scheduler", "step", "ema_state"):
+        for key in ("optimizer", "scheduler", "step", "ema_state", "eval_state_dict"):
             if key in ckpt:
                 removed.append(key)
 

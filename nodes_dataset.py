@@ -1101,7 +1101,11 @@ class FoleyTuneVideoQualityFilter:
             "required": {
                 "video_folder": ("STRING", {
                     "default": "",
-                    "tooltip": "Folder containing video files. Scans 1 level of subfolders.",
+                    "multiline": True,
+                    "tooltip": "Folder containing video files (scans 1 level of subfolders). "
+                               "Accepts MULTIPLE folders — one path per line (or comma-separated); "
+                               "each is processed independently and the results are merged. With an "
+                               "output_folder set, each input folder copies to output_folder/<its name>/.",
                 }),
                 "profile": (list(cls.PROFILES.keys()), {
                     "default": "general_foley",
@@ -1192,6 +1196,37 @@ class FoleyTuneVideoQualityFilter:
                       filter_options=None,
                       denoise_settings=None):
         import shutil
+
+        # ── multi-path: process a LIST of folders TOGETHER into one merged dataset, so a
+        #    downstream global_lufs/global_peak normalizer sees ALL files and computes a
+        #    single gain across everything (the correct global normalization). Clip names
+        #    are namespaced by source folder ("<folder>__<name>") to avoid collisions when
+        #    the same stem repeats across folders; source_folder is tagged for later splitting.
+        _paths = [p.strip() for p in video_folder.replace(",", "\n").splitlines() if p.strip()]
+        if len(_paths) > 1:
+            merged, reports = [], []
+            for _p in _paths:
+                _tag = Path(_p).name
+                _sub_out = (str(Path(output_folder.strip()) / _tag)
+                            if output_folder.strip() else "")
+                _ds, _rep = self.filter_videos(
+                    _p, min_quality_score, skip_rejected, num_workers, profile,
+                    _sub_out, clap_prompt, clap_negative_prompt, skip_first,
+                    top_n_per_folder, require_sidecar_txt, seed, filter_options,
+                    denoise_settings)
+                for _it in _ds:
+                    _it["source_folder"] = _tag
+                    for _k in ("name", "origin_name"):
+                        if _k in _it and not str(_it[_k]).startswith(f"{_tag}__"):
+                            _it[_k] = f"{_tag}__{_it[_k]}"
+                merged.extend(_ds)
+                reports.append(f"########## {_p} ##########\n{_rep}")
+            print(f"[VideoQualityFilter] Processed {len(_paths)} folders -> "
+                  f"{len(merged)} accepted clips total (names namespaced by folder)", flush=True)
+            return (merged, f"=== Video Quality Filter: {len(_paths)} folders, "
+                            f"{len(merged)} clips ===\n\n" + "\n\n".join(reports))
+        if _paths:
+            video_folder = _paths[0]
 
         # Resolve scoring parameters from profile or filter_options
         preset = self.PROFILES.get(profile)

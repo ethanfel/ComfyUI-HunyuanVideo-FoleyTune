@@ -1785,6 +1785,7 @@ class FoleyTuneLoRAScheduler:
         "eval_negative_prompt": "",
         "intensity_bias": 0.0,
         "intensity_metric": "energy",
+        "balance_datasets": False,
     }
 
     _DEFAULT_SWEEP = {
@@ -1892,7 +1893,7 @@ class FoleyTuneLoRAScheduler:
 
         if dataset_jsons:
             dataset = []
-            for dj_path in dataset_jsons:
+            for _src_idx, dj_path in enumerate(dataset_jsons):
                 with open(dj_path) as f:
                     dj_cfg = json.load(f)
                 if not isinstance(dj_cfg.get("train"), list):
@@ -1900,8 +1901,11 @@ class FoleyTuneLoRAScheduler:
                 dj_dir = str(Path(dj_path).parent)
                 dj_clips = dj_cfg["train"]
                 logger.info(f"Loading dataset: {dj_path} ({len(dj_clips)} train clips)")
-                dataset += prepare_dataset(dj_dir, hunyuan_deps.dac_model, device, dtype,
-                                           clip_names=dj_clips)
+                _new = prepare_dataset(dj_dir, hunyuan_deps.dac_model, device, dtype,
+                                       clip_names=dj_clips)
+                for _it in _new:
+                    _it["source_idx"] = _src_idx   # tag source dataset (for balance_datasets)
+                dataset += _new
                 if ds_cfg is None:
                     ds_cfg = dj_cfg
                     data_dir = dj_dir
@@ -2241,25 +2245,34 @@ class FoleyTuneLoRAScheduler:
                                 break
 
                     n_clips = len(dataset)
-                    # Optional intensity-weighted sampling: soft-bias batches toward
-                    # energetic/dynamic clips. intensity_bias=alpha (0 -> uniform/off);
-                    # intensity_metric 'energy' (mean per-frame latent energy) or 'tv'
-                    # (std/mean of the energy envelope = dynamic burstiness).
+                    # Optional sampling biases (combined multiplicatively, off by default):
+                    #  - intensity_bias (alpha): lean toward energetic/dynamic clips;
+                    #    intensity_metric 'energy' (mean per-frame latent energy) or 'tv'
+                    #    (std/mean of the energy envelope = dynamic burstiness).
+                    #  - balance_datasets: equal exposure per source dataset_json regardless
+                    #    of clip count (up-weights smaller datasets to neutralize imbalance).
                     _intensity_alpha = float(config.get("intensity_bias", 0.0))
+                    _balance = bool(config.get("balance_datasets", False))
                     _sample_w = None
-                    if _intensity_alpha > 0:
-                        _imetric = config.get("intensity_metric", "energy")
-                        _scores = []
-                        for _d in dataset:
-                            _env = _d["latents"][0].float().pow(2).sum(0).clamp(min=1e-12).sqrt()  # [T]
-                            _m = _env.mean().clamp(min=1e-8)
-                            _s = (_env.std() / _m).item() if _imetric == "tv" else _m.item()
-                            _scores.append(max(_s, 1e-8))
-                        _w = np.asarray(_scores, dtype=np.float64) ** _intensity_alpha
+                    if _intensity_alpha > 0 or _balance:
+                        _w = np.ones(n_clips, dtype=np.float64)
+                        if _intensity_alpha > 0:
+                            _imetric = config.get("intensity_metric", "energy")
+                            _scores = []
+                            for _d in dataset:
+                                _env = _d["latents"][0].float().pow(2).sum(0).clamp(min=1e-12).sqrt()  # [T]
+                                _m = _env.mean().clamp(min=1e-8)
+                                _scores.append(max((_env.std() / _m).item() if _imetric == "tv" else _m.item(), 1e-8))
+                            _w *= np.asarray(_scores, dtype=np.float64) ** _intensity_alpha
+                        if _balance:
+                            _src = [int(_d.get("source_idx", 0)) for _d in dataset]
+                            _counts = {s: _src.count(s) for s in set(_src)}
+                            _w *= np.array([1.0 / max(_counts[s], 1) for s in _src], dtype=np.float64)
+                            logger.info(f"[{exp_id}] balance_datasets ON: {len(_counts)} sources sizes={_counts} -> equal exposure each")
                         if np.isfinite(_w.sum()) and _w.sum() > 0:
                             _sample_w = _w / _w.sum()
-                            logger.info(f"[{exp_id}] Intensity-weighted sampling: bias={_intensity_alpha} "
-                                        f"metric={_imetric} (top clip {_sample_w.max()*n_clips:.2f}x, "
+                            logger.info(f"[{exp_id}] Weighted sampling: intensity_bias={_intensity_alpha} "
+                                        f"balance_datasets={_balance} (top {_sample_w.max()*n_clips:.2f}x, "
                                         f"bottom {_sample_w.min()*n_clips:.2f}x vs uniform)")
                     t_start = time.time()
                     pbar_train = comfy.utils.ProgressBar(config["steps"] - start_step)

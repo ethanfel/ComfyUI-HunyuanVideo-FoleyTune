@@ -1785,6 +1785,7 @@ class FoleyTuneLoRAScheduler:
         "eval_negative_prompt": "",
         "intensity_bias": 0.0,
         "intensity_metric": "energy",
+        "intensity_per_dataset": True,
         "balance_datasets": False,
     }
 
@@ -2253,6 +2254,7 @@ class FoleyTuneLoRAScheduler:
                     #    of clip count (up-weights smaller datasets to neutralize imbalance).
                     _intensity_alpha = float(config.get("intensity_bias", 0.0))
                     _balance = bool(config.get("balance_datasets", False))
+                    _intensity_per_dataset = bool(config.get("intensity_per_dataset", True))
                     _sample_w = None
                     if _intensity_alpha > 0 or _balance:
                         _w = np.ones(n_clips, dtype=np.float64)
@@ -2263,7 +2265,26 @@ class FoleyTuneLoRAScheduler:
                                 _env = _d["latents"][0].float().pow(2).sum(0).clamp(min=1e-12).sqrt()  # [T]
                                 _m = _env.mean().clamp(min=1e-8)
                                 _scores.append(max((_env.std() / _m).item() if _imetric == "tv" else _m.item(), 1e-8))
-                            _w *= np.asarray(_scores, dtype=np.float64) ** _intensity_alpha
+                            _scores = np.asarray(_scores, dtype=np.float64)
+                            # Per-dataset normalization (default on): rank each clip against
+                            # its OWN source's energy distribution (divide by that source's
+                            # mean score) so the bias favors clips energetic FOR THEIR CONTENT,
+                            # not just absolutely louder. Without it the absolute-energy metric
+                            # tilts a multi-dataset run toward the louder source (e.g. multipos
+                            # moans drown the quieter blowjob clips). Mathematically a no-op for
+                            # a single dataset (one group; the constant cancels under renorm).
+                            if _intensity_per_dataset:
+                                _src_arr = np.array([int(_d.get("source_idx", 0)) for _d in dataset])
+                                _ngrp = len(np.unique(_src_arr))
+                                for _s in np.unique(_src_arr):
+                                    _mask = _src_arr == _s
+                                    _gmean = _scores[_mask].mean()
+                                    if _gmean > 0:
+                                        _scores[_mask] = _scores[_mask] / _gmean
+                                if _ngrp > 1:
+                                    logger.info(f"[{exp_id}] intensity_per_dataset ON: intensity ranked "
+                                                f"within each of {_ngrp} sources (no cross-source loudness skew)")
+                            _w *= _scores ** _intensity_alpha
                         if _balance:
                             _src = [int(_d.get("source_idx", 0)) for _d in dataset]
                             _counts = {s: _src.count(s) for s in set(_src)}

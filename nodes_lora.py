@@ -1783,6 +1783,8 @@ class FoleyTuneLoRAScheduler:
         "freeze_blocks": 0,
         "resume_from": "",
         "eval_negative_prompt": "",
+        "intensity_bias": 0.0,
+        "intensity_metric": "energy",
     }
 
     _DEFAULT_SWEEP = {
@@ -2239,6 +2241,26 @@ class FoleyTuneLoRAScheduler:
                                 break
 
                     n_clips = len(dataset)
+                    # Optional intensity-weighted sampling: soft-bias batches toward
+                    # energetic/dynamic clips. intensity_bias=alpha (0 -> uniform/off);
+                    # intensity_metric 'energy' (mean per-frame latent energy) or 'tv'
+                    # (std/mean of the energy envelope = dynamic burstiness).
+                    _intensity_alpha = float(config.get("intensity_bias", 0.0))
+                    _sample_w = None
+                    if _intensity_alpha > 0:
+                        _imetric = config.get("intensity_metric", "energy")
+                        _scores = []
+                        for _d in dataset:
+                            _env = _d["latents"][0].float().pow(2).sum(0).clamp(min=1e-12).sqrt()  # [T]
+                            _m = _env.mean().clamp(min=1e-8)
+                            _s = (_env.std() / _m).item() if _imetric == "tv" else _m.item()
+                            _scores.append(max(_s, 1e-8))
+                        _w = np.asarray(_scores, dtype=np.float64) ** _intensity_alpha
+                        if np.isfinite(_w.sum()) and _w.sum() > 0:
+                            _sample_w = _w / _w.sum()
+                            logger.info(f"[{exp_id}] Intensity-weighted sampling: bias={_intensity_alpha} "
+                                        f"metric={_imetric} (top clip {_sample_w.max()*n_clips:.2f}x, "
+                                        f"bottom {_sample_w.min()*n_clips:.2f}x vs uniform)")
                     t_start = time.time()
                     pbar_train = comfy.utils.ProgressBar(config["steps"] - start_step)
 
@@ -2336,7 +2358,10 @@ class FoleyTuneLoRAScheduler:
 
                         model.train()
                         bs = config["batch_size"]
-                        indices = [np.random.randint(0, n_clips) for _ in range(bs)]
+                        if _sample_w is not None:
+                            indices = np.random.choice(n_clips, size=bs, p=_sample_w).tolist()
+                        else:
+                            indices = [np.random.randint(0, n_clips) for _ in range(bs)]
                         batch_latents = torch.cat([dataset[i]["latents"] for i in indices]).to(device, dtype=dtype)
                         batch_clip = torch.cat([dataset[i]["clip_features"] for i in indices])
                         batch_sync = torch.cat([dataset[i]["sync_features"] for i in indices])

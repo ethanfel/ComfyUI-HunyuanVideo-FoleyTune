@@ -2054,19 +2054,3 @@ Production checkpoints (each → FoleyTuneBWE cfg3.0/input_sr16000):
   one-model fallback (compromise): performer_a_combined_sfc20  (non-intensity)
   dataset-save now emits this recipe by default (nodes_dataset.py sweep.json template)
 ```
-
-#### Findings (continuing)
-105. **sfc20 (`schedulefree_c=20`) INVERTS grab-early** — shorter averaging window than plain PP, so it runs LONG (~10–12k) without over-smoothing; rendered 10k beats 5500 on dynamics + moan-purity + separation (all BWE-proof) and HOLDS HF. First recipe past the early-window wall. sfc20-specific; plain PP/cautious still over-smooth late
-106. **`t_min=0.05/t_max=0.95` re-confirmed** — had been dropped from the sfc20 line; re-adding improves sync. Back in the standard recipe
-107. **Batch 8 = the noise sweet spot** — 16 under-converges + loses the HF-hold (less gradient noise breaks harmonic-sharpening); 4 too noisy + darker. Both lose HF. Keep batch 8 + grad_accum 1
-108. **MCD-turn (within-run floor) = the most reliable single metric** — ≈ perceptual sweet spot; rising = past it. Use the SHAPE not the absolute. PBC Goodharts; **TV is performer-dependent (judge vs the performer's own GT TV, not 1.29)**
-109. **Moaning-character drift = a new ear-only over-training tell** — moan goes higher-pitch/thinner past the peak; no metric flags it
-110. **Per-clip LUFS normalization promotes breathing** (equalizes loudness across clips → quiet breathy clips boosted ~+4 dB). Fix: normalize ALL positions together as one dataset
-111. **`global_peak` > `global_lufs` for wide-dynamic content** — global_lufs leaves the peak ~17 dB below ceiling → set too quiet (poor SNR at high timesteps); global_peak uses the headroom (median ~−25)
-112. **Branch `fable` `eval_state_dict`** — pre-fable prodigy_plus mid-run `.pt` were TRAIN-mode weights ≠ the eval-averaged model the metrics scored: a concrete cause of the metric↔ear divergence. From fable, pick by ear → load = exact match
-113. **fable RMS-aligned `reference_metrics`** un-break MCD/SC on global-norm datasets; **`eval_negative_prompt`** = CFG uncond parity. On fable the MCD-floor/PBC-peak land on the perceptual peak
-114. **Single-performer overfit timing = distinct SOURCE-video variety, NOT clip count** — performer_b (few sources) ~60 ep; performer_a (many sources, 1139 clips) trained to 14k+. Read the MCD turn per dataset
-115. **`intensity_bias` (energy-weighted sampling) cleans single-content models** — α=0.5 → cleaner moan (HNR ↑), more dynamic, +3 dB; favoring energetic clips = favoring the loud/clean clips. Converges EARLIER (~7k vs ~11k) → run shorter. `intensity_per_dataset` (default) avoids the louder-source tilt on multi-dataset; no-op single
-116. **Intensity bias BACKFIRES on multi-content combined** — the energy push across two motion→sound mappings makes the sex content messy + lose sync (combined non-intensity is fine). Single-content tool only
-117. **Combining acoustically-distinct content types is not worth it** — no quality gain over the dedicated pair, only convenience. Production = dedicated single-content models + intensity (bj @7k → BWE, single-performer sex @~7.5k). Confirms #75 even under one performer
-118. **bj-intensity over-train trajectory is sharp** — HNR peaks 2.78@7k, collapses to 0.21@9k, then "recovers" into a degraded loud/dark/noisy regime. Stop intensity runs at the peak (~7k bj); the noisy training metrics under-shoot the ear by ~500 steps

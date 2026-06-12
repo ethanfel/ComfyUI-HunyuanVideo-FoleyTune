@@ -2227,7 +2227,8 @@ class FoleyTuneDatasetSaver:
     DESCRIPTION = (
         "Save every clip in a FOLEYTUNE_AUDIO_DATASET to output_dir as 24-bit FLAC. "
         "Writes .npz feature files and generates sweep.json (ready for the Scheduler node) "
-        "with default training config (r128, curriculum, 15k steps)."
+        "with the validated sfc20-long + intensity recipe (all_blocks_sync R32, Prodigy+ "
+        "ScheduleFree c=20, noise_offset0.03, t_min/t_max rescale, intensity_bias0.5)."
     )
 
     def save(self, dataset, output_dir: str, json_only: bool = False, prompt: str = ""):
@@ -2304,15 +2305,19 @@ class FoleyTuneDatasetSaver:
             "dataset_json": str(out_path / "dataset.json"),
             "output_root": str(out_path.parent / "output"),
             "base": {
-                "target": "all_attn_mlp",
-                "rank": 64,
-                "alpha": 64,
+                # Validated "sfc20-long + intensity" recipe (performer_a blowjob
+                # intensity sweep, June 2026): all_blocks_sync + Prodigy+ ScheduleFree
+                # (c=20) constant + noise_offset0.03 + t_min/t_max rescale + dropout0.05
+                # + intensity_bias0.5. Run long, audition LATE by ear, then BWE.
+                "target": "all_blocks_sync",
+                "rank": 32,
+                "alpha": 32,
                 "lr": 5e-5,
                 "steps": 10000,
                 "batch_size": 8,
                 "grad_accum": 1,
-                "warmup_steps": 100,
-                "save_every": 1000,
+                "warmup_steps": 0,
+                "save_every": 500,
                 "timestep_mode": "uniform",
                 "precision": "bf16",
                 "seed": 42,
@@ -2320,23 +2325,36 @@ class FoleyTuneDatasetSaver:
                 "curriculum_switch": 0.6,
                 "init_mode": "standard",
                 "use_rslora": False,
-                "lora_dropout": 0.0,
+                "lora_dropout": 0.05,
                 "lora_plus_ratio": 1.0,
-                "schedule_type": "cosine",
+                "schedule_type": "constant",
                 "latent_mixup_alpha": 0.0,
                 "latent_noise_sigma": 0.0,
-                "noise_offset": 0.0,
+                "noise_offset": 0.03,
                 "min_snr_gamma": 0.0,
                 "cos_sim_weight": 0.0,
-                "t_min": 0.0,
-                "t_max": 1.0,
-                "optimizer_type": "prodigy",
+                "spectral_weight": 0.0,
+                "hf_phase_switch": 0.0,
+                "wav_spectral_weight": 0.0,
+                "channel_weight_mode": "off",
+                "cfm_lambda": 0.0,
+                "ema_decay": 0.0,
+                "t_min": 0.05,
+                "t_max": 0.95,
+                "t_range_mode": "rescale",
+                "optimizer_type": "prodigy_plus",
                 "prodigy_d_coef": 1.0,
                 "prodigy_growth_rate": 0.0,
-                "visual_dropout_prob": 0.5,
+                "prodigy_steps": 0,
+                "use_cautious": False,
+                "schedulefree_c": 20,
+                "use_orthograd": False,
+                "visual_dropout_prob": 0.0,
                 "gradient_checkpointing": False,
-                "blocks_to_swap": 0,
                 "resume_from": "",
+                "eval_negative_prompt": "noisy, harsh",
+                "intensity_bias": 0.5,
+                "intensity_metric": "energy",
             },
             "experiments": [],  # filled below
         }
@@ -2351,8 +2369,14 @@ class FoleyTuneDatasetSaver:
         tag = f"{sweep_name}_{total_train}clip"
         sweep_json["experiments"] = [
             {
-                "id": f"{tag}_baseline",
-                "description": "R64 Prodigy σ=0.8 cosine curriculum@60% 10k steps",
+                "id": f"{tag}_intensity_sfc20",
+                "description": (
+                    "sfc20-long + intensity: all_blocks_sync R32 Prodigy+ "
+                    "ScheduleFree(c=20) constant, noise_offset0.03, "
+                    "t_min0.05/t_max0.95 rescale, dropout0.05, intensity_bias0.5 "
+                    "energy. Run long, audition LATE by ear (~6-8k single-content), "
+                    "then UniverSR/FoleyTuneBWE."
+                ),
             },
         ]
         with open(ds_json_path, "w") as f:

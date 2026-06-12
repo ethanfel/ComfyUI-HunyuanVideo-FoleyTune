@@ -1961,10 +1961,30 @@ steps ~5000, save_every 500 — PICK ~3-3.5k BY EAR (later over-smooths via aver
 Continuation on the multi-position POV sets (434 noclap → 513 → single-performer performer_a/performer_b → blowjob). Net result overturns several earlier rules: the "grab PP early" guidance **inverts for sfc20**, `batch 8` is a noise sweet spot, **MCD-turn** is the most reliable metric, normalization must be **global_peak across all positions**, a new **`intensity_bias`** sampler cleans single-content models, and **combining distinct content types is not worth it**. Branch **`fable`** adds the checkpoint/metric correctness fixes that finally close the metric↔ear gap. (Detail in memory: `feedback_pp_sync`, `project_eval_metrics`, `project_multipos_dataset`, `project_fable_training_fixes`.)
 
 #### sfc20 run LONG breaks the over-smooth wall (inverts grab-early — sfc20 only)
-Findings 99–100 said grab PP early (~3.5k) because schedule-free averaging over-smooths late. **`schedulefree_c=20` (sfc20) inverts this — it uses a SHORTER averaging window than plain PP (c≈0), so it can run LONG (~10–12k) without washing.** Rendered 5500 vs 10k (level-matched): 10k has HIGHER macro-dynamics (env dB-std 12.4 vs 10.8), 2.4× cleaner moan harmonics (HNR 2.09 vs 0.88), half the mush (flatness 0.0025 vs 0.0053) — all **BWE-proof** (BWE adds HF, not harmonic purity/separation). HF also HOLDS (centroid climbs to 619@11k where plain/cautious collapse to ~470 by 7k). So for the BWE pipeline, **sfc20-run-long is an UPGRADE over the early-grab flavors** — the first recipe past the early-window wall. CAVEAT: sfc20-specific; plain PP & cautious still over-smooth if run long. **TV INVERTED here** (said 5500 more dynamic; ear says 10k) → dead selector for sfc20-long. **tmin re-adopted:** the sfc20-long line had dropped `t_min=0.05/t_max=0.95`; re-testing confirmed it improves sync → back in the standard recipe.
+Findings 99–100 said grab PP early (~3.5k) because schedule-free averaging over-smooths late. **`schedulefree_c=20` (sfc20) inverts this — it uses a SHORTER averaging window than plain PP (c≈0), so it can run LONG (~10–12k) without washing.** Two pillars, both from `metrics_history.json`:
+
+1. **sfc20 is brighter at matched steps** — frontfacing optimizer journey @~6k (same dataset, eval centroid Hz): `frontfacing_pp_sfc20` **562** vs plain `frontfacing_base_pp_d1` **421** / `frontfacing_pp_cautious` **424** (sfc5 531, sfc15 426). sfc20 holds the most HF.
+2. **sfc20 keeps improving when run long** — `multipos_noclap_pp_sfc20` (b8, the sfc20 long run), it does NOT over-smooth out to 11k:
+
+| step | MCD | PBC | centroid |
+|---|---|---|---|
+| 5500 | 5.24 | 0.384 | 564 |
+| 8000 | 4.42 | 0.531 | 544 |
+| 10000 | **4.08** | 0.606 | 571 |
+| 11000 | 4.18 | **0.614** | **619** ← brightness climbs, MCD still at floor |
+
+MCD floors at 4.08@10k and centroid *climbs* 564→619 across 5.5k→11k — the opposite of the plain-PP over-smooth. (The earlier "619@11k" was correctly remembered but mis-attributed to plain/cautious "collapsing to ~470 by 7k" — those ~420 centroids are the *plain/cautious* runs at ~5k, a separate frontfacing comparison, not the sfc20 long run.) **Render-analysis (separate lens, level-matched 5500 vs 10k wavs — not in `metrics_history`):** 10k had higher macro-dynamics (env dB-std 12.4 vs 10.8), ~2.4× cleaner moan harmonics (HNR 2.09 vs 0.88), half the mush (render-flatness 0.0025 vs 0.0053) — all **BWE-proof** (BWE adds HF, not harmonic purity/separation). So **sfc20-run-long is an UPGRADE over the early-grab flavors** — the first recipe past the early-window wall. CAVEAT: sfc20-specific; plain PP & cautious still over-smooth if run long. **TV INVERTED here** (said 5500 more dynamic; ear says 10k) → dead selector for sfc20-long. **tmin re-adopted:** the sfc20-long line had dropped `t_min=0.05/t_max=0.95`; re-testing confirmed it improves sync → back in the standard recipe.
 
 #### Batch 8 = the noise sweet spot (not just a floor)
-batch 16 (matched epochs): worse on every fidelity axis AND lost the HF-hold (centroid stuck ~470 vs batch-8's 540–619) — halving gradient noise broke the slow harmonic-sharpening that builds HF, and starved PP's d-estimation. batch 4: DARKER not brighter (too much noise disrupts the same sharpening), only TV/dynamics higher. **Both directions lose the HF-hold for opposite reasons → batch 8 is the noise sweet spot. Keep batch 8 + grad_accum 1.**
+b4 vs b8 on the same multipos-noclap moaning set, matched epochs (~220ep: b4→24k, b8→12k), from `metrics_history.json`:
+
+| batch | run (Archive/…) | best MCD | PBC peak | centroid (window) | TV | hf×1k | verdict |
+|---|---|---|---|---|---|---|---|
+| 4 | `multipos_noclap_pp_sfc20_b4` →24k | 5.49 @18k | 0.620 @21k | ~415–473 (dark) | 1.12–1.20 | →2–4 (collapses) | darker, loses HF, only TV higher |
+| **8** | `multipos_noclap_pp_sfc20` →12k | **4.08 @10k** | 0.616 @12k | **538–619** | 0.95–1.06 | **12–17 (holds)** | best fidelity + brighter + holds HF, converges ~2× earlier |
+| 16 | *(run not retained)* | — | — | — | — | — | ear/render only: under-converged + lost HF-hold |
+
+b8 lands a markedly lower MCD floor (4.08 vs 5.49) and reaches its PBC peak in ~half the steps. b4 is **darker not brighter** (centroid ~470 vs b8's 538–619) with its hf collapsing to ~2–4 — too much gradient noise disrupts the slow harmonic-sharpening — yet only marginally more dynamic (TV +0.1). b16 (no longer on disk; ear/render at the time) went the other way — too little gradient noise → under-converged and also lost the HF-hold, starving PP's d-estimation. **Both directions lose the HF-hold for opposite reasons → batch 8 is the noise sweet spot. Keep batch 8 + grad_accum 1.**
 
 #### MCD-turn = the most reliable single metric
 The WITHIN-RUN MCD floor ≈ the perceptual sweet spot; MCD rising = past it. Ear-confirmed across BJ/performer_b/moans/sfc20. PBC Goodharts (climbs past the peak); **TV is performer-dependent** — judge it against the performer's OWN GT TV, not the generic ~1.29 (performer_b's GT TV=0.99, so her low model-TV is faithful, not washed). Use the within-run SHAPE, not the absolute (MCD level is not comparable across performers/content/normalization). New ear-only over-training tell: **MOANING-CHARACTER DRIFT** — past the peak the moan goes higher-pitch/thinner/"less moany"; NO metric flags it.
@@ -1973,19 +1993,48 @@ The WITHIN-RUN MCD floor ≈ the perceptual sweet spot; MCD rising = past it. Ea
 Per-clip LUFS normalization **PROMOTES BREATHING**: it equalizes loudness across clips, so naturally-quiet breathy clips get boosted (~+4 dB) up to target. Fix at the normalization level: (1) normalize ALL position dirs TOGETHER as one dataset — per-dir anchors each position to its own loudest clip → cross-position inconsistency; the VideoQualityFilter now accepts a folder LIST → one merged, namespaced dataset. (2) Use **`global_peak`** (one gain so the loudest PEAK → −1, uses the headroom) NOT `global_lufs` (anchors the loudest LOUDNESS → −23, leaves the peak ~17 dB below ceiling → whole set too quiet, median −42 LUFS = poor latent-vs-noise SNR at high diffusion timesteps). Correct dataset = one combined dir, global_peak, median ~−23 to −26; verify peaks VARY slightly across positions (one global gain) not all pinned to −1 (per-dir bug).
 
 #### Branch `fable` — checkpoint & metric correctness (closes the metric↔ear gap)
-NOT merged to main. (1) **`eval_state_dict`:** pre-fable prodigy_plus mid-run `.pt` stored TRAIN-mode weights (y = x + 0.9(z−x)) while the metrics were computed on the eval-AVERAGED (x) weights — **two different models**, so the `.pt` you auditioned ≠ what the metrics scored (a concrete cause of the divergence, not just Goodhart). From fable, mid-run ckpts also store the eval weights → pick by ear, load = exact match. (2) **`reference_metrics` RMS-aligns** gen→ref → MCD/SC level-robust (work on global-norm datasets again; absolutes not comparable to pre-fix runs; PBC unaffected). (3) **`eval_negative_prompt`** = CLAP-encoded uncond branch = CFG parity with inference. (4) **`t_range_mode`** clamp (default) vs rescale. RESULT: on fable the MCD-floor + PBC-peak land RIGHT ON the perceptual peak — the metric↔ear gap largely closes; pre-fable runs, keep trusting the ear.
+**MERGED to main 2026-06-11** (fast-forward, main = fable @ `704acce`; dataset-template recipe followed @ `7d3b509`). (1) **`eval_state_dict`:** pre-fable prodigy_plus mid-run `.pt` stored TRAIN-mode weights (y = x + 0.9(z−x)) while the metrics were computed on the eval-AVERAGED (x) weights — **two different models**, so the `.pt` you auditioned ≠ what the metrics scored (a concrete cause of the divergence, not just Goodhart). From fable, mid-run ckpts also store the eval weights → pick by ear, load = exact match. (2) **`reference_metrics` RMS-aligns** gen→ref → MCD/SC level-robust (work on global-norm datasets again; absolutes not comparable to pre-fix runs OR across runs — see the cross-run caveat below; PBC unaffected). (3) **`eval_negative_prompt`** = CLAP-encoded uncond branch = CFG parity with inference. (4) **`t_range_mode`** clamp (default) vs rescale. RESULT: on fable the MCD-floor + PBC-peak land RIGHT ON the perceptual peak — the metric↔ear gap largely closes; pre-fable runs, keep trusting the ear.
 
 #### Single-performer overfit = SOURCE variety, NOT clip count
-performer_b (655 clips, FEW source videos) overfit at ~60 epochs (MCD floor ~4500–5000, TV low but FAITHFUL to her GT TV=0.99). performer_a (1139 clips, MANY sources) did NOT — it behaved like a diverse set and trained to 14k+ (an apparent MCD floor @8k was a head-fake; it broke clean through to 4.66@14k). So "single-performer overfits fast" is really about **distinct SOURCE-video variety**, not performer count or clip count. Always read the actual MCD turn per dataset.
+Read the actual eval-metric turn per dataset — overfit timing tracks distinct SOURCE-video variety, not performer count or clip count. Few-source sets turn early; many-source sets sustain. From the on-disk `metrics_history.json` (RMS-aligned, fable lens):
 
-#### Intensity-weighted clip sampling (`intensity_bias`) — single-content win
-New fable sampler: draw probability ∝ intensity^α, intensity from the DAC-latent per-frame energy envelope (`intensity_metric`: `energy` = mean, `tv` = std/mean burstiness). **`intensity_bias=0.5` on single-content sets is a confirmed ear win** — cleaner moan (HNR ↑), more dynamic, ~+3 dB — because favoring energetic clips = favoring the loud/CLEAN clips (the quiet clips are the breathy, low-HNR ones), so it biases toward moan QUALITY as a side effect. On blowjob: more dynamic/punchy gags (darker but cleaner = BWE-proof). **It also converges EARLIER** (peaks ~7k vs the α=0 ~11k) → run intensity sweeps SHORTER. **`intensity_per_dataset`** (default ON) normalizes intensity within each source so the absolute-energy metric doesn't tilt a multi-dataset run toward the louder source — mathematical no-op for single datasets. **`balance_datasets`** (off by default) = equal exposure per source dataset.
+| run | clips / sources | steps run | PBC peak | useful window | over-train tell |
+|---|---|---|---|---|---|
+| `performer_b_global_sfc20` | 655 / FEW | →8k | 0.486 @5.5k | **early ~5.5k** | MCD rises 9.6→12.4 by 8k |
+| `performer_a_global_sfc20` | 1139 / MANY | →18k | **0.703 @15k** | **long, ~15k** | flat MCD ~10–11, no collapse |
+
+(**Cross-run-MCD caveat:** MCD *absolutes* are not comparable across runs/normalization/lens — the earlier "broke through to MCD 4.66@14k" claim did not reconcile to any on-disk performer_a run, MCD ~10–11 there; 4.66 belongs to a *different* run, `performer_ab_multipos` @25k, under a different lens. Use the **within-run shape** (MCD turn, PBC peak), never a bare MCD number across runs.)
+
+#### Intensity-weighted clip sampling (`intensity_bias`) — single-content win, and WHY
+New fable sampler: draw probability ∝ intensity^α, intensity from the DAC-latent per-frame energy envelope (`intensity_metric`: `energy` = mean, `tv` = std/mean burstiness). `intensity_bias=0.5` on single-content sets is a confirmed **ear** win — cleaner moan, more dynamic, ~+3 dB — because favoring energetic clips = favoring the loud/CLEAN clips (the quiet clips are the breathy, low-HNR ones), biasing toward moan QUALITY as a side effect.
+
+The *mechanism* is visible in the metrics, and it is the inverse of what MCD/PBC reward. Blowjob, `intensity` vs `non-intensity (trescale)`, SAME dataset + eval clip, fable lens (`metrics_history.json`):
+
+| run | step | MCD | PBC | centroid | TV | hf×1k | character |
+|---|---|---|---|---|---|---|---|
+| **intensity** | **7000** | 6.68 | 0.279 | **8086** | **2.04** | **840** | bright, punchy ← **ear keeper** |
+| intensity | 10000 | 6.57 | 0.316 | 6813 | 1.85 | 687 | flatness ↑0.25 = noisier |
+| non-intensity | 7000 | 5.99 | 0.339 | 4407 | 1.17 | 433 | already darker |
+| non-intensity | 11000 | 4.30 | 0.494 | 2613 | 1.03 | 253 | metrics "better"… |
+| non-intensity | **13000** | **3.61** | **0.515** | **1452** | **0.78** | **101** | …but **dark + flat = washed** |
+
+The non-intensity run's MCD/PBC keep improving **precisely as it over-smooths into a dark, low-dynamic regime** (centroid 4407→1452, TV 1.17→0.78, hf 433→101). The intensity run holds peak brightness/dynamics/punch (centroid 8086, TV 2.04, hf 840 @7k) — **the metrics score it "worse" while the ear prefers it, and it's BWE-proof** (BWE adds HF to a punchy base; it can't un-wash the dark non-intensity base). This is the cleanest single illustration of "MCD/PBC reward the wash — trust the ear for dynamics." Intensity also **converges EARLIER** (moaning: PBC peak 0.589@7k for intensity vs 0.660@10k for non-intensity) → run intensity sweeps SHORTER. **`intensity_per_dataset`** (default ON) normalizes intensity within each source so the absolute-energy metric doesn't tilt a multi-dataset run toward the louder source — mathematical no-op for single datasets. **`balance_datasets`** (off by default) = equal exposure per source dataset.
 
 #### Combining distinct content types is NOT worth it
-Trained performer_a blowjob+multipos as one combined model (1584 clips), intensity + non-intensity. Verdict: NO quality gain — at best a touch less crisp than the dedicated pair on both contents, and the **intensity variant's sex content was messy + lost sync**. Triangulated (combined-INT vs combined-nonINT vs dedicated-INT): the combined NON-intensity is NOT messy → it's the **intensity push on a two-content model**, not combining itself. Pushing energy hard across two different motion→sound mappings (bursty oral vs pelvic rhythm) overloads the model into erratic output. So **intensity is a SINGLE-CONTENT tool**. **Production = dedicated single-content models + intensity:** blowjob → bj-intensity @**7k** → BWE; sex → multipos intensity @~7.5k. Combined-nonINT is the one-model fallback but a compromise. (Extends finding #75 — "completely different sound types → train separately" — now confirmed for acoustically-distinct content even under one performer.)
+Trained performer_a blowjob+multipos as one combined model (1584 clips), intensity + non-intensity (`performer_a_combined_sfc20`, `performer_a_combined_intensity_sfc20`). Verdict: NO quality gain — at best a touch less crisp than the dedicated pair on both contents, and the **intensity variant's sex content was messy + lost sync**. Triangulated by ear (combined-INT vs combined-nonINT vs dedicated-INT): the combined NON-intensity is NOT messy → it's the **intensity push on a two-content model**, not combining itself. Pushing energy hard across two different motion→sound mappings (bursty oral vs pelvic rhythm) overloads the model into erratic output. So **intensity is a SINGLE-CONTENT tool**. (Note: spectral metrics are blind to this — the "messy + lost sync" verdict is ear-only; no `metrics_history` column flags it.) **Production = dedicated single-content models + intensity:** blowjob → bj-intensity @**7k** → BWE; sex → multipos intensity @~7.5k. Combined-nonINT is the one-model fallback but a compromise. (Extends finding #75 — "completely different sound types → train separately" — now confirmed for acoustically-distinct content even under one performer.)
 
 #### Blowjob-intensity over-train trajectory (fine sweep, by ear)
-Rendered bj-intensity @0.5k from 6k→9.5k. Moan/vocal-purity (HNR) peaks **sharply at 7k (2.78)**, flanked by 6.5k (2.27) and 7.5k (2.02); sync-event density peaks 6.5–7k too → both axes agree. Past 7.5k = textbook over-train: HNR collapses 2.02→1.46→1.41→**0.21@9k** (worst ckpt), then 9.5k "recovers" into a DEGRADED loud/dark(913 Hz)/noisy regime (the over-trained tail character, not real recovery). The noisy training metrics had under-shot to 6.5k; the ear pulls the keeper to **7k**. Stop intensity runs at the peak.
+Rendered `performer_a_blowjob_intensity_sfc20` @0.5k from 6k→9.5k. Two independent lenses agree on a **sharp 7k peak**: (a) ear/render-analysis — moan/vocal-purity HNR peaks at 7k (2.78), flanked by 6.5k (2.27) / 7.5k (2.02), then collapses 2.02→1.46→1.41→**0.21@9k** (worst ckpt) before 9.5k "recovers" into a DEGRADED loud/dark(913 Hz)/noisy regime; (b) the `metrics_history` battery — 7k is the **brightness/dynamics peak** (centroid 8086 / TV 2.04 / hf 840 — all maxima for the run), and past it centroid falls while **flatness keeps climbing** (0.175→0.25 by 10k) = brightness giving way to mush:
+
+| step | MCD | PBC | centroid | flatness | TV | hf×1k | ear-HNR |
+|---|---|---|---|---|---|---|---|
+| 6500 | 6.39 | 0.269 | 7812 | 0.146 | 1.80 | 799 | 2.27 |
+| **7000** | 6.68 | 0.279 | **8086** | 0.175 | **2.04** | **840** | **2.78** ← keeper |
+| 7500 | 6.15 | 0.338 | 6077 | 0.161 | 1.43 | 617 | 2.02 |
+| 9000 | 7.13 | 0.311 | 5513 | 0.172 | 1.65 | 553 | **0.21** (worst) |
+| 9500 | 6.83 | 0.316 | 6524 | 0.222 | 1.81 | 670 | degraded-loud |
+
+The noisy training metrics had under-shot the keeper to 6.5k; the ear (and the brightness/dynamics maxima) pull it to **7k**. Keeper: `performer_a_blowjob_intensity_sfc20/adapter_step07000.pt` (6.5k kept as backup). Stop intensity runs at the peak.
 
 #### Updated production recipe
 ```
@@ -1997,7 +2046,13 @@ DEDICATED single-content LoRA per sound type (do NOT combine distinct contents):
   dataset: global_peak normalized across ALL positions as one dir
   run LONG, judge LATE by ear (MCD-turn locates the window), then FoleyTuneBWE
   → blowjob keeper ~7k, single-performer sex ~7.5k (read the MCD turn per dataset)
-  branch: fable (eval_state_dict + RMS-aligned metrics make ckpt selection trustworthy)
+  merged to main (eval_state_dict + RMS-aligned metrics make ckpt selection trustworthy)
+
+Production checkpoints (each → FoleyTuneBWE cfg3.0/input_sr16000):
+  blowjob:  performer_a_blowjob_intensity_sfc20/adapter_step07000.pt  (6.5k = backup)
+  sex/moan: performer_a_globalpeak_intensity_sfc20/adapter_step07000.pt (7.5k alt)
+  one-model fallback (compromise): performer_a_combined_sfc20  (non-intensity)
+  dataset-save now emits this recipe by default (nodes_dataset.py sweep.json template)
 ```
 
 #### Findings (continuing)

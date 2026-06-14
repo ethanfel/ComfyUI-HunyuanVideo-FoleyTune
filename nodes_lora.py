@@ -448,6 +448,13 @@ class FoleyTuneFeatureExtractor:
             "uncond_text_feat": uncond_text_embedding,  # [1, T_text, 768]
             "duration": duration,
         }
+        # Carry the source path + fps forward (for the timeline thumbnail strip
+        # and frame-based ruler/snapping). Only the video_features path has a
+        # real path; the raw-IMAGE path does not. frame_rate holds the resolved
+        # fps (set from video_features["fps"] above when connected).
+        if video_features is not None and video_features.get("video_path"):
+            features["video_path"] = video_features["video_path"]
+        features["fps"] = float(frame_rate)
 
         return (str(npz_path), features)
 
@@ -1731,6 +1738,392 @@ class FoleyTuneLoRALoaderPath:
         return (model, prompts)
 
 
+# --- Node: LoRA Timeline Entry (stacker) ------------------------------------
+
+_LORA_NONE = "(none — prompt only)"
+
+
+class FoleyTuneLoRATimelineEntry:
+    """Configure a timeline segment. Chain multiple entries.
+
+    Pick a LoRA, or "(none — prompt only)" for a regular-video segment that runs
+    the base model conditioned on this entry's prompt (no LoRA).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "lora_name": ([_LORA_NONE] + folder_paths.get_filename_list("loras"),),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "label": ("STRING", {"default": "LoRA"}),
+                "color": (["red", "blue", "green", "yellow", "purple", "orange"],),
+            },
+            "optional": {
+                "prev_entries": ("LORA_TIMELINE_ENTRIES",),
+                "prompt": ("STRING", {
+                    "default": "", "multiline": True,
+                    "tooltip": "Per-segment CLAP prompt. With a LoRA: conditions that LoRA's "
+                               "segment on this prompt. With '(none — prompt only)': the segment "
+                               "runs the base model on this prompt (regular-video sound, no LoRA). "
+                               "Needs hunyuan_deps on the Timeline node. Describe the full audio "
+                               "texture — narrow prompts hurt prompt-following.",
+                }),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("LORA_TIMELINE_ENTRIES",)
+    RETURN_NAMES = ("entries",)
+    FUNCTION = "add_entry"
+    CATEGORY = "FoleyTune"
+
+    def add_entry(self, lora_name, strength, label, color, prev_entries=None, prompt="",
+                  unique_id=None):
+        entries = list(prev_entries) if prev_entries else []
+        # "(none)" = prompt-only segment: base model + this prompt, no LoRA.
+        adapter_path = (None if lora_name == _LORA_NONE
+                        else folder_paths.get_full_path_or_raise("loras", lora_name))
+        # Stable per-entry id = this node's graph id (persists across runs and
+        # save/load), so segments keep mapping even if the chain is reordered.
+        # Fall back to position when unique_id is unavailable.
+        entry_id = str(unique_id) if unique_id is not None else f"idx{len(entries)}"
+        entries.append({
+            "id": entry_id,
+            "path": adapter_path,
+            "strength": strength,
+            "label": label,
+            "color": color,
+            "prompt": prompt,
+        })
+        return (entries,)
+
+
+# --- Node: LoRA Timeline (visual widget) ------------------------------------
+
+def _encode_clap_prompts(hunyuan_deps, prompts):
+    """CLAP-encode prompts to {prompt: [1, seq, 768] CPU tensor}.
+
+    Mirrors FoleyTuneFeatureExtractor's text path exactly (last_hidden_state,
+    max_length=100) so a per-segment prompt yields the same text_feat the
+    global prompt would. Moves CLAP to device once for the whole batch.
+    """
+    device = mm.get_torch_device()
+    offload_device = mm.unet_offload_device()
+    out = {}
+    hunyuan_deps.clap_model.to(device)
+    try:
+        for p in prompts:
+            inputs = hunyuan_deps.clap_tokenizer(
+                [p], padding=True, truncation=True, max_length=100, return_tensors="pt",
+            ).to(device)
+            res = hunyuan_deps.clap_model(**inputs, output_hidden_states=True, return_dict=True)
+            out[p] = res.last_hidden_state.cpu()  # [1, seq, 768]
+    finally:
+        hunyuan_deps.clap_model.to(offload_device)
+        torch.cuda.empty_cache()
+    return out
+
+
+class FoleyTuneLoRATimeline:
+    """Visual timeline for placing LoRA adapters on video segments."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "entries": ("LORA_TIMELINE_ENTRIES",),
+                "segments_json": ("STRING", {
+                    "default": "[]",
+                    "multiline": True,
+                }),
+            },
+            "optional": {
+                # Two ways to feed the Timeline:
+                #  A) connect `features` from FoleyTuneFeatureExtractor (legacy), or
+                #  B) connect `video_features` (loader) + `hunyuan_deps` and let the
+                #     Timeline build features itself from base_prompt/negative_prompt.
+                "features": ("FOLEYTUNE_FEATURES", {
+                    "tooltip": "Optional. Connect a FoleyTuneFeatureExtractor here, OR leave it "
+                               "unconnected and connect video_features + hunyuan_deps to let the "
+                               "Timeline build features itself (no FeatureExtractor needed).",
+                }),
+                "video_features": ("FOLEYTUNE_VIDEO_FEATURES", {
+                    "tooltip": "Video loader output (clip/sync/fps/duration/path). Used for the "
+                               "thumbnail strip, and — when `features` is not connected — as the "
+                               "visual source for self-contained feature building.",
+                }),
+                "hunyuan_deps": ("FOLEYTUNE_DEPS", {
+                    "tooltip": "Deps for CLAP. Needed for per-segment prompts and for the "
+                               "self-contained path (encoding base_prompt/negative_prompt).",
+                }),
+                # NOTE: new widgets are appended AFTER existing ones so saved
+                # widgets_values still map positionally. Order below is fixed.
+                "video_path": ("STRING", {
+                    "default": "",
+                    "tooltip": "Manual override for the thumbnail video path. Usually unnecessary if "
+                               "video_features is connected. Type a path or connect a STRING.",
+                }),
+                "crossfade_frames": ("INT", {
+                    "default": 0, "min": 0, "max": 120, "step": 1,
+                    "tooltip": "(Currently inactive) Segment transitions are hard cuts on the exact "
+                               "frame. Short segments are now generated with padded context and "
+                               "trimmed to their frames (pad-and-trim), which uses hard cuts; "
+                               "crossfade is not combined with it yet.",
+                }),
+                "base_prompt": ("STRING", {
+                    "default": "", "multiline": True,
+                    "tooltip": "Self-contained path only (features unconnected): the positive prompt "
+                               "for regions with no per-segment prompt. Ignored if `features` is "
+                               "connected (the extractor's prompt is used instead).",
+                }),
+                "negative_prompt": ("STRING", {
+                    "default": "", "multiline": True,
+                    "tooltip": "Self-contained path only (features unconnected): the CFG negative "
+                               "prompt (global). Ignored if `features` is connected.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("LORA_SCHEDULE", "FOLEYTUNE_FEATURES")
+    RETURN_NAMES = ("lora_schedule", "features")
+    FUNCTION = "build_schedule"
+    CATEGORY = "FoleyTune"
+    OUTPUT_NODE = True
+
+    def build_schedule(self, entries, segments_json="[]", features=None, crossfade_frames=0,
+                       video_features=None, hunyuan_deps=None, video_path="",
+                       base_prompt="", negative_prompt=""):
+        try:
+            segments = json.loads(segments_json) if (segments_json or "").strip() else []
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(f"LoRA timeline: bad segments_json {segments_json!r} — treating as empty")
+            segments = []
+        if not isinstance(segments, list):
+            segments = []
+
+        # fps (loader's video_features > features > 30 fallback) drives the
+        # frame-based ruler and converts crossfade_frames -> seconds.
+        resolved_fps = 0.0
+        if video_features and video_features.get("fps"):
+            resolved_fps = float(video_features["fps"])
+        elif features and features.get("fps"):
+            resolved_fps = float(features["fps"])
+        crossfade_sec = crossfade_frames / (resolved_fps or 30.0)
+
+        # Resolve a segment to its entry by STABLE id first (survives chain
+        # reordering), falling back to positional entry_index for older graphs.
+        entries_by_id = {e["id"]: e for e in entries if e.get("id")}
+
+        def _entry_for(seg):
+            eid = seg.get("entry_id")
+            if eid is not None and eid in entries_by_id:
+                return entries_by_id[eid]
+            ei = seg.get("entry_index", 0)
+            return entries[ei] if 0 <= ei < len(entries) else None
+
+        # Distinct non-empty per-segment prompts (each becomes a text_feat the
+        # sampler swaps in per chunk). In the self-contained path, also encode
+        # base_prompt/negative_prompt to build the features dict.
+        used_prompts = set()
+        for seg in segments:
+            entry = _entry_for(seg)
+            if entry:
+                p = (entry.get("prompt") or "").strip()
+                if p:
+                    used_prompts.add(p)
+
+        self_contained = features is None
+        to_encode = set(used_prompts)
+        if self_contained:
+            to_encode.add(base_prompt or "")
+            to_encode.add(negative_prompt or "")
+
+        prompt_feats = {}
+        if to_encode:
+            if hunyuan_deps is not None:
+                prompt_feats = _encode_clap_prompts(hunyuan_deps, sorted(to_encode))
+                logger.info(f"LoRA timeline: encoded {len(prompt_feats)} prompt(s)")
+            elif used_prompts:
+                logger.warning("LoRA timeline: entries have prompts but hunyuan_deps is not "
+                               "connected — per-segment prompts ignored, using the global prompt")
+
+        # Self-contained path: build the features dict from video_features +
+        # CLAP-encoded base/negative prompts (no FeatureExtractor needed).
+        if self_contained:
+            if video_features is None:
+                raise ValueError("FoleyTune LoRA Timeline: connect either `features` (from a "
+                                 "FoleyTuneFeatureExtractor) or `video_features` (from the video "
+                                 "loader).")
+            if hunyuan_deps is None:
+                raise ValueError("FoleyTune LoRA Timeline: self-contained mode (no `features`) "
+                                 "needs `hunyuan_deps` to CLAP-encode base_prompt/negative_prompt.")
+            features = {
+                "clip_feat": video_features["clip_feat"],
+                "sync_feat": video_features["sync_feat"],
+                "text_feat": prompt_feats[base_prompt or ""],
+                "uncond_text_feat": prompt_feats[negative_prompt or ""],
+                "duration": video_features["duration"],
+                "fps": video_features.get("fps", resolved_fps),
+                "video_path": video_features.get("video_path", ""),
+            }
+            logger.info("LoRA timeline: built features from video_features "
+                        "(self-contained, no FeatureExtractor)")
+
+        schedule = []
+        for seg in sorted(segments, key=lambda s: s["start_sec"]):
+            entry = _entry_for(seg)
+            if entry is None:
+                continue
+            seg_out = {
+                "lora_path": entry["path"],
+                "start_sec": float(seg["start_sec"]),
+                "end_sec": float(seg["end_sec"]),
+                "strength": float(seg.get("strength", entry["strength"])),
+                "fade_in": float(seg.get("fade_in", 0.0)),
+                "fade_out": float(seg.get("fade_out", 0.0)),
+                "crossfade_sec": crossfade_sec,  # per-schedule; read by the sampler
+            }
+            entry_prompt = (entry.get("prompt") or "").strip()
+            if entry_prompt and entry_prompt in prompt_feats:
+                seg_out["text_feat"] = prompt_feats[entry_prompt]
+                seg_out["prompt"] = entry_prompt
+            schedule.append(seg_out)
+
+        # Resolve the thumbnail video path: explicit override > loader's
+        # video_features (carries video_path) > whatever the features dict has.
+        resolved_video_path = (
+            (video_path or "").strip()
+            or (video_features.get("video_path", "") if video_features else "")
+            or features.get("video_path", "")
+        )
+
+        return {
+            "ui": {
+                "duration": [features["duration"]],
+                "video_path": [resolved_video_path],
+                "fps": [resolved_fps],
+                "entries": [entries],
+            },
+            "result": (schedule, features),
+        }
+
+
+# --- API: Timeline Thumbnail Sprite -----------------------------------------
+
+try:
+    from server import PromptServer
+    import aiohttp.web as web
+    import subprocess
+
+    def _probe_duration(path):
+        """Return video duration in seconds, or 0.0 if it can't be determined."""
+        try:
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=nw=1:nk=1", path],
+                capture_output=True, timeout=15,
+            )
+            return float(out.stdout.decode().strip())
+        except (ValueError, OSError, subprocess.SubprocessError):
+            return 0.0
+
+    @PromptServer.instance.routes.get("/foleytune/timeline_thumbnails")
+    async def timeline_thumbnails(request):
+        """Generate a single-row sprite sheet of video thumbnails for the timeline.
+
+        ffmpeg's `tile` filter needs an explicit column count (there is no
+        auto/0 layout), so probe the duration and tile exactly `cols` frames
+        sampled uniformly across the clip. The widget stretches this strip to
+        the full track width, so cols frames map linearly onto the time axis.
+        """
+        video_path = request.query.get("video_path", "")
+        logger.info(f"[timeline thumbnails] request video_path={video_path!r}")
+        if not video_path:
+            logger.warning("[timeline thumbnails] empty video_path — features dict "
+                           "carried no 'video_path' (check the upstream feature node)")
+            return web.Response(status=404, text="No video_path provided")
+        if not os.path.exists(video_path):
+            logger.warning(f"[timeline thumbnails] path does not exist on this host: {video_path}")
+            return web.Response(status=404, text=f"Video not found on server: {video_path}")
+
+        duration = _probe_duration(video_path)
+        # ~2 thumbnails/sec, capped so long clips don't make an enormous sprite.
+        cols = max(1, min(80, round(duration * 2))) if duration > 0 else 16
+        fps = cols / duration if duration > 0 else 2.0
+        logger.info(f"[timeline thumbnails] duration={duration:.2f}s cols={cols} fps={fps:.3f}")
+
+        mtime = os.path.getmtime(video_path)
+        cache_key = hashlib.md5(f"{video_path}:{mtime}:{cols}:v2".encode()).hexdigest()
+        cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "thumbnails")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, f"{cache_key}.jpg")
+
+        if not os.path.exists(cache_path):
+            try:
+                result = subprocess.run([
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-vf", f"fps={fps:.6f},scale=160:-2,tile={cols}x1",
+                    "-frames:v", "1", "-update", "1",
+                    "-q:v", "5",
+                    cache_path,
+                ], capture_output=True, timeout=60)
+            except FileNotFoundError:
+                logger.error("[timeline thumbnails] ffmpeg not found on PATH for the ComfyUI process")
+                return web.Response(status=500, text="ffmpeg not found on PATH")
+            if result.returncode != 0 or not os.path.exists(cache_path):
+                err = result.stderr.decode(errors="replace")
+                logger.error(f"[timeline thumbnails] ffmpeg failed (rc={result.returncode}): {err[-500:]}")
+                return web.Response(status=500, text=f"ffmpeg failed: {err}")
+            logger.info(f"[timeline thumbnails] generated sprite: {cache_path}")
+
+        return web.FileResponse(cache_path, headers={"Content-Type": "image/jpeg"})
+
+    @PromptServer.instance.routes.get("/foleytune/timeline_frame")
+    async def timeline_frame(request):
+        """Extract a single larger frame at time `t` for the scrub player.
+
+        Lets the user align LoRA-segment boundaries to specific frames. Input
+        seek (-ss before -i) is fast; clips are short so it's frame-accurate
+        enough for alignment. Cached per (path, mtime, t rounded to 0.1s).
+        """
+        video_path = request.query.get("video_path", "")
+        if not video_path or not os.path.exists(video_path):
+            return web.Response(status=404, text="Video not found")
+        try:
+            t = max(0.0, float(request.query.get("t", "0")))
+        except ValueError:
+            t = 0.0
+
+        t_key = round(t, 1)
+        mtime = os.path.getmtime(video_path)
+        cache_key = hashlib.md5(f"{video_path}:{mtime}:{t_key}:frame".encode()).hexdigest()
+        cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "frames")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, f"{cache_key}.jpg")
+
+        if not os.path.exists(cache_path):
+            try:
+                result = subprocess.run([
+                    "ffmpeg", "-y", "-ss", f"{t_key:.2f}", "-i", video_path,
+                    "-frames:v", "1", "-update", "1",
+                    "-vf", "scale=480:-2",
+                    "-q:v", "3",
+                    cache_path,
+                ], capture_output=True, timeout=30)
+            except FileNotFoundError:
+                return web.Response(status=500, text="ffmpeg not found on PATH")
+            if result.returncode != 0 or not os.path.exists(cache_path):
+                err = result.stderr.decode(errors="replace")
+                logger.error(f"[timeline frame] ffmpeg failed (rc={result.returncode}): {err[-300:]}")
+                return web.Response(status=500, text=f"ffmpeg failed: {err}")
+
+        return web.FileResponse(cache_path, headers={"Content-Type": "image/jpeg"})
+
+except ImportError:
+    pass  # Running outside ComfyUI server context
+
+
 # --- Node 4: LoRA Scheduler -------------------------------------------------
 
 class FoleyTuneLoRAScheduler:
@@ -2982,6 +3375,8 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneLoRATrainer": FoleyTuneLoRATrainer,
     "FoleyTuneLoRALoader": FoleyTuneLoRALoader,
     "FoleyTuneLoRALoaderPath": FoleyTuneLoRALoaderPath,
+    "FoleyTuneLoRATimelineEntry": FoleyTuneLoRATimelineEntry,
+    "FoleyTuneLoRATimeline": FoleyTuneLoRATimeline,
     "FoleyTuneLoRAScheduler": FoleyTuneLoRAScheduler,
     "FoleyTuneLoRAEvaluator": FoleyTuneLoRAEvaluator,
     "FoleyTuneVAERoundtrip": FoleyTuneVAERoundtrip,
@@ -2994,6 +3389,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneLoRATrainer": "FoleyTune LoRA Trainer",
     "FoleyTuneLoRALoader": "FoleyTune LoRA Loader",
     "FoleyTuneLoRALoaderPath": "FoleyTune LoRA Loader (Path)",
+    "FoleyTuneLoRATimelineEntry": "FoleyTune LoRA Timeline Entry",
+    "FoleyTuneLoRATimeline": "FoleyTune LoRA Timeline",
     "FoleyTuneLoRAScheduler": "FoleyTune LoRA Scheduler",
     "FoleyTuneLoRAEvaluator": "FoleyTune LoRA Evaluator",
     "FoleyTuneVAERoundtrip": "FoleyTune VAE Roundtrip",

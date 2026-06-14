@@ -29,6 +29,117 @@ except Exception:
 # compatible with ComfyUI's data flow (e.g., accepting a torch.Generator).
 # -----------------------------------------------------------------------------------
 
+
+def _apply_lora_for_time(model, lora_schedule, time_sec, base_state, ckpt_cache):
+    """Restore base weights and apply the LoRA active at time_sec (if any).
+
+    Args:
+        ckpt_cache: dict used as a per-generation session cache — caller owns
+                    its lifetime and clears it after the generation loop.
+    """
+    from .lora.lora import apply_lora, load_lora, remove_lora, FOLEY_TARGET_PRESETS
+
+    remove_lora(model)
+    # Standard LoRAs never touch base weights — they live in module.base and
+    # survive wrap/unwrap — so the (expensive, full-model CPU->GPU) base reload
+    # is only needed after a pissa load dirtied them. Skipping it is what makes
+    # per-segment hot-swap (many swaps per generation) affordable.
+    if ckpt_cache.get("__base_dirty__"):
+        model.load_state_dict(base_state, strict=False)
+        ckpt_cache["__base_dirty__"] = False
+
+    target = None
+    for seg in lora_schedule:
+        if seg["start_sec"] <= time_sec < seg["end_sec"]:
+            target = seg
+            break
+
+    # target is None  -> uncovered gap; target with no lora_path -> prompt-only
+    # (regular-video) segment. Both run the base model; the segment's text_feat
+    # (if any) is applied separately when the per-chunk text is built.
+    if target is None or not target.get("lora_path"):
+        # DEBUG: this fires once per chunk PER diffusion step (interleaved
+        # denoising), so it would flood at INFO. The one-time per-chunk plan is
+        # logged in chunked_denoise_process instead.
+        logger.debug(f"LoRA swap @ {time_sec:.1f}s: base model (no LoRA)")
+        return
+
+    lora_path = target["lora_path"]
+
+    # Session-scoped cache — lives only for this generation. Resolve the
+    # checkpoint exactly like FoleyTuneLoRALoaderPair._load so hot-swap and the
+    # normal loader treat the same adapter identically (safetensors sidecar
+    # .json, schedule-free eval weights, EMA, rank inference, pissa, rsLoRA).
+    if lora_path in ckpt_cache:
+        state_dict, rank, alpha, target_suffixes, init_mode, use_rslora = ckpt_cache[lora_path]
+    else:
+        from .nodes_lora import _load_adapter_checkpoint
+        ckpt = _load_adapter_checkpoint(lora_path)
+        if "state_dict" in ckpt:
+            state_dict = ckpt["state_dict"]
+            meta = ckpt.get("meta", {})
+            if "ema_state" in ckpt:
+                for key, ema_val in ckpt["ema_state"].items():
+                    if key in state_dict:
+                        state_dict[key] = ema_val
+                logger.info("Using EMA weights from checkpoint for inference")
+        else:
+            state_dict = ckpt
+            meta = {}
+
+        # Infer rank from lora_A tensor shapes when meta omits it
+        inferred_rank = None
+        for k, v in state_dict.items():
+            if "lora_A" in k and v.ndim == 2:
+                inferred_rank = v.shape[0]
+                break
+        rank = meta.get("rank", inferred_rank or 16)
+        alpha = meta.get("alpha", float(rank))
+        init_mode = meta.get("init_mode", "standard")
+        use_rslora = meta.get("use_rslora", False)
+
+        meta_target = meta.get("target", "all_attn_mlp")
+        if isinstance(meta_target, str) and meta_target in FOLEY_TARGET_PRESETS:
+            target_suffixes = FOLEY_TARGET_PRESETS[meta_target]
+        elif isinstance(meta_target, (list, tuple)):
+            target_suffixes = tuple(meta_target)
+        else:
+            target_suffixes = FOLEY_TARGET_PRESETS["all_attn_mlp"]
+
+        ckpt_cache[lora_path] = (state_dict, rank, alpha, target_suffixes, init_mode, use_rslora)
+
+    apply_lora(model, rank=rank, alpha=alpha, target_suffixes=target_suffixes,
+               init_mode="standard", use_rslora=use_rslora)
+    if init_mode == "pissa":
+        # pissa weights include modified base.weight — loading them dirties the
+        # base, so the next swap must restore it from base_state.
+        model.load_state_dict(state_dict, strict=False)
+        ckpt_cache["__base_dirty__"] = True
+    else:
+        load_lora(model, state_dict)
+
+    strength = target.get("strength", 1.0)
+    if strength != 1.0:
+        # Scale the LoRA delta by `strength` once — multiply only lora_B
+        # (scaling both lora_A and lora_B would apply strength quadratically).
+        for n, p in model.named_parameters():
+            if "lora_B" in n:
+                p.data.mul_(strength)
+
+    logger.debug(f"LoRA swap @ {time_sec:.1f}s: {os.path.basename(lora_path)} "
+                 f"rank={rank} strength={strength}")
+
+
+def _segment_at_time(lora_schedule, time_sec):
+    """Return the schedule segment covering time_sec, or None."""
+    if not lora_schedule:
+        return None
+    for seg in lora_schedule:
+        if seg["start_sec"] <= time_sec < seg["end_sec"]:
+            return seg
+    return None
+
+
 # DAC kwargs + explicit latent_dim (must be 128 or the decoder mismatches)
 # extracted from original pth
 _DAC_KWARGS = dict(
@@ -451,6 +562,83 @@ def compute_chunk_boundaries(duration: float, chunk_duration: float, overlap_sec
     return chunks
 
 
+_MIN_GEN_SEC = 5.0  # pad short segment chunks to >= this many seconds of context
+
+
+def align_chunks_to_schedule(chunks, lora_schedule):
+    """Build per-segment chunks with pad-and-trim, returning (gen, keep).
+
+    Per-chunk LoRA/text only works if each chunk lies within one segment. The
+    default fixed ~chunk_duration windows can all centre on the same long
+    segment (only that LoRA applies), so we partition [start,end] at every
+    segment edge: each segment AND each no-LoRA gap is its own region (long
+    regions sub-split to <= window).
+
+    But the model is trained on ~chunk_duration windows and produces NOISE on
+    very short clips (a 1s region degenerates). So we don't generate the bare
+    region: each region is the `keep` window (the exact frames we output), and
+    we generate a padded `gen` window (>= _MIN_GEN_SEC, borrowing neighbouring
+    video as context) — then extract only the keep slice. Keep windows tile
+    [start,end] exactly (adjacent, hard cuts on the chosen frames); gen windows
+    may overlap (context only — not crossfaded).
+
+    Returns (gen_chunks, keep_windows). keep_windows is None when no schedule.
+    """
+    if not lora_schedule or not chunks:
+        return chunks, None
+
+    total_start = chunks[0][0]
+    total_end = chunks[-1][1]
+    window = max((ce - cs for cs, ce in chunks), default=total_end - total_start)
+    if window <= 0:
+        return chunks, None
+
+    # 1. exact keep windows from segment/gap edges (sub-split long regions)
+    bset = {round(total_start, 6), round(total_end, 6)}
+    for seg in lora_schedule:
+        for key in ("start_sec", "end_sec"):
+            bset.add(round(max(total_start, min(total_end, float(seg[key]))), 6))
+    bounds = sorted(bset)
+
+    keep = []
+    for cs, ce in zip(bounds[:-1], bounds[1:]):
+        span = ce - cs
+        if span < 1e-3:
+            continue
+        if span <= window + 1e-6:
+            keep.append((round(cs, 6), round(ce, 6)))
+        else:
+            n = math.ceil(span / window)
+            step = span / n
+            for k in range(n):
+                a = cs + k * step
+                b = ce if k == n - 1 else cs + (k + 1) * step
+                keep.append((round(a, 6), round(b, 6)))
+
+    if not keep:
+        return chunks, None
+
+    # 2. gen windows: pad keeps shorter than min_gen with neighbouring context
+    span_total = total_end - total_start
+    min_gen = min(_MIN_GEN_SEC, window, span_total)
+    gen = []
+    for ks, ke in keep:
+        if (ke - ks) >= min_gen - 1e-6:
+            gen.append((ks, ke))
+            continue
+        pad = min_gen - (ke - ks)
+        gs, ge = ks - pad / 2.0, ke + pad / 2.0
+        if gs < total_start:
+            ge += (total_start - gs)
+            gs = total_start
+        if ge > total_end:
+            gs -= (ge - total_end)
+            ge = total_end
+        gen.append((round(max(total_start, gs), 6), round(min(total_end, ge), 6)))
+
+    return gen, keep
+
+
 def slice_features_for_chunk(features: dict, t_start: float, t_end: float):
     """Slice pre-computed features to a specific time window.
 
@@ -575,6 +763,7 @@ def chunked_denoise_process(
     init_latents=None,
     strength=1.0,
     noise_blend=0.0,
+    lora_schedule=None,
 ):
     """Chunked denoising with overlap stitching for long-form generation.
 
@@ -596,6 +785,24 @@ def chunked_denoise_process(
     Returns:
         (audio_waveform, sample_rate) tuple
     """
+    # Align chunk boundaries to LoRA schedule segments (pad-and-trim).
+    # chunks = generated windows (short segments padded with context);
+    # keep_windows = exact frames to output (tile the timeline). None otherwise.
+    keep_windows = None
+    if lora_schedule:
+        chunks, keep_windows = align_chunks_to_schedule(chunks, lora_schedule)
+        logger.info(f"LoRA timeline: {len(chunks)} chunks. "
+                    f"gen={[(round(a, 2), round(b, 2)) for a, b in chunks]} "
+                    f"keep={[(round(a, 2), round(b, 2)) for a, b in keep_windows]}")
+
+    # LoRA/prompt for a chunk is resolved by its KEEP-window centre (the segment
+    # it represents) — the padded gen-window centre can fall in a neighbour.
+    def _resolve_center(c_idx, t_start, t_end):
+        if keep_windows is not None:
+            ks, ke = keep_windows[c_idx]
+            return (ks + ke) / 2.0
+        return (t_start + t_end) / 2.0
+
     target_dtype = model_dict.foley_model.dtype
     device = model_dict.device
     audio_frame_rate = cfg.model_config.model_kwargs.audio_frame_rate
@@ -606,17 +813,40 @@ def chunked_denoise_process(
     ]
     sample_rate = model_dict.dac_model.sample_rate
 
-    # Single chunk — delegate to standard denoise
+    # --- LoRA schedule: save base state for hot-swapping ---
+    # Only needed if at least one segment actually carries a LoRA. A prompt-only
+    # timeline (all "(none)" entries) just swaps text_feat per chunk — no base
+    # save/restore, no LoRA wrap/unwrap.
+    _lora_base_state = None
+    _current_lora_path = None
+    _lora_ckpt_cache = {}
+    if lora_schedule and any(seg.get("lora_path") for seg in lora_schedule):
+        # Store base state on CPU to avoid doubling GPU memory
+        _lora_base_state = {k: v.cpu().clone() for k, v in model_dict.foley_model.state_dict().items()}
+        logger.info(f"LoRA timeline: {len(lora_schedule)} segments, base state saved (CPU)")
+
+    # Single chunk — delegate to standard denoise (gen == keep here, no trim).
     if len(chunks) == 1:
         t_start, t_end = chunks[0]
+        _center = _resolve_center(0, t_start, t_end)
+        # Apply LoRA for single-chunk case
+        if lora_schedule and _lora_base_state is not None:
+            _apply_lora_for_time(model_dict.foley_model, lora_schedule,
+                                 _center, _lora_base_state, _lora_ckpt_cache)
         chunk_feats = slice_features_for_chunk(features, t_start, t_end)
         chunk_dur = t_end - t_start
         visual = {
             "siglip2_feat": chunk_feats["clip_feat"].to(device),
             "syncformer_feat": chunk_feats["sync_feat"].to(device),
         }
+        # Per-segment prompt: swap text_feat if the active segment carries one.
+        _seg = _segment_at_time(lora_schedule, _center)
+        _seg_text = _seg.get("text_feat") if _seg else None
+        if _seg_text is not None:
+            logger.info(f"Per-segment prompt @ single chunk: {_seg.get('prompt', '')[:60]!r}")
         text = {
-            "text_feat": chunk_feats["text_feat"].to(device),
+            "text_feat": (_seg_text if _seg_text is not None
+                          else chunk_feats["text_feat"]).to(device),
             "uncond_text_feat": chunk_feats["uncond_text_feat"].to(device),
         }
         # Slice init_latents for this chunk if provided
@@ -625,11 +855,22 @@ def chunked_denoise_process(
             frame_start = int(t_start * audio_frame_rate)
             frame_end = int(t_end * audio_frame_rate)
             chunk_init = init_latents[:, :, frame_start:frame_end]
-        return denoise_process_with_generator(
+        result = denoise_process_with_generator(
             visual, text, chunk_dur, model_dict, cfg,
             guidance_scale, num_inference_steps, batch_size, sampler, generator,
             init_latents=chunk_init, strength=strength, noise_blend=noise_blend,
         )
+        # Restore base state after single-chunk generation
+        if _lora_base_state is not None:
+            import gc
+            from .lora.lora import remove_lora
+            remove_lora(model_dict.foley_model)
+            model_dict.foley_model.load_state_dict(_lora_base_state, strict=False)
+            del _lora_base_state
+            _lora_ckpt_cache.clear()
+            gc.collect()
+            torch.cuda.empty_cache()
+        return result
 
     # --- Multi-chunk: set up per-chunk schedulers and latents ---
     # CRITICAL: each chunk needs its own scheduler instance because
@@ -692,7 +933,17 @@ def chunked_denoise_process(
 
         c_feats = slice_features_for_chunk(features, t_start, t_end)
         chunk_visual_feats.append({k: c_feats[k].to(device) for k in ["clip_feat", "sync_feat"]})
-        chunk_text_feats.append({k: c_feats[k].to(device) for k in ["text_feat", "uncond_text_feat"]})
+        # Per-segment prompt: swap the positive text_feat for the segment's own
+        # (encoded by the Timeline node); uncond stays global. _pad_or_trim_time
+        # below reconciles any sequence-length difference before the CFG concat.
+        # Resolve by keep-window centre (the gen window may straddle a neighbour).
+        _seg = _segment_at_time(lora_schedule, _resolve_center(c_idx, t_start, t_end))
+        _seg_text = _seg.get("text_feat") if _seg else None
+        chunk_text_feats.append({
+            "text_feat": (_seg_text if _seg_text is not None
+                          else c_feats["text_feat"]).to(device),
+            "uncond_text_feat": c_feats["uncond_text_feat"].to(device),
+        })
 
     # Truncate timesteps if using audio2audio
     if a2a_start_step is not None:
@@ -746,6 +997,16 @@ def chunked_denoise_process(
             "text": cfg_text.to(dtype=compute_dtype),
         })
 
+    # --- Precompute per-chunk LoRA assignment (by keep-window centre) ---
+    _chunk_lora_targets = [None] * len(chunks)
+    if lora_schedule and _lora_base_state is not None:
+        for c_idx, (cs, ce) in enumerate(chunks):
+            _chunk_lora_targets[c_idx] = _segment_at_time(
+                lora_schedule, _resolve_center(c_idx, cs, ce))
+        lora_summary = [os.path.basename(s["lora_path"]) if (s and s.get("lora_path")) else "base"
+                        for s in _chunk_lora_targets]
+        logger.info(f"LoRA timeline per-chunk: {lora_summary}")
+
     # --- Denoising loop ---
     total_steps = len(timesteps) * len(chunks)
     pbar = ProgressBar(total_steps)
@@ -759,6 +1020,16 @@ def chunked_denoise_process(
                 t = t.to(device=device)
 
             for c_idx in range(len(chunks)):
+                # LoRA hot-swap: apply correct LoRA before processing this chunk
+                if lora_schedule and _lora_base_state is not None:
+                    target = _chunk_lora_targets[c_idx]
+                    target_path = target.get("lora_path") if target else None
+                    if target_path != _current_lora_path:
+                        _apply_lora_for_time(model_dict.foley_model, lora_schedule,
+                                             _resolve_center(c_idx, *chunks[c_idx]),
+                                             _lora_base_state, _lora_ckpt_cache)
+                        _current_lora_path = target_path
+
                 latents = chunk_latents[c_idx]
                 cfg_in = chunk_cfg_inputs[c_idx]
 
@@ -788,8 +1059,11 @@ def chunked_denoise_process(
                 chunk_latents[c_idx] = chunk_schedulers[c_idx].step(noise_pred, t, latents)[0]
                 pbar.update(1)
 
-            # SaFa swap after all chunks are updated this step
-            if crossfade_mode == "safa":
+            # SaFa swap after all chunks are updated this step.
+            # Skip in keep-window (timeline) mode: gen windows overlap with
+            # DIFFERENT content (different segments/LoRAs), so swapping latents
+            # between them would corrupt — each chunk is independent there.
+            if crossfade_mode == "safa" and keep_windows is None:
                 for c_idx in range(len(chunks) - 1):
                     ovl = pair_overlap_frames[c_idx]
                     if ovl > 0:
@@ -798,7 +1072,42 @@ def chunked_denoise_process(
                             ovl, step_idx
                         )
 
+    # --- Restore base model after LoRA hot-swap ---
+    if _lora_base_state is not None:
+        import gc
+        from .lora.lora import remove_lora
+        remove_lora(model_dict.foley_model)
+        model_dict.foley_model.load_state_dict(_lora_base_state, strict=False)
+        del _lora_base_state
+        _lora_ckpt_cache.clear()
+        gc.collect()
+        torch.cuda.empty_cache()
+        logger.info("LoRA timeline: base model restored, caches cleared")
+
     # --- Stitch results ---
+    # Keep-window (timeline pad-and-trim): extract each chunk's exact keep slice
+    # (the padded context is discarded) and concatenate. Keep windows tile the
+    # timeline, so this reconstructs the full duration with hard cuts on the
+    # chosen frames — independent of crossfade_mode.
+    if keep_windows is not None:
+        parts = []
+        for c_idx in range(len(chunks)):
+            gs, _ge = chunks[c_idx]
+            ks, ke = keep_windows[c_idx]
+            lat = chunk_latents[c_idx]
+            sf = max(0, int(round((ks - gs) * audio_frame_rate)))
+            ef = min(lat.shape[-1], int(round((ke - gs) * audio_frame_rate)))
+            if ef <= sf:
+                ef = min(lat.shape[-1], sf + 1)
+            parts.append(lat[:, :, sf:ef])
+        full_latent = torch.cat(parts, dim=-1)
+        with torch.inference_mode():
+            dac_weight = next(model_dict.dac_model.parameters())
+            latents_dec = full_latent.to(device=dac_weight.device, dtype=dac_weight.dtype)
+            audio = model_dict.dac_model.decode(latents_dec)
+        audio = audio[:, :, :int(features["duration"] * sample_rate)]
+        return audio, sample_rate
+
     if crossfade_mode == "safa":
         parts = []
         for c_idx in range(len(chunks)):

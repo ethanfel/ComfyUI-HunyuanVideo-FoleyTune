@@ -454,6 +454,7 @@ class FoleyTuneChunkedSampler:
                 "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
                              "tooltip": "1.0=full generation from noise, 0.0=keep original. "
                                         "Uses sigma-based mapping for smooth control across the full range."}),
+                "lora_schedule": ("LORA_SCHEDULE", {"tooltip": "LoRA timeline schedule — assigns different LoRAs to different time segments."}),
                 "force_offload": ("BOOLEAN", {"default": True}),
             }
         }
@@ -474,6 +475,7 @@ class FoleyTuneChunkedSampler:
         sampler_options=None,
         init_audio=None,
         denoise=1.0,
+        lora_schedule=None,
         force_offload=True,
     ):
         opts = sampler_options or {}
@@ -578,6 +580,7 @@ class FoleyTuneChunkedSampler:
             init_latents=init_latents,
             strength=denoise,
             noise_blend=noise_blend,
+            lora_schedule=lora_schedule,
         )
 
         waveform_batch = decoded_waveform.float().cpu()
@@ -1434,8 +1437,18 @@ class FoleyTuneVideoCombiner:
                 "filename_prefix": ("STRING", {"default": "FoleyTune"}),
             },
             "optional": {
-                "audio_codec": (["aac", "flac", "pcm_s16le"], {"default": "aac"}),
+                "audio_codec": (["auto", "aac", "libopus", "flac", "pcm_s16le"], {
+                    "default": "auto",
+                    "tooltip": "auto = best codec for the output container "
+                               "(webm→opus, mkv→flac/lossless, mp4/mov→aac)."}),
                 "save_output": ("BOOLEAN", {"default": True}),
+                "save_metadata": ("BOOLEAN", {"default": True, "tooltip":
+                    "Embed the ComfyUI workflow + prompt into the output video metadata "
+                    "(like ComfyUI does for PNGs). Stream-copied, no re-encode."}),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             },
         }
 
@@ -1446,7 +1459,8 @@ class FoleyTuneVideoCombiner:
     OUTPUT_NODE = True
 
     def combine(self, video_features, audio, filename_prefix="FoleyTune",
-                audio_codec="aac", save_output=True):
+                audio_codec="aac", save_output=True, save_metadata=True,
+                prompt=None, extra_pnginfo=None):
         import re
         import tempfile
         import soundfile as sf
@@ -1456,6 +1470,25 @@ class FoleyTuneVideoCombiner:
             raise FileNotFoundError(f"Source video not found: {source_video}")
 
         src_ext = os.path.splitext(source_video)[1] or ".mp4"
+        ext = src_ext.lower()
+
+        # "auto": best audio codec the output container supports. webm needs
+        # Opus/Vorbis; mkv handles lossless FLAC natively; mp4/mov want AAC for
+        # universal playback. (Video is always -c:v copy, never re-encoded.)
+        def _auto_audio_codec(e):
+            if e == ".webm":
+                return "libopus"
+            if e == ".mkv":
+                return "flac"
+            return "aac"  # .mp4/.mov/.m4v and anything else
+
+        audio_codec_eff = _auto_audio_codec(ext) if audio_codec == "auto" else audio_codec
+        # Safety net: webm can't hold aac/flac/pcm even if explicitly chosen.
+        if ext == ".webm" and audio_codec_eff not in ("libopus", "libvorbis"):
+            audio_codec_eff = "libopus"
+            logger.warning(f"WebM doesn't support '{audio_codec}' audio; using libopus instead.")
+        if audio_codec == "auto":
+            logger.info(f"Video Combiner: auto audio codec -> {audio_codec_eff} for {ext}")
 
         if save_output:
             output_dir = folder_paths.get_output_directory()
@@ -1504,15 +1537,33 @@ class FoleyTuneVideoCombiner:
         try:
             sf.write(tmp_wav, waveform.T, sample_rate)
 
+            # Embed the ComfyUI workflow/prompt as container metadata. Passed as
+            # argv (no shell), so the JSON needs no escaping; the video stream is
+            # still -c:v copy, so this adds no re-encode. mp4/mov need
+            # use_metadata_tags to store arbitrary keys; mkv/webm take them natively.
+            metadata_args = []
+            if save_metadata:
+                meta = {}
+                if isinstance(extra_pnginfo, dict) and "workflow" in extra_pnginfo:
+                    meta["workflow"] = json.dumps(extra_pnginfo["workflow"])
+                if prompt is not None:
+                    meta["prompt"] = json.dumps(prompt)
+                if meta:
+                    if src_ext.lower() in (".mp4", ".mov", ".m4v"):
+                        metadata_args += ["-movflags", "use_metadata_tags"]
+                    for key, value in meta.items():
+                        metadata_args += ["-metadata", f"{key}={value}"]
+
             ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
             cmd = [
                 ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                 "-i", str(source_video),
                 "-i", tmp_wav,
                 "-c:v", "copy",
-                "-c:a", audio_codec,
+                "-c:a", audio_codec_eff,
                 "-map", "0:v:0",
                 "-map", "1:a:0",
+                *metadata_args,
                 "-shortest",
                 str(output_path),
             ]

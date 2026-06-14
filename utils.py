@@ -58,6 +58,7 @@ def _apply_lora_for_time(model, lora_schedule, time_sec, base_state, ckpt_cache)
     # (regular-video) segment. Both run the base model; the segment's text_feat
     # (if any) is applied separately when the per-chunk text is built.
     if target is None or not target.get("lora_path"):
+        model._event_conditioning_enabled = False
         # DEBUG: this fires once per chunk PER diffusion step (interleaved
         # denoising), so it would flood at INFO. The one-time per-chunk plan is
         # logged in chunked_denoise_process instead.
@@ -71,7 +72,7 @@ def _apply_lora_for_time(model, lora_schedule, time_sec, base_state, ckpt_cache)
     # normal loader treat the same adapter identically (safetensors sidecar
     # .json, schedule-free eval weights, EMA, rank inference, pissa, rsLoRA).
     if lora_path in ckpt_cache:
-        state_dict, rank, alpha, target_suffixes, init_mode, use_rslora = ckpt_cache[lora_path]
+        state_dict, rank, alpha, target_suffixes, init_mode, use_rslora, event_enabled, event_strength = ckpt_cache[lora_path]
     else:
         from .nodes_lora import _load_adapter_checkpoint
         ckpt = _load_adapter_checkpoint(lora_path)
@@ -90,7 +91,7 @@ def _apply_lora_for_time(model, lora_schedule, time_sec, base_state, ckpt_cache)
         # Infer rank from lora_A tensor shapes when meta omits it
         inferred_rank = None
         for k, v in state_dict.items():
-            if "lora_A" in k and v.ndim == 2:
+            if "lora_A" in k and v.ndim >= 2:
                 inferred_rank = v.shape[0]
                 break
         rank = meta.get("rank", inferred_rank or 16)
@@ -106,10 +107,16 @@ def _apply_lora_for_time(model, lora_schedule, time_sec, base_state, ckpt_cache)
         else:
             target_suffixes = FOLEY_TARGET_PRESETS["all_attn_mlp"]
 
-        ckpt_cache[lora_path] = (state_dict, rank, alpha, target_suffixes, init_mode, use_rslora)
+        event_enabled = bool(meta.get("event_conditioning", False))
+        event_strength = float(meta.get("event_strength", 1.0))
+
+        ckpt_cache[lora_path] = (state_dict, rank, alpha, target_suffixes, init_mode, use_rslora,
+                                 event_enabled, event_strength)
 
     apply_lora(model, rank=rank, alpha=alpha, target_suffixes=target_suffixes,
                init_mode="standard", use_rslora=use_rslora)
+    model._event_conditioning_enabled = event_enabled
+    model._event_strength = event_strength
     if init_mode == "pissa":
         # pissa weights include modified base.weight — loading them dirties the
         # base, so the next swap must restore it from base_state.
@@ -422,6 +429,18 @@ def denoise_process_with_generator(
     pre_siglip2_input = pre_siglip2_input.to(dtype=compute_dtype)
     pre_sync_input = pre_sync_input.to(dtype=compute_dtype)
     pre_text_input = pre_text_input.to(dtype=compute_dtype)
+    pre_event_input = None
+    if getattr(model_dict.foley_model, "_event_conditioning_enabled", False):
+        from .lora.event import event_envelope_from_sync, zero_event_envelope
+        cond_event = event_envelope_from_sync(syncformer_feat_rep, target_len=latents.shape[-1]).to(device=device, dtype=compute_dtype)
+        if guidance_scale > 1.0:
+            uncond_event = zero_event_envelope(batch_size, latents.shape[-1], device=device, dtype=compute_dtype)
+            pre_event_input = torch.cat([uncond_event, cond_event])
+        else:
+            pre_event_input = cond_event
+        event_strength = float(getattr(model_dict.foley_model, "_event_strength", 1.0))
+    else:
+        event_strength = 1.0
 
     pbar = ProgressBar(len(timesteps))
     with torch.inference_mode():
@@ -447,12 +466,14 @@ def denoise_process_with_generator(
                 with torch.autocast(device_type=latent_input.device.type, dtype=compute_dtype):
                     noise_pred = model_dict.foley_model(
                         x=latent_input, t=t_expand, cond=pre_text_input,
-                        clip_feat=pre_siglip2_input, sync_feat=pre_sync_input
+                        clip_feat=pre_siglip2_input, sync_feat=pre_sync_input,
+                        event_envelope=pre_event_input, event_strength=event_strength,
                     )["x"]
             else:
                 noise_pred = model_dict.foley_model(
                     x=latent_input, t=t_expand, cond=pre_text_input,
-                    clip_feat=pre_siglip2_input, sync_feat=pre_sync_input
+                    clip_feat=pre_siglip2_input, sync_feat=pre_sync_input,
+                    event_envelope=pre_event_input, event_strength=event_strength,
                 )["x"]
 
             if guidance_scale > 1.0:
@@ -952,6 +973,12 @@ def chunked_denoise_process(
     # --- Precompute per-chunk CFG features ---
     # Cast conditioning to the compute dtype once here; it's constant across steps.
     compute_dtype = next(model_dict.foley_model.parameters()).dtype
+    _event_enabled = bool(getattr(model_dict.foley_model, "_event_conditioning_enabled", False)) or bool(
+        lora_schedule and any(seg.get("lora_path") for seg in lora_schedule)
+    )
+    _event_strength = float(getattr(model_dict.foley_model, "_event_strength", 1.0))
+    if _event_enabled:
+        from .lora.event import event_envelope_from_sync, zero_event_envelope
     chunk_cfg_inputs = []
     for i in range(len(chunks)):
         vis = chunk_visual_feats[i]
@@ -991,10 +1018,24 @@ def chunked_denoise_process(
             cfg_sync = sync_rep
             cfg_text = text_rep
 
+        cfg_event = None
+        if _event_enabled:
+            cond_event = event_envelope_from_sync(
+                sync_rep, target_len=chunk_latents[i].shape[-1]
+            ).to(device=device, dtype=compute_dtype)
+            if guidance_scale > 1.0:
+                uncond_event = zero_event_envelope(
+                    batch_size, chunk_latents[i].shape[-1], device=device, dtype=compute_dtype
+                )
+                cfg_event = torch.cat([uncond_event, cond_event])
+            else:
+                cfg_event = cond_event
+
         chunk_cfg_inputs.append({
             "clip": cfg_clip.to(dtype=compute_dtype),
             "sync": cfg_sync.to(dtype=compute_dtype),
             "text": cfg_text.to(dtype=compute_dtype),
+            "event": cfg_event,
         })
 
     # --- Precompute per-chunk LoRA assignment (by keep-window centre) ---
@@ -1044,11 +1085,13 @@ def chunked_denoise_process(
                         noise_pred = model_dict.foley_model(
                             x=latent_input, t=t_expand, cond=cfg_in["text"],
                             clip_feat=cfg_in["clip"], sync_feat=cfg_in["sync"],
+                            event_envelope=cfg_in["event"], event_strength=_event_strength,
                         )["x"]
                 else:
                     noise_pred = model_dict.foley_model(
                         x=latent_input, t=t_expand, cond=cfg_in["text"],
                         clip_feat=cfg_in["clip"], sync_feat=cfg_in["sync"],
+                        event_envelope=cfg_in["event"], event_strength=_event_strength,
                     )["x"]
 
                 if guidance_scale > 1.0:

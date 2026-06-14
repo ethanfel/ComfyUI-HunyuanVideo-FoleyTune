@@ -240,6 +240,21 @@ class TestComputeDelta(unittest.TestCase):
         ratio = d_rslora["layer"].sum().item() / d_normal["layer"].sum().item()
         self.assertAlmostEqual(ratio, 4.0, places=2)
 
+    def test_compute_deltas_conv1d(self):
+        from lora.merge_math import compute_deltas
+        rank = 2
+        A = torch.arange(rank * 3 * 3, dtype=torch.float32).reshape(rank, 3, 3)
+        B = torch.ones(4, rank, 1)
+        sd = {
+            "conv.lora_A": A,
+            "conv.lora_B": B,
+        }
+        deltas = compute_deltas(sd, rank=rank, alpha=2.0, strength=0.5)
+        expected = torch.einsum("or,rik->oik", B.squeeze(-1), A) * 0.5
+        self.assertIn("conv", deltas)
+        self.assertEqual(deltas["conv"].shape, (4, 3, 3))
+        torch.testing.assert_close(deltas["conv"], expected)
+
 
 if __name__ == "__main__":
     unittest.main()

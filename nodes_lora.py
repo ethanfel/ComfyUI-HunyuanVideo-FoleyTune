@@ -22,7 +22,7 @@ import comfy.utils
 
 from .lora.lora import (
     apply_lora, get_lora_state_dict, load_lora, merge_lora_into_weights,
-    FOLEY_TARGET_PRESETS, LoRALinear,
+    FOLEY_TARGET_PRESETS, LoRALinear, LoRAConv1d,
 )
 from .lora.train import (
     prepare_dataset, prepare_single_entry, harmonize_dataset,
@@ -1672,7 +1672,7 @@ class FoleyTuneLoRALoaderPath:
         # Infer rank from lora_A tensor shapes (first one found)
         inferred_rank = None
         for k, v in state_dict.items():
-            if "lora_A" in k and v.ndim == 2:
+            if "lora_A" in k and v.ndim >= 2:
                 inferred_rank = v.shape[0]
                 break
         rank = meta.get("rank", inferred_rank or 16)
@@ -1692,9 +1692,11 @@ class FoleyTuneLoRALoaderPath:
 
         # Deep copy model
         model = copy.deepcopy(hunyuan_model)
+        model._event_conditioning_enabled = bool(meta.get("event_conditioning", False))
+        model._event_strength = float(meta.get("event_strength", 1.0))
 
         # Detect if model already has a LoRA applied — if so, merge into weights
-        has_existing_lora = any(isinstance(m, LoRALinear) for m in model.modules())
+        has_existing_lora = any(isinstance(m, (LoRALinear, LoRAConv1d)) for m in model.modules())
 
         if has_existing_lora:
             n_applied = merge_lora_into_weights(
@@ -1703,6 +1705,9 @@ class FoleyTuneLoRALoaderPath:
                 target_suffixes=target_suffixes,
                 use_rslora=use_rslora,
             )
+            event_state = {k: v for k, v in state_dict.items() if k.startswith("event_adapter.")}
+            if event_state:
+                model.load_state_dict(event_state, strict=False)
             model.eval()
             logger.info(f"LoRA stacked (merged into weights): {n_applied} layers, "
                         f"rank={rank}, strength={strength}")
@@ -1721,7 +1726,7 @@ class FoleyTuneLoRALoaderPath:
                 load_lora(model, state_dict)
             if strength != 1.0:
                 for name, module in model.named_modules():
-                    if isinstance(module, LoRALinear):
+                    if hasattr(module, "lora_B"):
                         module.lora_B.data *= strength
             model.eval()
             logger.info(f"Loaded LoRA adapter: {n_wrapped} layers, rank={rank}, strength={strength}")
@@ -2180,6 +2185,8 @@ class FoleyTuneLoRAScheduler:
         "intensity_metric": "energy",
         "intensity_per_dataset": True,
         "balance_datasets": False,
+        "event_conditioning": False,
+        "event_strength": 1.0,
     }
 
     _DEFAULT_SWEEP = {
@@ -2488,9 +2495,13 @@ class FoleyTuneLoRAScheduler:
                         init_mode=config["init_mode"],
                         use_rslora=config["use_rslora"],
                     )
+                    event_conditioning = bool(config.get("event_conditioning", False))
+                    model._event_conditioning_enabled = event_conditioning
 
                     for name, param in model.named_parameters():
-                        param.requires_grad = "lora_" in name
+                        param.requires_grad = "lora_" in name or (
+                            event_conditioning and name.startswith("event_adapter.")
+                        )
 
                     _freeze = config.get("freeze_blocks", 0)
                     if _freeze > 0:
@@ -2509,7 +2520,11 @@ class FoleyTuneLoRAScheduler:
                     if config["lora_plus_ratio"] > 1.0:
                         a_params = [p for n, p in model.named_parameters() if p.requires_grad and "lora_A" in n]
                         b_params = [p for n, p in model.named_parameters() if p.requires_grad and "lora_B" in n]
+                        other_params = [p for n, p in model.named_parameters()
+                                        if p.requires_grad and "lora_A" not in n and "lora_B" not in n]
                         param_groups = [{"params": a_params, "lr": _lr}, {"params": b_params, "lr": _lr * config["lora_plus_ratio"]}]
+                        if other_params:
+                            param_groups.append({"params": other_params, "lr": _lr})
                     else:
                         param_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": _lr}]
 
@@ -2790,6 +2805,9 @@ class FoleyTuneLoRAScheduler:
                         else:
                             indices = [np.random.randint(0, n_clips) for _ in range(bs)]
                         batch_latents = torch.cat([dataset[i]["latents"] for i in indices]).to(device, dtype=dtype)
+                        batch_event = None
+                        if config.get("event_conditioning", False):
+                            batch_event = torch.cat([dataset[i]["event_envelope"] for i in indices]).to(device, dtype=dtype)
                         batch_clip = torch.cat([dataset[i]["clip_features"] for i in indices])
                         batch_sync = torch.cat([dataset[i]["sync_features"] for i in indices])
                         _text_items = [dataset[i]["text_embedding"] for i in indices]
@@ -2855,6 +2873,8 @@ class FoleyTuneLoRAScheduler:
                             wav_spectral_adaptive=_wav_adaptive,
                             compute_wav_spectral=_do_wav,
                             cfm_lambda=config.get("cfm_lambda", 0.0),
+                            event_envelope=batch_event,
+                            event_strength=config.get("event_strength", 1.0),
                         )
                         loss = loss / config["grad_accum"]
                         loss.backward()

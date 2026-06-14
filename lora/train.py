@@ -18,6 +18,7 @@ import soxr
 from loguru import logger
 
 from .lora import apply_lora, get_lora_state_dict, get_lora_and_base_state_dict, load_lora, spectral_surgery, FOLEY_TARGET_PRESETS
+from .event import event_envelope_from_latents, zero_event_envelope
 from .spectral_metrics import spectral_metrics
 
 
@@ -101,6 +102,7 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16, clip
 
         dataset.append({
             "latents": latents,
+            "event_envelope": event_envelope_from_latents(latents),
             "clip_features": clip_features,
             "sync_features": sync_features,
             "text_embedding": text_embedding,
@@ -152,6 +154,8 @@ def prepare_dataset(data_dir: str, dac_model, device, dtype=torch.bfloat16, clip
         target_lat = min(d["latents"].shape[-1] for d in dataset)
         for d in dataset:
             d["latents"] = d["latents"][..., :target_lat]
+            if "event_envelope" in d:
+                d["event_envelope"] = d["event_envelope"][..., :target_lat]
         target_text = min(d["text_embedding"].shape[1] for d in dataset)
         for d in dataset:
             d["text_embedding"] = d["text_embedding"][:, :target_text, :]
@@ -191,6 +195,8 @@ def harmonize_dataset(dataset):
         for d in dataset:
             if key == "latents":
                 d[key] = d[key][..., :target]
+                if "event_envelope" in d:
+                    d["event_envelope"] = d["event_envelope"][..., :target]
             else:
                 d[key] = d[key][:, :target]
     return dataset
@@ -249,6 +255,7 @@ def prepare_single_entry(npz_path: str, dac_model, device, dtype=torch.bfloat16)
 
     return {
         "latents": latents,
+        "event_envelope": event_envelope_from_latents(latents),
         "clip_features": clip_features,
         "sync_features": sync_features,
         "text_embedding": text_embedding,
@@ -486,7 +493,9 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
                        dac_model=None, wav_spectral_weight=0.0,
                        wav_spectral_crop=64, wav_spectral_adaptive=True,
                        compute_wav_spectral=False,
-                       cfm_lambda=0.0):
+                       cfm_lambda=0.0,
+                       event_envelope=None,
+                       event_strength=1.0):
     """Compute flow matching velocity prediction loss.
 
     Args:
@@ -537,6 +546,8 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
     clip_feat = clip_feat.to(device=device, dtype=dtype)
     sync_feat = sync_feat.to(device=device, dtype=dtype)
     text_feat = text_feat.to(device=device, dtype=dtype)
+    if event_envelope is not None:
+        event_envelope = event_envelope.to(device=device, dtype=dtype)
 
     # Ensure sync features are padded to multiple of 8 (model assertion)
     sync_len = sync_feat.shape[1]
@@ -544,13 +555,18 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
     if pad_sync > 0:
         sync_feat = F.pad(sync_feat, (0, 0, 0, pad_sync))
 
-    v_pred = model(
-        x=xt, t=t_model,
-        cond=text_feat,
-        clip_feat=clip_feat,
-        sync_feat=sync_feat,
-        drop_visual=drop_visual,
-    )["x"]
+    model_kwargs = {
+        "x": xt,
+        "t": t_model,
+        "cond": text_feat,
+        "clip_feat": clip_feat,
+        "sync_feat": sync_feat,
+        "drop_visual": drop_visual,
+    }
+    if event_envelope is not None:
+        model_kwargs["event_envelope"] = event_envelope
+        model_kwargs["event_strength"] = event_strength
+    v_pred = model(**model_kwargs)["x"]
 
     v_target = v_target.to(device=device, dtype=dtype)
 
@@ -663,6 +679,9 @@ def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
     clip_feat = dataset_entry["clip_features"].to(device=device, dtype=dtype)
     sync_feat = dataset_entry["sync_features"].to(device=device, dtype=dtype)
     text_feat = dataset_entry["text_embedding"].to(device=device, dtype=dtype)
+    event_envelope = dataset_entry.get("event_envelope")
+    if event_envelope is not None:
+        event_envelope = event_envelope.to(device=device, dtype=dtype)
     latent_shape = dataset_entry["latents"].shape  # [1, 128, T]
 
     # Ensure sync features are padded to multiple of 8 (model assertion)
@@ -691,6 +710,12 @@ def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
     cfg_clip = torch.cat([uncond_clip, clip_feat])
     cfg_sync = torch.cat([uncond_sync, sync_feat])
     cfg_text = torch.cat([uncond_text, text_feat])
+    cfg_event = None
+    if event_envelope is not None:
+        cfg_event = torch.cat([
+            zero_event_envelope(1, latent_shape[-1], device=device, dtype=dtype),
+            event_envelope,
+        ])
 
     scheduler = FlowMatchDiscreteScheduler(shift=1.0, solver="euler")
     scheduler.set_timesteps(num_steps, device=device)
@@ -711,6 +736,7 @@ def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
                 cond=cfg_text,
                 clip_feat=cfg_clip,
                 sync_feat=cfg_sync,
+                event_envelope=cfg_event,
             )["x"]
         # CFG combine in fp32 (parity with production denoise loops; the
         # scheduler integrates in fp32 internally)

@@ -6,6 +6,7 @@ import torch.nn as nn
 
 from lora.lora import (
     LoRAConv1d, apply_lora, get_lora_state_dict, load_lora, FOLEY_TARGET_PRESETS,
+    remove_lora,
 )
 
 
@@ -79,7 +80,40 @@ def test_apply_lora_wraps_conv_by_suffix():
     assert isinstance(root.single_blocks[0].linear_qkv, LoRALinear)
 
 
+def test_remove_lora_unwraps_conv_and_linear():
+    class Blk(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear_qkv = nn.Linear(8, 24)
+            self.linear1 = ChannelLastConv1d(8, 8, kernel_size=3, padding=1)
+
+    root = nn.Module()
+    root.block = Blk()
+    apply_lora(root, rank=2, alpha=2, target_suffixes=("linear_qkv", "linear1"))
+    assert isinstance(root.block.linear1, LoRAConv1d)
+
+    n = remove_lora(root)
+    assert n == 2
+    assert isinstance(root.block.linear1, ChannelLastConv1d)
+    assert isinstance(root.block.linear_qkv, nn.Linear)
+
+
 def test_all_blocks_conv_preset_has_conv_suffixes():
     p = FOLEY_TARGET_PRESETS["all_blocks_conv"]
     for s in ("linear1", "linear2.w1", "linear2.w2", "linear2.w3"):
+        assert s in p
+
+
+def test_all_attn_mlp_sync_io_preset_has_io_suffixes():
+    p = FOLEY_TARGET_PRESETS["all_attn_mlp_sync_io"]
+    for s in (
+        "audio_embedder.proj",
+        "visual_proj.w1",
+        "visual_proj.w2",
+        "visual_proj.w3",
+        "cond_in.linear_1",
+        "cond_in.linear_2",
+        "final_layer.linear",
+        "final_layer.adaLN_modulation.1",
+    ):
         assert s in p

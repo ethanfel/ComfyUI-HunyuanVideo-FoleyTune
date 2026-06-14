@@ -1,5 +1,6 @@
 from typing import List, Tuple, Optional, Union, Dict
 
+import math
 import sys
 import gc
 import time
@@ -58,6 +59,40 @@ def decouple_interleaved_two_sequences(x: torch.Tensor, len1: int, len2: int):
         x2 = F.interpolate(x2, size=(len2), mode="nearest-exact")
         x2 = x2.transpose(1, 2).view(B, len2, H, C)
     return x1, x2
+
+
+class EventEnvelopeAdapter(nn.Module):
+    """Project a one-channel event envelope into audio-token residuals."""
+
+    def __init__(self, hidden_size: int, mid_channels: int = 64, dtype=None, device=None):
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.net = nn.Sequential(
+            nn.Conv1d(1, mid_channels, kernel_size=3, padding=1, **factory_kwargs),
+            nn.SiLU(),
+            nn.Conv1d(mid_channels, hidden_size, kernel_size=3, padding=1, **factory_kwargs),
+        )
+        nn.init.kaiming_uniform_(self.net[0].weight, a=math.sqrt(5))
+        if self.net[0].bias is not None:
+            nn.init.zeros_(self.net[0].bias)
+        nn.init.zeros_(self.net[2].weight)
+        if self.net[2].bias is not None:
+            nn.init.zeros_(self.net[2].bias)
+
+    def forward(self, event_envelope: torch.Tensor, target_len: int, dtype=None) -> torch.Tensor:
+        if event_envelope.ndim == 2:
+            event_envelope = event_envelope.unsqueeze(1)
+        if event_envelope.ndim != 3:
+            raise ValueError(f"event_envelope must be [B,T] or [B,1,T], got {tuple(event_envelope.shape)}")
+        if event_envelope.shape[-1] != target_len:
+            event_envelope = F.interpolate(
+                event_envelope.float(), size=target_len, mode="linear", align_corners=False
+            )
+        weight = self.net[0].weight
+        event_envelope = event_envelope.to(device=weight.device, dtype=weight.dtype)
+        out = self.net(event_envelope).transpose(1, 2)
+        return out.to(dtype=dtype) if dtype is not None else out
+
 
 class TwoStreamCABlock(nn.Module):
     def __init__(
@@ -467,6 +502,7 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
 
         # time modulation
         self.time_in = TimestepEmbedder(self.hidden_size, get_activation_layer("silu"), **factory_kwargs)
+        self.event_adapter = EventEnvelopeAdapter(self.hidden_size, **factory_kwargs)
 
         # visual sync embedder if needed
         if self.sync_in_ksz == 1:
@@ -534,6 +570,7 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
             self.visual_proj,
             self.cond_in,
             self.time_in,
+            self.event_adapter,
             self.final_layer,
             self.empty_clip_feat,
             self.empty_sync_feat,
@@ -764,6 +801,8 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
         audio_mask: Optional[torch.Tensor] = None,
         cond_mask: torch.Tensor = None,
         sync_feat: Optional[torch.Tensor] = None,
+        event_envelope: Optional[torch.Tensor] = None,
+        event_strength: float = 1.0,
         drop_visual: Optional[List[bool]] = None,
         return_dict: bool = True,
     ) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -818,6 +857,11 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
 
         audio = self.audio_embedder(x)
         audio_seq_len = audio.shape[1]
+        if (event_envelope is not None and event_strength != 0
+                and getattr(self, "_event_conditioning_enabled", False)):
+            audio = audio + self.event_adapter(
+                event_envelope, target_len=audio_seq_len, dtype=audio.dtype
+            ) * event_strength
         v_cond = self.visual_proj(clip_feat)
         v_cond_seq_len = v_cond.shape[1]
 

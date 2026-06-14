@@ -316,6 +316,11 @@ def compute_deltas(state_dict, rank, alpha, strength, use_rslora=False):
             continue
         A = ab["A"].float()
         B = ab["B"].float()
-        deltas[layer] = (B @ A) * scaling * strength
+        if A.ndim == 3 or B.ndim == 3:
+            if A.ndim != 3 or B.ndim != 3 or B.shape[-1] != 1:
+                raise ValueError(f"Unsupported conv LoRA shape for {layer}: A={tuple(A.shape)} B={tuple(B.shape)}")
+            deltas[layer] = torch.einsum("or,rik->oik", B.squeeze(-1), A) * scaling * strength
+        else:
+            deltas[layer] = (B @ A) * scaling * strength
 
     return deltas

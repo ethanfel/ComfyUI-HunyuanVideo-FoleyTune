@@ -78,6 +78,36 @@ FOLEY_TARGET_PRESETS = {
         "modulation.linear",
         "sync_in.0",
     ),
+    # all_attn_mlp_sync + the model I/O surfaces. This adapts how DAC latents,
+    # visual tokens, text tokens, and the final latent projection enter/leave the
+    # transformer without opening the full single-stream ConvMLP stack.
+    "all_attn_mlp_sync_io": (
+        "audio_self_attn_qkv",
+        "audio_self_proj",
+        "audio_cross_q",
+        "audio_cross_proj",
+        "text_cross_kv",
+        "v_cond_attn_qkv",
+        "v_cond_self_proj",
+        "v_cond_cross_q",
+        "v_cond_cross_proj",
+        "audio_mlp.fc1",
+        "audio_mlp.fc2",
+        "v_cond_mlp.fc1",
+        "v_cond_mlp.fc2",
+        "audio_mod.linear",
+        "v_cond_mod.linear",
+        "modulation.linear",
+        "sync_in.0",
+        "audio_embedder.proj",
+        "visual_proj.w1",
+        "visual_proj.w2",
+        "visual_proj.w3",
+        "cond_in.linear_1",
+        "cond_in.linear_2",
+        "final_layer.linear",
+        "final_layer.adaLN_modulation.1",
+    ),
     # all_attn_mlp_sync + the SINGLE-STREAM block attention (linear_qkv) — the
     # previously-frozen back 2/3 of the network. Their MLP/proj are Conv1d-based
     # (ChannelLastConv1d / ConvMLP) and still NOT wrapped (needs conv-LoRA).
@@ -338,10 +368,10 @@ def apply_lora(
 
 
 def remove_lora(model: nn.Module) -> int:
-    """Remove all LoRA wrappers, restoring original nn.Linear layers."""
+    """Remove all LoRA wrappers, restoring original base layers."""
     n_removed = 0
     for name, module in list(model.named_modules()):
-        if not isinstance(module, LoRALinear):
+        if not isinstance(module, (LoRALinear, LoRAConv1d)):
             continue
         parts = name.rsplit(".", 1)
         if len(parts) == 2:
@@ -357,18 +387,21 @@ def remove_lora(model: nn.Module) -> int:
 
 
 def get_lora_state_dict(model: nn.Module) -> dict:
-    """Extract only LoRA parameters (lora_A, lora_B) from model."""
+    """Extract LoRA parameters and optional trained event adapter state."""
+    include_event = bool(getattr(model, "_event_conditioning_enabled", False))
     return {
         k: v.clone() for k, v in model.state_dict().items()
-        if "lora_A" in k or "lora_B" in k
+        if "lora_A" in k or "lora_B" in k or (include_event and k.startswith("event_adapter."))
     }
 
 
 def get_lora_and_base_state_dict(model: nn.Module) -> dict:
     """Extract LoRA + base weights (needed for PiSSA where base was modified)."""
     result = {}
+    include_event = bool(getattr(model, "_event_conditioning_enabled", False))
     for k, v in model.state_dict().items():
-        if "lora_A" in k or "lora_B" in k or "base.weight" in k or "base.bias" in k:
+        if ("lora_A" in k or "lora_B" in k or "base.weight" in k or "base.bias" in k
+                or (include_event and k.startswith("event_adapter."))):
             result[k] = v.clone()
     return result
 
@@ -445,8 +478,10 @@ def merge_lora_into_weights(
             logger.warning(f"merge_lora: layer not found: {module_name}")
             continue
 
-        # Get the weight tensor (nn.Linear or LoRALinear.base)
+        # Get the weight tensor (nn.Linear/Conv1d or wrapped base)
         if isinstance(module, LoRALinear):
+            weight = module.base.weight
+        elif isinstance(module, LoRAConv1d):
             weight = module.base.weight
         elif hasattr(module, 'weight'):
             weight = module.weight
@@ -456,12 +491,15 @@ def merge_lora_into_weights(
         A = pair["A"].float()  # [rank, in]  (Linear)  or  [rank, in, k]  (Conv1d)
         B = pair["B"].float()  # [out, rank]            or  [out, rank, 1]
         if A.ndim == 3 or B.ndim == 3:
-            # Conv1d LoRA — weight-space merge of a kernel-mixing adapter is not a
-            # simple B@A; skip rather than corrupt. (Stacking conv-LoRA is unsupported;
-            # load it as the sole adapter via the wrap path instead.)
-            logger.warning(f"merge_lora: skipping conv LoRA layer {module_name} (stacking conv-LoRA unsupported)")
-            continue
-        delta = (B @ A) * scaling * strength
+            if A.ndim != 3 or B.ndim != 3 or B.shape[-1] != 1:
+                logger.warning(f"merge_lora: unsupported conv LoRA shape for {module_name}: A={tuple(A.shape)} B={tuple(B.shape)}")
+                continue
+            delta = torch.einsum("or,rik->oik", B.squeeze(-1), A) * scaling * strength
+            if tuple(delta.shape) != tuple(weight.shape):
+                logger.warning(f"merge_lora: conv delta shape mismatch for {module_name}: delta={tuple(delta.shape)} weight={tuple(weight.shape)}")
+                continue
+        else:
+            delta = (B @ A) * scaling * strength
         weight.data += delta.to(weight.dtype)
         n_merged += 1
 

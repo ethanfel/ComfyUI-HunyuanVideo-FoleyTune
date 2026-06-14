@@ -1204,9 +1204,15 @@ class FoleyTuneVideoQualityFilter:
         #    the same stem repeats across folders; source_folder is tagged for later splitting.
         _paths = [p.strip() for p in video_folder.replace(",", "\n").splitlines() if p.strip()]
         if len(_paths) > 1:
+            _fcounts = [len(_scan_video_folder(Path(_p))) for _p in _paths]
+            _grand = sum(_fcounts)
+            print(f"[VideoQualityFilter] Multi-folder: {len(_paths)} folders, "
+                  f"{_grand} videos total -> processed sequentially then merged", flush=True)
             merged, reports = [], []
-            for _p in _paths:
+            for _i, _p in enumerate(_paths):
                 _tag = Path(_p).name
+                print(f"[VideoQualityFilter] === Folder {_i + 1}/{len(_paths)}: {_tag} "
+                      f"({_fcounts[_i]} videos) ===", flush=True)
                 _sub_out = (str(Path(output_folder.strip()) / _tag)
                             if output_folder.strip() else "")
                 _ds, _rep = self.filter_videos(
@@ -1220,6 +1226,8 @@ class FoleyTuneVideoQualityFilter:
                         if _k in _it and not str(_it[_k]).startswith(f"{_tag}__"):
                             _it[_k] = f"{_tag}__{_it[_k]}"
                 merged.extend(_ds)
+                print(f"[VideoQualityFilter] Folder {_i + 1}/{len(_paths)} done: "
+                      f"{len(_ds)} accepted ({len(merged)} total so far)", flush=True)
                 reports.append(f"########## {_p} ##########\n{_rep}")
             print(f"[VideoQualityFilter] Processed {len(_paths)} folders -> "
                   f"{len(merged)} accepted clips total (names namespaced by folder)", flush=True)

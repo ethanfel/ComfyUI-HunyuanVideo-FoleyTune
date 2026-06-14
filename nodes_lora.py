@@ -2807,7 +2807,15 @@ class FoleyTuneLoRAScheduler:
                         else:
                             indices = [np.random.randint(0, n_clips) for _ in range(bs)]
                         batch_latents = torch.cat([dataset[i]["latents"] for i in indices]).to(device, dtype=exp_dtype)
+                        # Event envelope from the CLEAN target latents — computed BEFORE the
+                        # mixup/latent-noise/noise_offset augmentations below, which would perturb
+                        # the semantic energy contour (noise_offset is a per-channel DC the
+                        # conditioning shouldn't see) and diverge from the clean envelope used at
+                        # eval/inference.
                         batch_event = None
+                        if config.get("event_conditioning", False):
+                            from .lora.event import event_envelope_from_latents
+                            batch_event = event_envelope_from_latents(batch_latents).to(device, dtype=exp_dtype)
                         batch_clip = torch.cat([dataset[i]["clip_features"] for i in indices])
                         batch_sync = torch.cat([dataset[i]["sync_features"] for i in indices])
                         _text_items = [dataset[i]["text_embedding"] for i in indices]
@@ -2835,10 +2843,6 @@ class FoleyTuneLoRAScheduler:
                         if _noise_offset > 0:
                             offset = torch.randn(batch_latents.shape[0], batch_latents.shape[1], 1, device=device, dtype=exp_dtype) * _noise_offset
                             batch_latents = batch_latents + offset
-
-                        if config.get("event_conditioning", False):
-                            from .lora.event import event_envelope_from_latents
-                            batch_event = event_envelope_from_latents(batch_latents).to(device, dtype=exp_dtype)
 
                         _hf_switch = config.get("hf_phase_switch", 0.0)
                         _eff_t_min = config.get("t_min", 0.0)

@@ -503,6 +503,8 @@ class HunyuanVideoFoley(ModelMixin, ConfigMixin):
         # time modulation
         self.time_in = TimestepEmbedder(self.hidden_size, get_activation_layer("silu"), **factory_kwargs)
         self.event_adapter = EventEnvelopeAdapter(self.hidden_size, **factory_kwargs)
+        self._event_conditioning_enabled = False
+        self._event_strength = 1.0
 
         # visual sync embedder if needed
         if self.sync_in_ksz == 1:

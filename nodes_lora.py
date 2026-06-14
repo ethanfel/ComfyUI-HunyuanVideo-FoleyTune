@@ -1693,7 +1693,7 @@ class FoleyTuneLoRALoaderPath:
         # Deep copy model
         model = copy.deepcopy(hunyuan_model)
         model._event_conditioning_enabled = bool(meta.get("event_conditioning", False))
-        model._event_strength = float(meta.get("event_strength", 1.0))
+        model._event_strength = float(meta.get("event_strength", 1.0)) * float(strength)
 
         # Detect if model already has a LoRA applied — if so, merge into weights
         has_existing_lora = any(isinstance(m, (LoRALinear, LoRAConv1d)) for m in model.modules())
@@ -2466,6 +2466,7 @@ class FoleyTuneLoRAScheduler:
                     continue
 
             config = self._merge_config(base_config, exp)
+            exp_dtype = dtype_map[config.get("precision", base_precision)]
             exp_dir = output_root / exp_id
             exp_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2478,7 +2479,7 @@ class FoleyTuneLoRAScheduler:
                 with torch.inference_mode(False), torch.enable_grad():
                     # Deep copy model for this experiment
                     model = copy.deepcopy(hunyuan_model)
-                    model.to(device=device, dtype=dtype)
+                    model.to(device=device, dtype=exp_dtype)
                     model.train()
 
                     # VRAM offload strategies
@@ -2497,6 +2498,7 @@ class FoleyTuneLoRAScheduler:
                     )
                     event_conditioning = bool(config.get("event_conditioning", False))
                     model._event_conditioning_enabled = event_conditioning
+                    model._event_strength = float(config.get("event_strength", 1.0))
 
                     for name, param in model.named_parameters():
                         param.requires_grad = "lora_" in name or (
@@ -2738,7 +2740,7 @@ class FoleyTuneLoRAScheduler:
                     if start_step == 0:
                         model.eval()
                         wav0, sr0 = generate_eval_sample(
-                            model, hunyuan_deps.dac_model, dataset[0], device, dtype,
+                            model, hunyuan_deps.dac_model, dataset[0], device, exp_dtype,
                             uncond_text_feat=_eval_uncond,
                         )
                         wav0_mono = wav0.squeeze()
@@ -2753,7 +2755,7 @@ class FoleyTuneLoRAScheduler:
                     if start_step == 0:
                         for _ev in eval_entries:
                             wav0v, sr0v = generate_eval_sample(
-                                model, hunyuan_deps.dac_model, _ev["entry"], device, dtype,
+                                model, hunyuan_deps.dac_model, _ev["entry"], device, exp_dtype,
                                 uncond_text_feat=_eval_uncond,
                             )
                             wav0v_mono = wav0v.squeeze()
@@ -2804,10 +2806,8 @@ class FoleyTuneLoRAScheduler:
                             indices = np.random.choice(n_clips, size=bs, p=_sample_w).tolist()
                         else:
                             indices = [np.random.randint(0, n_clips) for _ in range(bs)]
-                        batch_latents = torch.cat([dataset[i]["latents"] for i in indices]).to(device, dtype=dtype)
+                        batch_latents = torch.cat([dataset[i]["latents"] for i in indices]).to(device, dtype=exp_dtype)
                         batch_event = None
-                        if config.get("event_conditioning", False):
-                            batch_event = torch.cat([dataset[i]["event_envelope"] for i in indices]).to(device, dtype=dtype)
                         batch_clip = torch.cat([dataset[i]["clip_features"] for i in indices])
                         batch_sync = torch.cat([dataset[i]["sync_features"] for i in indices])
                         _text_items = [dataset[i]["text_embedding"] for i in indices]
@@ -2833,8 +2833,12 @@ class FoleyTuneLoRAScheduler:
 
                         _noise_offset = config.get("noise_offset", 0.0)
                         if _noise_offset > 0:
-                            offset = torch.randn(batch_latents.shape[0], batch_latents.shape[1], 1, device=device, dtype=dtype) * _noise_offset
+                            offset = torch.randn(batch_latents.shape[0], batch_latents.shape[1], 1, device=device, dtype=exp_dtype) * _noise_offset
                             batch_latents = batch_latents + offset
+
+                        if config.get("event_conditioning", False):
+                            from .lora.event import event_envelope_from_latents
+                            batch_event = event_envelope_from_latents(batch_latents).to(device, dtype=exp_dtype)
 
                         _hf_switch = config.get("hf_phase_switch", 0.0)
                         _eff_t_min = config.get("t_min", 0.0)
@@ -2844,7 +2848,7 @@ class FoleyTuneLoRAScheduler:
                             if _progress >= _hf_switch:
                                 _eff_t_min, _eff_t_max = 0.0, 1.0
                         t = sample_timesteps(
-                            bs, config["timestep_mode"], device, dtype,
+                            bs, config["timestep_mode"], device, exp_dtype,
                             sigma=config["logit_normal_sigma"],
                             curriculum_switch=config["curriculum_switch"],
                             step=step, start_step=start_step, total_steps=config["steps"],
@@ -2860,7 +2864,7 @@ class FoleyTuneLoRAScheduler:
                         _do_wav = _wav_dac is not None and (step % _wav_every == 0)
                         loss = flow_matching_loss(
                             model, batch_latents, t, batch_clip, batch_sync, batch_text,
-                            device, dtype,
+                            device, exp_dtype,
                             visual_dropout_prob=effective_vd,
                             min_snr_gamma=config.get("min_snr_gamma", 0.0),
                             cos_sim_weight=config.get("cos_sim_weight", 0.0),
@@ -2948,7 +2952,7 @@ class FoleyTuneLoRAScheduler:
                             samples_dir.mkdir(exist_ok=True)
                             model.eval()
                             wav, sr = generate_eval_sample(
-                                model, hunyuan_deps.dac_model, dataset[0], device, dtype,
+                                model, hunyuan_deps.dac_model, dataset[0], device, exp_dtype,
                                 uncond_text_feat=_eval_uncond,
                             )
                             wav_mono = wav.squeeze()
@@ -2971,7 +2975,7 @@ class FoleyTuneLoRAScheduler:
                             for _ev in eval_entries:
                                 _ev_tag = _ev["name"]
                                 wav_v, sr_v = generate_eval_sample(
-                                    model, hunyuan_deps.dac_model, _ev["entry"], device, dtype,
+                                    model, hunyuan_deps.dac_model, _ev["entry"], device, exp_dtype,
                                     uncond_text_feat=_eval_uncond,
                                 )
                                 wav_v_mono = wav_v.squeeze()
@@ -3012,14 +3016,14 @@ class FoleyTuneLoRAScheduler:
                             logger.info("".join(_log_parts))
 
                     # Save final (with EMA weights if enabled)
+                    _sf_final = hasattr(optimizer, 'eval') and hasattr(optimizer, 'train')
+                    if _sf_final:
+                        optimizer.eval()
                     if ema_state is not None:
                         for n, p in model.named_parameters():
                             if p.requires_grad and n in ema_state:
                                 p.data.copy_(ema_state[n])
 
-                    _sf_final = hasattr(optimizer, 'eval') and hasattr(optimizer, 'train')
-                    if _sf_final:
-                        optimizer.eval()
                     meta = {**config, "steps_completed": config["steps"], "prompts": prompts_list}
                     final_path = exp_dir / "adapter_final.pt"
                     save_checkpoint(model, optimizer, lr_sched, config["steps"], meta, final_path, final=True)
@@ -3221,12 +3225,16 @@ class FoleyTuneLoRAEvaluator:
                 target = meta.get("target", "all_attn_mlp")
                 target_suffixes = FOLEY_TARGET_PRESETS.get(target, FOLEY_TARGET_PRESETS["all_attn_mlp"])
 
+                model._event_conditioning_enabled = bool(meta.get("event_conditioning", False))
+                model._event_strength = float(meta.get("event_strength", 1.0))
                 apply_lora(model, rank=rank, alpha=alpha_val, target_suffixes=target_suffixes,
                            init_mode="standard", use_rslora=meta.get("use_rslora", False))
                 load_lora(model, sd)
             else:
                 model = copy.deepcopy(hunyuan_model)
                 meta = {}
+                model._event_conditioning_enabled = False
+                model._event_strength = 1.0
 
             model.to(device=device, dtype=dtype)
             model.eval()

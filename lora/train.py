@@ -716,6 +716,7 @@ def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
             zero_event_envelope(1, latent_shape[-1], device=device, dtype=dtype),
             event_envelope,
         ])
+    event_strength = float(getattr(model, "_event_strength", 1.0))
 
     scheduler = FlowMatchDiscreteScheduler(shift=1.0, solver="euler")
     scheduler.set_timesteps(num_steps, device=device)
@@ -737,6 +738,7 @@ def generate_eval_sample(model, dac_model, dataset_entry, device, dtype,
                 clip_feat=cfg_clip,
                 sync_feat=cfg_sync,
                 event_envelope=cfg_event,
+                event_strength=event_strength,
             )["x"]
         # CFG combine in fp32 (parity with production denoise loops; the
         # scheduler integrates in fp32 internally)

@@ -59,6 +59,7 @@ def _apply_lora_for_time(model, lora_schedule, time_sec, base_state, ckpt_cache)
     # (if any) is applied separately when the per-chunk text is built.
     if target is None or not target.get("lora_path"):
         model._event_conditioning_enabled = False
+        model._event_strength = 1.0
         # DEBUG: this fires once per chunk PER diffusion step (interleaved
         # denoising), so it would flood at INFO. The one-time per-chunk plan is
         # logged in chunked_denoise_process instead.
@@ -113,10 +114,13 @@ def _apply_lora_for_time(model, lora_schedule, time_sec, base_state, ckpt_cache)
         ckpt_cache[lora_path] = (state_dict, rank, alpha, target_suffixes, init_mode, use_rslora,
                                  event_enabled, event_strength)
 
+    strength = float(target.get("strength", 1.0))
     apply_lora(model, rank=rank, alpha=alpha, target_suffixes=target_suffixes,
                init_mode="standard", use_rslora=use_rslora)
     model._event_conditioning_enabled = event_enabled
-    model._event_strength = event_strength
+    # The timeline strength slider should scale the whole adapter effect. The
+    # event adapter is not a LoRA module, so scale its runtime gate explicitly.
+    model._event_strength = event_strength * strength
     if init_mode == "pissa":
         # pissa weights include modified base.weight — loading them dirties the
         # base, so the next swap must restore it from base_state.
@@ -125,7 +129,6 @@ def _apply_lora_for_time(model, lora_schedule, time_sec, base_state, ckpt_cache)
     else:
         load_lora(model, state_dict)
 
-    strength = target.get("strength", 1.0)
     if strength != 1.0:
         # Scale the LoRA delta by `strength` once — multiply only lora_B
         # (scaling both lora_A and lora_B would apply strength quadratically).
@@ -841,10 +844,28 @@ def chunked_denoise_process(
     _lora_base_state = None
     _current_lora_path = None
     _lora_ckpt_cache = {}
+    _base_event_enabled = bool(getattr(model_dict.foley_model, "_event_conditioning_enabled", False))
+    _base_event_strength = float(getattr(model_dict.foley_model, "_event_strength", 1.0))
     if lora_schedule and any(seg.get("lora_path") for seg in lora_schedule):
         # Store base state on CPU to avoid doubling GPU memory
         _lora_base_state = {k: v.cpu().clone() for k, v in model_dict.foley_model.state_dict().items()}
         logger.info(f"LoRA timeline: {len(lora_schedule)} segments, base state saved (CPU)")
+
+    def _restore_lora_base():
+        nonlocal _lora_base_state
+        if _lora_base_state is None:
+            return
+        import gc
+        from .lora.lora import remove_lora
+        remove_lora(model_dict.foley_model)
+        model_dict.foley_model.load_state_dict(_lora_base_state, strict=False)
+        model_dict.foley_model._event_conditioning_enabled = _base_event_enabled
+        model_dict.foley_model._event_strength = _base_event_strength
+        _lora_base_state = None
+        _lora_ckpt_cache.clear()
+        gc.collect()
+        torch.cuda.empty_cache()
+        logger.info("LoRA timeline: base model restored, caches cleared")
 
     # Single chunk — delegate to standard denoise (gen == keep here, no trim).
     if len(chunks) == 1:
@@ -876,22 +897,14 @@ def chunked_denoise_process(
             frame_start = int(t_start * audio_frame_rate)
             frame_end = int(t_end * audio_frame_rate)
             chunk_init = init_latents[:, :, frame_start:frame_end]
-        result = denoise_process_with_generator(
-            visual, text, chunk_dur, model_dict, cfg,
-            guidance_scale, num_inference_steps, batch_size, sampler, generator,
-            init_latents=chunk_init, strength=strength, noise_blend=noise_blend,
-        )
-        # Restore base state after single-chunk generation
-        if _lora_base_state is not None:
-            import gc
-            from .lora.lora import remove_lora
-            remove_lora(model_dict.foley_model)
-            model_dict.foley_model.load_state_dict(_lora_base_state, strict=False)
-            del _lora_base_state
-            _lora_ckpt_cache.clear()
-            gc.collect()
-            torch.cuda.empty_cache()
-        return result
+        try:
+            return denoise_process_with_generator(
+                visual, text, chunk_dur, model_dict, cfg,
+                guidance_scale, num_inference_steps, batch_size, sampler, generator,
+                init_latents=chunk_init, strength=strength, noise_blend=noise_blend,
+            )
+        finally:
+            _restore_lora_base()
 
     # --- Multi-chunk: set up per-chunk schedulers and latents ---
     # CRITICAL: each chunk needs its own scheduler instance because
@@ -976,7 +989,6 @@ def chunked_denoise_process(
     _event_enabled = bool(getattr(model_dict.foley_model, "_event_conditioning_enabled", False)) or bool(
         lora_schedule and any(seg.get("lora_path") for seg in lora_schedule)
     )
-    _event_strength = float(getattr(model_dict.foley_model, "_event_strength", 1.0))
     if _event_enabled:
         from .lora.event import event_envelope_from_sync, zero_event_envelope
     chunk_cfg_inputs = []
@@ -1052,80 +1064,74 @@ def chunked_denoise_process(
     total_steps = len(timesteps) * len(chunks)
     pbar = ProgressBar(total_steps)
 
-    with torch.inference_mode():
-        for step_idx, t in enumerate(timesteps):
-            throw_exception_if_processing_interrupted()
-            if not torch.is_tensor(t):
-                t = torch.tensor(t, dtype=torch.long, device=device)
-            else:
-                t = t.to(device=device)
+    try:
+        with torch.inference_mode():
+            for step_idx, t in enumerate(timesteps):
+                throw_exception_if_processing_interrupted()
+                if not torch.is_tensor(t):
+                    t = torch.tensor(t, dtype=torch.long, device=device)
+                else:
+                    t = t.to(device=device)
 
-            for c_idx in range(len(chunks)):
-                # LoRA hot-swap: apply correct LoRA before processing this chunk
-                if lora_schedule and _lora_base_state is not None:
-                    target = _chunk_lora_targets[c_idx]
-                    target_path = target.get("lora_path") if target else None
-                    if target_path != _current_lora_path:
-                        _apply_lora_for_time(model_dict.foley_model, lora_schedule,
-                                             _resolve_center(c_idx, *chunks[c_idx]),
-                                             _lora_base_state, _lora_ckpt_cache)
-                        _current_lora_path = target_path
+                for c_idx in range(len(chunks)):
+                    # LoRA hot-swap: apply correct LoRA before processing this chunk
+                    if lora_schedule and _lora_base_state is not None:
+                        target = _chunk_lora_targets[c_idx]
+                        target_path = target.get("lora_path") if target else None
+                        if target_path != _current_lora_path:
+                            _apply_lora_for_time(model_dict.foley_model, lora_schedule,
+                                                 _resolve_center(c_idx, *chunks[c_idx]),
+                                                 _lora_base_state, _lora_ckpt_cache)
+                            _current_lora_path = target_path
 
-                latents = chunk_latents[c_idx]
-                cfg_in = chunk_cfg_inputs[c_idx]
+                    latents = chunk_latents[c_idx]
+                    cfg_in = chunk_cfg_inputs[c_idx]
 
-                latent_input = torch.cat([latents] * 2) if guidance_scale > 1.0 else latents
-                t_expand = t.expand(latent_input.shape[0]).contiguous()
+                    latent_input = torch.cat([latents] * 2) if guidance_scale > 1.0 else latents
+                    t_expand = t.expand(latent_input.shape[0]).contiguous()
 
-                # cfg_in tensors were cast to compute_dtype at build time; only the latent changes.
-                latent_input = latent_input.to(dtype=compute_dtype)
+                    # cfg_in tensors were cast to compute_dtype at build time; only the latent changes.
+                    latent_input = latent_input.to(dtype=compute_dtype)
+                    current_event_strength = float(getattr(model_dict.foley_model, "_event_strength", 1.0))
 
-                if compute_dtype in (torch.float16, torch.bfloat16):
-                    with torch.autocast(device_type=device.type, dtype=compute_dtype):
+                    if compute_dtype in (torch.float16, torch.bfloat16):
+                        with torch.autocast(device_type=device.type, dtype=compute_dtype):
+                            noise_pred = model_dict.foley_model(
+                                x=latent_input, t=t_expand, cond=cfg_in["text"],
+                                clip_feat=cfg_in["clip"], sync_feat=cfg_in["sync"],
+                                event_envelope=cfg_in["event"],
+                                event_strength=current_event_strength,
+                            )["x"]
+                    else:
                         noise_pred = model_dict.foley_model(
                             x=latent_input, t=t_expand, cond=cfg_in["text"],
                             clip_feat=cfg_in["clip"], sync_feat=cfg_in["sync"],
-                            event_envelope=cfg_in["event"], event_strength=_event_strength,
+                            event_envelope=cfg_in["event"],
+                            event_strength=current_event_strength,
                         )["x"]
-                else:
-                    noise_pred = model_dict.foley_model(
-                        x=latent_input, t=t_expand, cond=cfg_in["text"],
-                        clip_feat=cfg_in["clip"], sync_feat=cfg_in["sync"],
-                        event_envelope=cfg_in["event"], event_strength=_event_strength,
-                    )["x"]
 
-                if guidance_scale > 1.0:
-                    # CFG combine in fp32 (matches reference; scheduler integrates fp32)
-                    uncond_pred, text_pred = noise_pred.float().chunk(2)
-                    noise_pred = uncond_pred + guidance_scale * (text_pred - uncond_pred)
+                    if guidance_scale > 1.0:
+                        # CFG combine in fp32 (matches reference; scheduler integrates fp32)
+                        uncond_pred, text_pred = noise_pred.float().chunk(2)
+                        noise_pred = uncond_pred + guidance_scale * (text_pred - uncond_pred)
 
-                chunk_latents[c_idx] = chunk_schedulers[c_idx].step(noise_pred, t, latents)[0]
-                pbar.update(1)
+                    chunk_latents[c_idx] = chunk_schedulers[c_idx].step(noise_pred, t, latents)[0]
+                    pbar.update(1)
 
-            # SaFa swap after all chunks are updated this step.
-            # Skip in keep-window (timeline) mode: gen windows overlap with
-            # DIFFERENT content (different segments/LoRAs), so swapping latents
-            # between them would corrupt — each chunk is independent there.
-            if crossfade_mode == "safa" and keep_windows is None:
-                for c_idx in range(len(chunks) - 1):
-                    ovl = pair_overlap_frames[c_idx]
-                    if ovl > 0:
-                        safa_binary_swap(
-                            chunk_latents[c_idx], chunk_latents[c_idx + 1],
-                            ovl, step_idx
-                        )
-
-    # --- Restore base model after LoRA hot-swap ---
-    if _lora_base_state is not None:
-        import gc
-        from .lora.lora import remove_lora
-        remove_lora(model_dict.foley_model)
-        model_dict.foley_model.load_state_dict(_lora_base_state, strict=False)
-        del _lora_base_state
-        _lora_ckpt_cache.clear()
-        gc.collect()
-        torch.cuda.empty_cache()
-        logger.info("LoRA timeline: base model restored, caches cleared")
+                # SaFa swap after all chunks are updated this step.
+                # Skip in keep-window (timeline) mode: gen windows overlap with
+                # DIFFERENT content (different segments/LoRAs), so swapping latents
+                # between them would corrupt — each chunk is independent there.
+                if crossfade_mode == "safa" and keep_windows is None:
+                    for c_idx in range(len(chunks) - 1):
+                        ovl = pair_overlap_frames[c_idx]
+                        if ovl > 0:
+                            safa_binary_swap(
+                                chunk_latents[c_idx], chunk_latents[c_idx + 1],
+                                ovl, step_idx
+                            )
+    finally:
+        _restore_lora_base()
 
     # --- Stitch results ---
     # Keep-window (timeline pad-and-trim): extract each chunk's exact keep slice

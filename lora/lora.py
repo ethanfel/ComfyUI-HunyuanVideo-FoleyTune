@@ -226,6 +226,45 @@ FOLEY_TARGET_PRESETS = {
         "linear2.w2",
         "linear2.w3",
     ),
+    # MAXIMAL: all_blocks_conv (full single-stream coverage incl. ConvMLPs) + the
+    # I/O surfaces. Everything LoRA can reach — attention + MLP/ConvMLP + sync +
+    # I/O boundaries. Tests the capacity ceiling: does adapting the bulk internal
+    # ConvMLPs add on top of the IO win, or drift (the all_blocks_conv prior washed
+    # out via timbre drift, finding #97/#110 — retested here on the current recipe
+    # now that IO overturned "more capacity != better"). Expect an even EARLIER /
+    # tighter grab-early window and higher drift risk. Rank ~32 + dropout.
+    "all_blocks_conv_io": (
+        "audio_self_attn_qkv",
+        "audio_self_proj",
+        "audio_cross_q",
+        "audio_cross_proj",
+        "text_cross_kv",
+        "v_cond_attn_qkv",
+        "v_cond_self_proj",
+        "v_cond_cross_q",
+        "v_cond_cross_proj",
+        "audio_mlp.fc1",
+        "audio_mlp.fc2",
+        "v_cond_mlp.fc1",
+        "v_cond_mlp.fc2",
+        "audio_mod.linear",
+        "v_cond_mod.linear",
+        "modulation.linear",
+        "sync_in.0",
+        "linear_qkv",
+        "linear1",
+        "linear2.w1",
+        "linear2.w2",
+        "linear2.w3",
+        "audio_embedder.proj",
+        "visual_proj.w1",
+        "visual_proj.w2",
+        "visual_proj.w3",
+        "cond_in.linear_1",
+        "cond_in.linear_2",
+        "final_layer.linear",
+        "final_layer.adaLN_modulation.1",
+    ),
 }
 
 

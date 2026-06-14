@@ -132,6 +132,72 @@ FOLEY_TARGET_PRESETS = {
         "sync_in.0",
         "linear_qkv",
     ),
+    # all_blocks_sync + the model I/O surfaces (input audio/visual/text embeddings
+    # AND the final output projection). Tests whether adapting the latent<->token
+    # boundaries helps domain transfer ON TOP of the full-net production base —
+    # the IO surfaces are the only thing all_blocks_sync leaves frozen (besides the
+    # single-block ConvMLPs). `final_layer.*` is the riskiest entry: it directly
+    # shapes the velocity prediction, so it carries timbre-drift risk (the
+    # "more capacity != better" pattern). Use _io_in to drop it. Rank ~32 + dropout.
+    "all_blocks_sync_io": (
+        "audio_self_attn_qkv",
+        "audio_self_proj",
+        "audio_cross_q",
+        "audio_cross_proj",
+        "text_cross_kv",
+        "v_cond_attn_qkv",
+        "v_cond_self_proj",
+        "v_cond_cross_q",
+        "v_cond_cross_proj",
+        "audio_mlp.fc1",
+        "audio_mlp.fc2",
+        "v_cond_mlp.fc1",
+        "v_cond_mlp.fc2",
+        "audio_mod.linear",
+        "v_cond_mod.linear",
+        "modulation.linear",
+        "sync_in.0",
+        "linear_qkv",
+        "audio_embedder.proj",
+        "visual_proj.w1",
+        "visual_proj.w2",
+        "visual_proj.w3",
+        "cond_in.linear_1",
+        "cond_in.linear_2",
+        "final_layer.linear",
+        "final_layer.adaLN_modulation.1",
+    ),
+    # all_blocks_sync + INPUT-side I/O only (audio in-embedding, visual proj, text
+    # cond proj) — drops final_layer.* . The safer domain-adaptation play: adapts how
+    # DAC latents / visual / text tokens ENTER the net (where the NSFW latent
+    # distribution differs) WITHOUT touching the output projection that risks timbre
+    # drift. A/B against _io isolates whether the output projection helps or drifts.
+    "all_blocks_sync_io_in": (
+        "audio_self_attn_qkv",
+        "audio_self_proj",
+        "audio_cross_q",
+        "audio_cross_proj",
+        "text_cross_kv",
+        "v_cond_attn_qkv",
+        "v_cond_self_proj",
+        "v_cond_cross_q",
+        "v_cond_cross_proj",
+        "audio_mlp.fc1",
+        "audio_mlp.fc2",
+        "v_cond_mlp.fc1",
+        "v_cond_mlp.fc2",
+        "audio_mod.linear",
+        "v_cond_mod.linear",
+        "modulation.linear",
+        "sync_in.0",
+        "linear_qkv",
+        "audio_embedder.proj",
+        "visual_proj.w1",
+        "visual_proj.w2",
+        "visual_proj.w3",
+        "cond_in.linear_1",
+        "cond_in.linear_2",
+    ),
     # all_blocks_sync + the single-stream blocks' Conv1d layers (attention output
     # proj `linear1` and the ConvMLP `linear2.w1/w2/w3`) — the bulk of the back 2/3
     # that LoRALinear can't reach. Wrapped via LoRAConv1d. FULL single-block

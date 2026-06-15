@@ -2313,19 +2313,22 @@ class FoleyTuneDatasetSaver:
             "dataset_json": str(out_path / "dataset.json"),
             "output_root": str(out_path.parent / "output"),
             "base": {
-                # Validated "sfc20-long + intensity" recipe (performer_a blowjob
-                # intensity sweep, June 2026): all_blocks_sync + Prodigy+ ScheduleFree
-                # (c=20) constant + noise_offset0.03 + t_min/t_max rescale + dropout0.05
-                # + intensity_bias0.5. Run long, audition LATE by ear, then BWE.
-                "target": "all_blocks_sync",
+                # Validated "IO + intensity" recipe (June 2026): all_blocks_sync_io
+                # (boundary-capacity LoRA: attention+MLP+sync+I/O projections) + Prodigy+
+                # ScheduleFree (c=20) constant + noise_offset0.03 + t_min/t_max rescale +
+                # dropout0.05 + intensity_bias0.5. IO is the validated upgrade over
+                # all_blocks_sync (cleaner/clearer/more-faithful, ~40% fewer steps) and it
+                # converges EARLY -> shorter run + fine save_every. Audition ~3-4.5k by ear
+                # (small sets peak sooner), grab before over-train, then BWE.
+                "target": "all_blocks_sync_io",
                 "rank": 32,
                 "alpha": 32,
                 "lr": 5e-5,
-                "steps": 10000,
+                "steps": 7000,
                 "batch_size": 8,
                 "grad_accum": 1,
                 "warmup_steps": 0,
-                "save_every": 500,
+                "save_every": 250,
                 "timestep_mode": "uniform",
                 "precision": "bf16",
                 "seed": 42,
@@ -2377,13 +2380,14 @@ class FoleyTuneDatasetSaver:
         tag = f"{sweep_name}_{total_train}clip"
         sweep_json["experiments"] = [
             {
-                "id": f"{tag}_intensity_sfc20",
+                "id": f"{tag}_io_intensity_sfc20",
                 "description": (
-                    "sfc20-long + intensity: all_blocks_sync R32 Prodigy+ "
+                    "IO + intensity: all_blocks_sync_io R32 Prodigy+ "
                     "ScheduleFree(c=20) constant, noise_offset0.03, "
                     "t_min0.05/t_max0.95 rescale, dropout0.05, intensity_bias0.5 "
-                    "energy. Run long, audition LATE by ear (~6-8k single-content), "
-                    "then UniverSR/FoleyTuneBWE."
+                    "energy. IO converges EARLY -> audition ~3-4.5k by ear (save 250; "
+                    "small sets peak sooner ~2.75-3k, larger ~4-4.5k), grab before "
+                    "over-train, then UniverSR/FoleyTuneBWE."
                 ),
             },
         ]

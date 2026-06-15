@@ -129,6 +129,7 @@ def _resolve_suffixes(target):
 # --- Shared merge helpers ----------------------------------------------------
 
 # Default settings used when no FoleyTuneMergeOptions node is connected.
+# (merge_strategy and top_n are node-specific inline widgets, not shared options.)
 _DEFAULT_OPTIONS = {
     "merge_strategy": "ties",
     "auto_strength": "disabled",
@@ -138,7 +139,6 @@ _DEFAULT_OPTIONS = {
     "dare_dampening": 0.0,
     "ties_density": 0.7,
     "ties_sign_method": "frequency",
-    "top_n": 3,
 }
 
 
@@ -339,11 +339,18 @@ class FoleyTuneLoRAStack:
         loras = folder_paths.get_filename_list("loras")
         return {
             "required": {
-                "lora_name": (loras,),
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "lora_name": (loras, {
+                    "tooltip": "A trained FoleyTune LoRA checkpoint (.safetensors/.pt) to add to the stack.",
+                }),
+                "strength": ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05,
+                    "tooltip": "Per-LoRA merge weight. 1.0 = full. Relative ratios between stacked LoRAs are preserved by auto-strength.",
+                }),
             },
             "optional": {
-                "lora_stack": ("LORA_STACK",),
+                "lora_stack": ("LORA_STACK", {
+                    "tooltip": "Chain the output of another LoRA Stack node here to add more LoRAs. Leave empty for the first LoRA.",
+                }),
             },
         }
 
@@ -351,7 +358,8 @@ class FoleyTuneLoRAStack:
     RETURN_NAMES = ("lora_stack",)
     FUNCTION = "add_to_stack"
     CATEGORY = "FoleyTune"
-    DESCRIPTION = "Append a LoRA (name + strength) to a LORA_STACK. Chainable."
+    DESCRIPTION = ("Append a LoRA (name + strength) to a LORA_STACK. Chain one node per "
+                   "LoRA, then feed the final stack into a Merger or AutoTuner (needs 2+).")
 
     def add_to_stack(self, lora_name, strength, lora_stack=None):
         entries = list(lora_stack) if lora_stack else []
@@ -363,32 +371,56 @@ class FoleyTuneLoRAStack:
 # --- Node: Merge Options -----------------------------------------------------
 
 class FoleyTuneMergeOptions:
-    """Pure-data node: shared merge settings for the Merger / AutoTuner.
+    """Pure-data node: the SHARED merge tuning, used by both the Merger and the
+    AutoTuner. Connect to their optional `merge_options` input.
 
-    Connect to the optional `merge_options` input of either merge node. Values
-    here override the node's inline widget defaults.
+    Node-specific controls live on the nodes themselves, not here: the merge
+    STRATEGY is on the Merger (the AutoTuner picks a strategy per block), and the
+    number of ranked candidates (top_n) is on the AutoTuner.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "merge_strategy": (["ties", "weighted_average", "slerp"], {"default": "ties"}),
-                "auto_strength": (["disabled", "enabled"], {"default": "disabled"}),
+                "auto_strength": (["disabled", "enabled"], {
+                    "default": "disabled",
+                    "tooltip": "Energy-based normalization: scales stacked LoRA strengths down so the "
+                               "combined result doesn't oversaturate. Preserves your relative ratios. "
+                               "Applies to both the Merger and the AutoTuner.",
+                }),
                 "auto_strength_floor": ("FLOAT", {
                     "default": -1.0, "min": -1.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "-1 = architecture default (orthogonal floor); >=0 bounds the auto-strength reduction explicitly.",
+                    "tooltip": "Lower bound on the auto-strength scale. -1 = architecture default "
+                               "(near-orthogonal/independent LoRAs are NOT diluted). 0.0-1.0 = explicit "
+                               "floor that bounds the reduction regardless of alignment.",
                 }),
-                "sparsification": (["disabled", "dare", "conflict_aware"], {"default": "disabled"}),
-                "sparsification_density": ("FLOAT", {"default": 0.7, "min": 0.1, "max": 1.0, "step": 0.05}),
+                "sparsification": (["disabled", "dare", "conflict_aware"], {
+                    "default": "disabled",
+                    "tooltip": "Drop weights before merging to reduce interference. "
+                               "dare = random drop + rescale everywhere. "
+                               "conflict_aware = only drop where LoRAs disagree in sign "
+                               "(auto-downgrades to dare when >40% of positions conflict — orthogonal noise).",
+                }),
+                "sparsification_density": ("FLOAT", {
+                    "default": 0.7, "min": 0.1, "max": 1.0, "step": 0.05,
+                    "tooltip": "Fraction of weights to KEEP when sparsifying (1.0 = keep all = no sparsification).",
+                }),
                 "dare_dampening": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "DAREx dampening: softens DARE's 1/density rescale to reduce noise amplification at low density.",
+                    "tooltip": "DAREx dampening: softens DARE's 1/density rescale to reduce noise "
+                               "amplification at low density. 0 = standard DARE. Only affects dare modes.",
                 }),
-                "ties_density": ("FLOAT", {"default": 0.7, "min": 0.1, "max": 1.0, "step": 0.05}),
-                "ties_sign_method": (["frequency", "total"], {"default": "frequency"}),
-                "top_n": ("INT", {"default": 3, "min": 1, "max": 10, "step": 1,
-                                  "tooltip": "AutoTuner: how many ranked candidates to emit in TUNER_DATA."}),
+                "ties_density": ("FLOAT", {
+                    "default": 0.7, "min": 0.1, "max": 1.0, "step": 0.05,
+                    "tooltip": "TIES trim: fraction of largest-magnitude weights kept per layer. "
+                               "Only used when the merge resolves a layer with the TIES strategy.",
+                }),
+                "ties_sign_method": (["frequency", "total"], {
+                    "default": "frequency",
+                    "tooltip": "TIES sign election. 'total' = magnitude-weighted (a strong LoRA can win the "
+                               "sign). 'frequency' = one vote per LoRA. Only used for TIES layers.",
+                }),
             },
         }
 
@@ -396,12 +428,12 @@ class FoleyTuneMergeOptions:
     RETURN_NAMES = ("merge_options",)
     FUNCTION = "build"
     CATEGORY = "FoleyTune"
-    DESCRIPTION = "Shared merge settings for the FoleyTune Merger / AutoTuner."
+    DESCRIPTION = ("Shared merge tuning (auto-strength, sparsification, TIES settings) for the "
+                   "FoleyTune Merger / AutoTuner. Strategy is on the Merger; top_n is on the AutoTuner.")
 
-    def build(self, merge_strategy, auto_strength, auto_strength_floor, sparsification,
-              sparsification_density, dare_dampening, ties_density, ties_sign_method, top_n):
+    def build(self, auto_strength, auto_strength_floor, sparsification,
+              sparsification_density, dare_dampening, ties_density, ties_sign_method):
         return ({
-            "merge_strategy": merge_strategy,
             "auto_strength": auto_strength,
             "auto_strength_floor": auto_strength_floor,
             "sparsification": sparsification,
@@ -409,7 +441,6 @@ class FoleyTuneMergeOptions:
             "dare_dampening": dare_dampening,
             "ties_density": ties_density,
             "ties_sign_method": ties_sign_method,
-            "top_n": top_n,
         },)
 
 
@@ -422,16 +453,26 @@ class FoleyTuneLoRAMerger:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "hunyuan_model": ("FOLEYTUNE_MODEL",),
-                "lora_stack": ("LORA_STACK",),
+                "hunyuan_model": ("FOLEYTUNE_MODEL", {
+                    "tooltip": "Base FoleyTune model to merge the LoRAs into.",
+                }),
+                "lora_stack": ("LORA_STACK", {
+                    "tooltip": "Stack of 2+ LoRAs from FoleyTune LoRA Stack node(s).",
+                }),
                 "merge_strategy": (["ties", "weighted_average", "slerp"], {
                     "default": "ties",
-                    "tooltip": "ties: trim+elect+disjoint. weighted_average: weighted blend. "
-                               "slerp: spherical interpolation. Overridden by merge_options if connected.",
+                    "tooltip": "How to combine overlapping weights (this whole merge uses ONE strategy). "
+                               "ties: trim + sign-elect + disjoint merge (best when LoRAs conflict). "
+                               "weighted_average: simple blend (best when compatible). "
+                               "slerp: spherical interpolation / Karcher mean for 3+ (magnitude-preserving). "
+                               "For automatic per-block strategy selection, use the AutoTuner instead.",
                 }),
             },
             "optional": {
-                "merge_options": ("FOLEYTUNE_MERGE_OPTIONS",),
+                "merge_options": ("FOLEYTUNE_MERGE_OPTIONS", {
+                    "tooltip": "Optional shared tuning (auto-strength, sparsification, TIES settings). "
+                               "Uses sensible defaults if not connected.",
+                }),
             },
         }
 
@@ -440,9 +481,9 @@ class FoleyTuneLoRAMerger:
     FUNCTION = "merge"
     CATEGORY = "FoleyTune"
     DESCRIPTION = (
-        "Merge a LoRA stack (2+ LoRAs) using TIES, SLERP, or weighted average. "
-        "Applies the merged delta to a deepcopy of the model and emits LORA_DATA "
-        "(connect to Save Merged LoRA)."
+        "Merge a LoRA stack (2+ LoRAs) using ONE chosen strategy (TIES / SLERP / weighted "
+        "average). Applies the merged delta to a deepcopy of the model and emits LORA_DATA "
+        "(connect to Save Merged LoRA). For per-block automatic strategy, use the AutoTuner."
     )
 
     def _group_by_block(self, deltas):
@@ -466,13 +507,20 @@ class FoleyTuneLoRAMerger:
         if strategy == "slerp" and n_loras > 2:
             logger.info("SLERP with %d LoRAs uses the Karcher (spherical) mean.", n_loras)
 
-        weights = [e["strength"] for e in entries]
+        # Auto-strength (shared option) — scale the stack down to avoid oversaturation.
+        scale = 1.0
+        if opts["auto_strength"] == "enabled":
+            floor = opts["auto_strength_floor"]
+            scale = _compute_auto_scale(entries, None if floor < 0 else floor)
+            logger.info("Auto-strength scale: %.4f", scale)
+        weights = [e["strength"] * scale for e in entries]
+
         model = copy.deepcopy(hunyuan_model)
         n_applied, merged_deltas, _, _ = _apply_block_merge(
             model, entries, weights, lambda _b: strategy, opts)
         model.eval()
 
-        lora_data = _build_lora_data(entries, merged_deltas, scale=1.0)
+        lora_data = _build_lora_data(entries, merged_deltas, scale=scale)
         all_prompts = lora_data["prompts"]
         logger.info("LoRA merge complete: %d layers, %d LoRAs, strategy=%s",
                     n_applied, n_loras, strategy)
@@ -493,17 +541,30 @@ class FoleyTuneLoRAAutoTuner:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "hunyuan_model": ("FOLEYTUNE_MODEL",),
-                "lora_stack": ("LORA_STACK",),
-                "auto_strength": (["disabled", "enabled"], {
-                    "default": "disabled",
-                    "tooltip": "Energy-based strength normalization. Overridden by merge_options.",
+                "hunyuan_model": ("FOLEYTUNE_MODEL", {
+                    "tooltip": "Base FoleyTune model to merge the LoRAs into.",
                 }),
-                "sparsification": (["disabled", "dare", "conflict_aware"], {"default": "disabled"}),
-                "sparsification_density": ("FLOAT", {"default": 0.7, "min": 0.1, "max": 1.0, "step": 0.05}),
+                "lora_stack": ("LORA_STACK", {
+                    "tooltip": "Stack of 2+ LoRAs from FoleyTune LoRA Stack node(s).",
+                }),
+                "top_n": ("INT", {
+                    "default": 3, "min": 1, "max": 10, "step": 1,
+                    "tooltip": "How many ranked candidate configs to keep and emit in tuner_data "
+                               "(for the Merge Selector / Save Tuner Data).",
+                }),
+                "selection": ("INT", {
+                    "default": 1, "min": 1, "max": 10, "step": 1,
+                    "tooltip": "Which ranked candidate to apply to the OUTPUT model. 1 = top-ranked. "
+                               "Re-run with a different value to A/B the alternatives without a separate "
+                               "Merge Selector node. Clamped to the number of candidates (top_n).",
+                }),
             },
             "optional": {
-                "merge_options": ("FOLEYTUNE_MERGE_OPTIONS",),
+                "merge_options": ("FOLEYTUNE_MERGE_OPTIONS", {
+                    "tooltip": "Optional shared tuning (auto-strength, sparsification, TIES settings). "
+                               "The AutoTuner picks the merge STRATEGY itself, per block — strategy is "
+                               "not taken from here. Uses sensible defaults if not connected.",
+                }),
             },
         }
 
@@ -571,12 +632,8 @@ class FoleyTuneLoRAAutoTuner:
             "excess_conflict": excess_conflict,
         }
 
-    def auto_merge(self, hunyuan_model, lora_stack, auto_strength="disabled",
-                   sparsification="disabled", sparsification_density=0.7,
-                   merge_options=None):
-        opts = _resolve_options(
-            merge_options, auto_strength=auto_strength,
-            sparsification=sparsification, sparsification_density=sparsification_density)
+    def auto_merge(self, hunyuan_model, lora_stack, top_n=3, selection=1, merge_options=None):
+        opts = _resolve_options(merge_options)
 
         entries = _collect_loras_from_stack(lora_stack)
         if len(entries) < 2:
@@ -622,12 +679,13 @@ class FoleyTuneLoRAAutoTuner:
                     "score_breakdown": breakdown,
                 })
         candidates.sort(key=lambda c: c["score_heuristic"], reverse=True)
-        top_n = candidates[:max(1, int(opts.get("top_n", 3)))]
-        for i, c in enumerate(top_n):
+        ranked = candidates[:max(1, int(top_n))]
+        for i, c in enumerate(ranked):
             c["rank"] = i + 1
 
-        # --- Merge the winner for real ---
-        winner = top_n[0]
+        # --- Merge the selected candidate for real (default = top-ranked) ---
+        sel_idx = max(1, min(int(selection), len(ranked))) - 1
+        winner = ranked[sel_idx]
         win_opts = dict(opts)
         win_opts["sparsification"] = winner["sparsification"]
         model = copy.deepcopy(hunyuan_model)
@@ -650,7 +708,7 @@ class FoleyTuneLoRAAutoTuner:
             "ties_density": opts["ties_density"],
             "ties_sign_method": opts["ties_sign_method"],
             "block_decisions": block_analysis,
-            "top_n": top_n,
+            "top_n": ranked,
             "prompt": "",
             "description": "",
         }
@@ -663,14 +721,15 @@ class FoleyTuneLoRAAutoTuner:
             report_lines.append(f"Auto-strength scale: {scale:.4f}")
         report_lines.append("")
         report_lines.append("Ranked candidates (heuristic):")
-        for c in top_n:
+        for c in ranked:
             report_lines.append(
                 f"  #{c['rank']} {c['approach']} / spars={c['sparsification']} "
                 f"-> score={c['score_heuristic']:.3f} "
                 f"(excess={c['score_breakdown'].get('avg_excess', 0):.1%}, "
                 f"spread={c['score_breakdown'].get('spread', 0):.1%})")
         report_lines.append("")
-        report_lines.append(f"Winner: {winner['approach']} / spars={winner['sparsification']}")
+        report_lines.append(f"Applied: #{winner['rank']} {winner['approach']} / "
+                            f"spars={winner['sparsification']} (selection={sel_idx + 1} of {len(ranked)})")
         report_lines.append(f"Per-block strategies: {strategy_counts}")
         report_lines.append(f"Applied to {n_applied} layers.")
         if conflict_skipped:
@@ -692,11 +751,20 @@ class FoleyTuneMergeSelector:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "hunyuan_model": ("FOLEYTUNE_MODEL",),
-                "lora_stack": ("LORA_STACK",),
-                "tuner_data": ("TUNER_DATA",),
-                "selection": ("INT", {"default": 1, "min": 1, "max": 10, "step": 1,
-                                      "tooltip": "Which ranked config to apply (1 = top)."}),
+                "hunyuan_model": ("FOLEYTUNE_MODEL", {
+                    "tooltip": "Base FoleyTune model to merge into (same base the AutoTuner ran on).",
+                }),
+                "lora_stack": ("LORA_STACK", {
+                    "tooltip": "The same LoRA stack the AutoTuner ranked (rebuilt with the same Stack nodes).",
+                }),
+                "tuner_data": ("TUNER_DATA", {
+                    "tooltip": "Ranked configs from a FoleyTune LoRA AutoTuner (or Load Tuner Data).",
+                }),
+                "selection": ("INT", {
+                    "default": 1, "min": 1, "max": 10, "step": 1,
+                    "tooltip": "Which ranked config to apply (1 = top-ranked, 2 = next, ...). "
+                               "Clamped to the number of available candidates.",
+                }),
             },
         }
 
@@ -760,16 +828,38 @@ class FoleyTuneSaveMergedLoRA:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "lora_data": ("LORA_DATA",),
-                "filename": ("STRING", {"default": "merged_lora"}),
-                "save_rank": ("INT", {"default": 0, "min": 0, "max": 512, "step": 1,
-                                      "tooltip": "0 = auto (energy threshold). Non-zero = fixed rank."}),
-                "save_format": (["safetensors", "pt"], {"default": "safetensors"}),
+                "lora_data": ("LORA_DATA", {
+                    "tooltip": "Merged result from a Merger / AutoTuner / Merge Selector.",
+                }),
+                "filename": ("STRING", {
+                    "default": "merged_lora",
+                    "tooltip": "Output name under the loras folder (subdirs allowed). The extension is "
+                               "added from save_format. A sidecar .json holds the metadata.",
+                }),
+                "save_rank": ("INT", {
+                    "default": 0, "min": 0, "max": 512, "step": 1,
+                    "tooltip": "Rank of the saved LoRA. 0 = auto (smallest rank keeping energy_threshold "
+                               "of the SVD energy). Non-zero = force this rank. Higher = larger file, closer to the merge.",
+                }),
+                "save_format": (["safetensors", "pt"], {
+                    "default": "safetensors",
+                    "tooltip": "safetensors (+ sidecar .json) or a single .pt with embedded meta. Saved in bf16.",
+                }),
             },
             "optional": {
-                "prompt": ("STRING", {"default": "", "multiline": True}),
-                "description": ("STRING", {"default": "", "multiline": True}),
-                "energy_threshold": ("FLOAT", {"default": 0.99, "min": 0.5, "max": 1.0, "step": 0.01}),
+                "prompt": ("STRING", {
+                    "default": "", "multiline": True,
+                    "tooltip": "Optional activation prompt to embed (prepended to the merged source prompts).",
+                }),
+                "description": ("STRING", {
+                    "default": "", "multiline": True,
+                    "tooltip": "Optional free-text description stored in the checkpoint metadata.",
+                }),
+                "energy_threshold": ("FLOAT", {
+                    "default": 0.99, "min": 0.5, "max": 1.0, "step": 0.01,
+                    "tooltip": "Auto-rank only (save_rank=0): fraction of singular-value energy to retain "
+                               "per layer. Higher = higher rank = more faithful, larger file.",
+                }),
             },
         }
 
@@ -870,13 +960,27 @@ class FoleyTuneSaveTunerData:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "tuner_data": ("TUNER_DATA",),
-                "filename": ("STRING", {"default": "tuner_data"}),
-                "overwrite": ("BOOLEAN", {"default": True}),
+                "tuner_data": ("TUNER_DATA", {
+                    "tooltip": "Ranked configs from a FoleyTune LoRA AutoTuner.",
+                }),
+                "filename": ("STRING", {
+                    "default": "tuner_data",
+                    "tooltip": "Output name under the tuner_data folder (subdirs allowed); '.tuner' is appended.",
+                }),
+                "overwrite": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "If off, append _001, _002, ... instead of overwriting an existing file.",
+                }),
             },
             "optional": {
-                "prompt": ("STRING", {"default": "", "multiline": True}),
-                "description": ("STRING", {"default": "", "multiline": True}),
+                "prompt": ("STRING", {
+                    "default": "", "multiline": True,
+                    "tooltip": "Optional prompt stored alongside the rankings.",
+                }),
+                "description": ("STRING", {
+                    "default": "", "multiline": True,
+                    "tooltip": "Optional free-text note stored alongside the rankings.",
+                }),
             },
         }
 
@@ -922,7 +1026,9 @@ class FoleyTuneLoadTunerData:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "tuner_data_file": (folder_paths.get_filename_list("tuner_data"),),
+                "tuner_data_file": (folder_paths.get_filename_list("tuner_data"), {
+                    "tooltip": "A saved .tuner file (from Save Tuner Data) to feed into the Merge Selector.",
+                }),
             },
         }
 

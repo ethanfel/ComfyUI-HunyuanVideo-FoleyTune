@@ -149,15 +149,13 @@
         "Node name for S&R": "FoleyTuneMergeOptions"
       },
       "widgets_values": [
-        "ties",
         "enabled",
         -1.0,
         "disabled",
         0.7,
         0.0,
         0.7,
-        "frequency",
-        3
+        "frequency"
       ]
     },
     {
@@ -233,9 +231,8 @@
         "Node name for S&R": "FoleyTuneLoRAAutoTuner"
       },
       "widgets_values": [
-        "disabled",
-        "disabled",
-        0.7
+        3,
+        1
       ]
     },
     {

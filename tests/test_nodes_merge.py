@@ -59,12 +59,13 @@ class TestFoleyTuneMergeOptions(unittest.TestCase):
 
     def test_build_returns_dict(self):
         node = FoleyTuneMergeOptions()
-        (opts,) = node.build("ties", "enabled", -1.0, "dare", 0.7, 0.1, 0.7, "total", 3)
-        self.assertEqual(opts["merge_strategy"], "ties")
+        # Shared tuning only — no merge_strategy (Merger-inline) or top_n (AutoTuner-inline).
+        (opts,) = node.build("enabled", -1.0, "dare", 0.7, 0.1, 0.7, "total")
         self.assertEqual(opts["auto_strength"], "enabled")
         self.assertEqual(opts["sparsification"], "dare")
         self.assertEqual(opts["ties_sign_method"], "total")
-        self.assertEqual(opts["top_n"], 3)
+        self.assertNotIn("merge_strategy", opts)
+        self.assertNotIn("top_n", opts)
 
 
 class TestCollectFromStack(unittest.TestCase):
@@ -128,9 +129,10 @@ class TestFoleyTuneLoRAAutoTuner(unittest.TestCase):
         req = inputs["required"]
         self.assertIn("hunyuan_model", req)
         self.assertIn("lora_stack", req)
-        self.assertIn("auto_strength", req)
-        self.assertIn("sparsification", req)
-        self.assertIn("sparsification_density", req)
+        self.assertIn("top_n", req)
+        # auto_strength/sparsification moved to the shared Merge Options node.
+        self.assertNotIn("auto_strength", req)
+        self.assertNotIn("sparsification", req)
         self.assertNotIn("lora_name_1", req)
         self.assertIn("merge_options", inputs.get("optional", {}))
 

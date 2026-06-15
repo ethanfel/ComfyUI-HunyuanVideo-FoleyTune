@@ -181,7 +181,7 @@ Model Loader ──► (hunyuan_model) ───┘   └─ tuner_data ─► S
 ```
 
 1. Chain a **FoleyTune LoRA Stack** node per LoRA (each adds one `lora_name` + `strength` to a `LORA_STACK`).
-2. (Optional) Add a **FoleyTune Merge Options** node for shared settings (strategy, auto-strength, sparsification, DARE dampening, TIES density, top-N).
+2. (Optional) Add a **FoleyTune Merge Options** node for shared tuning (auto-strength + floor, sparsification, DARE dampening, TIES density/sign). The merge *strategy* lives on the Merger and *top-N* on the AutoTuner — each node's own knob.
 3. Feed the stack into a **FoleyTune LoRA Merger** (manual strategy) or **FoleyTune LoRA AutoTuner** (per-block conflict analysis + ranked candidates).
 4. Connect `lora_data` to **Save Merged LoRA** to write a standalone `.safetensors` loadable by the **LoRA Loader**, and/or `tuner_data` to **Save Tuner Data** / **Merge Selector** to persist and replay ranked configurations.
 

@@ -1858,6 +1858,21 @@ UniverSR (ICASSP 2026, vocoder-free flow matching in the complex STFT domain) re
 - Node is torchcodec-safe (downsamples via `functional.resample`, no torchaudio file I/O — torch 2.11 envs route save/load through a fragile torchcodec backend).
 - Requires `universr` in the ComfyUI env (in `requirements.txt`).
 
+#### UniverSR `input_sr` — fizz-vs-brightness tradeoff (June 2026 update)
+`input_sr` tells the node to downsample to that rate and **regenerate everything above input_sr/2** (8k→>4kHz, 12k→>6kHz, 16k→>8kHz, 22k→>11kHz). Swept all four on ONE clip (denoised blowjob @3000, dark content — 95% of energy <645Hz):
+
+| input_sr | regenerates | %HF | HF-band flatness (fizz) | noise floor | crest |
+|---|---|---|---|---|---|
+| 8k | >4 kHz | 12.2 | **0.093** (fizziest) | −57.2 | 16.7 |
+| 12k | >6 kHz | 11.1 | 0.091 | −57.2 | 16.7 |
+| **16k** | >8 kHz | 11.4 | **0.081** (cleaner) | −57.1 | 17.1 |
+| 22k | >11 kHz | **8.3** (darkest) | **0.063** (cleanest) | −57.1 | 17.2 |
+
+- **`input_sr` is a PURE HF-character knob** — noise floor + crest/dynamics are IDENTICAL across all four (BWE never touches the generation, only the highs). You cannot break a clip by changing it.
+- **HF "fizz" (HF-band spectral flatness, >4kHz) is monotonic with aggressiveness** — 8k fizziest (0.093) → 22k cleanest (0.063). Lower input_sr = more synthesized broadband HF = fizzier, exactly as the tooltip warns.
+- **Brightness payoff for aggressive settings is MARGINAL on dark content** — 8k/12k/16k all land ~11–12% HF; only 22k is clearly darker (8.3%). The dark blowjob has too little real HF for the aggressive settings to separate on brightness — so you pay the fizz cost without a brightness gain.
+- **Verdict: 16k (the validated default) is the best balance even on dark content** — same brightness as 12k but cleaner highs (fizz 0.081 vs 0.091). 22k = cleanest-but-darkest (only if you want minimal fizz and accept less air); 8k = fizziest, skip. So 12k is slightly more aggressive than this content needs. Content-dependent — go lower only if the ear specifically wants more brightness and tolerates the fizz; default to 16k.
+
 #### FINAL PERCEPTUAL VERDICT — pipeline of record
 
 With UniverSR BWE applied, listening A/B (the real arbiter — the logged HF metric never captured the perceptual picture):

@@ -1,0 +1,464 @@
+{
+  "id": "foley-lora-merge-example",
+  "revision": 0,
+  "last_node_id": 8,
+  "last_link_id": 9,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "FoleyTuneModelLoader",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        320,
+        200
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "FOLEYTUNE_MODEL",
+          "type": "FOLEYTUNE_MODEL",
+          "links": [
+            1,
+            2
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "FoleyTuneModelLoader"
+      },
+      "widgets_values": [
+        "hunyuanvideo_foley.pth",
+        "bf16",
+        "none"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "FoleyTuneLoRAStack",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        320,
+        200
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "lora_stack",
+          "type": "LORA_STACK",
+          "link": null,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "lora_stack",
+          "type": "LORA_STACK",
+          "links": [
+            3
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "FoleyTuneLoRAStack"
+      },
+      "widgets_values": [
+        "lora_a.safetensors",
+        1.0
+      ]
+    },
+    {
+      "id": 3,
+      "type": "FoleyTuneLoRAStack",
+      "pos": [
+        40,
+        480
+      ],
+      "size": [
+        320,
+        200
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "lora_stack",
+          "type": "LORA_STACK",
+          "link": 3,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "lora_stack",
+          "type": "LORA_STACK",
+          "links": [
+            4,
+            5
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "FoleyTuneLoRAStack"
+      },
+      "widgets_values": [
+        "lora_b.safetensors",
+        1.0
+      ]
+    },
+    {
+      "id": 4,
+      "type": "FoleyTuneMergeOptions",
+      "pos": [
+        40,
+        660
+      ],
+      "size": [
+        320,
+        200
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "merge_options",
+          "type": "FOLEYTUNE_MERGE_OPTIONS",
+          "links": [
+            6
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "FoleyTuneMergeOptions"
+      },
+      "widgets_values": [
+        "ties",
+        "enabled",
+        -1.0,
+        "disabled",
+        0.7,
+        0.0,
+        0.7,
+        "frequency",
+        3
+      ]
+    },
+    {
+      "id": 5,
+      "type": "FoleyTuneLoRAAutoTuner",
+      "pos": [
+        440,
+        120
+      ],
+      "size": [
+        320,
+        200
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "hunyuan_model",
+          "type": "FOLEYTUNE_MODEL",
+          "link": 1
+        },
+        {
+          "name": "lora_stack",
+          "type": "LORA_STACK",
+          "link": 4
+        },
+        {
+          "name": "merge_options",
+          "type": "FOLEYTUNE_MERGE_OPTIONS",
+          "link": 6,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "FOLEYTUNE_MODEL",
+          "links": [],
+          "slot_index": 0
+        },
+        {
+          "name": "prompts",
+          "type": "STRING",
+          "links": [],
+          "slot_index": 1
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [],
+          "slot_index": 2
+        },
+        {
+          "name": "tuner_data",
+          "type": "TUNER_DATA",
+          "links": [
+            8,
+            9
+          ],
+          "slot_index": 3
+        },
+        {
+          "name": "lora_data",
+          "type": "LORA_DATA",
+          "links": [
+            7
+          ],
+          "slot_index": 4
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "FoleyTuneLoRAAutoTuner"
+      },
+      "widgets_values": [
+        "disabled",
+        "disabled",
+        0.7
+      ]
+    },
+    {
+      "id": 6,
+      "type": "FoleyTuneSaveMergedLoRA",
+      "pos": [
+        840,
+        80
+      ],
+      "size": [
+        320,
+        200
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "lora_data",
+          "type": "LORA_DATA",
+          "link": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "file_path",
+          "type": "STRING",
+          "links": [],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "FoleyTuneSaveMergedLoRA"
+      },
+      "widgets_values": [
+        "merged_foley_lora",
+        0,
+        "safetensors",
+        "",
+        "",
+        0.99
+      ]
+    },
+    {
+      "id": 7,
+      "type": "FoleyTuneSaveTunerData",
+      "pos": [
+        840,
+        320
+      ],
+      "size": [
+        320,
+        200
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "tuner_data",
+          "type": "TUNER_DATA",
+          "link": 8
+        }
+      ],
+      "outputs": [
+        {
+          "name": "file_path",
+          "type": "STRING",
+          "links": [],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "FoleyTuneSaveTunerData"
+      },
+      "widgets_values": [
+        "foley_tuner_data",
+        true,
+        "",
+        ""
+      ]
+    },
+    {
+      "id": 8,
+      "type": "FoleyTuneMergeSelector",
+      "pos": [
+        840,
+        520
+      ],
+      "size": [
+        320,
+        200
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "hunyuan_model",
+          "type": "FOLEYTUNE_MODEL",
+          "link": 2
+        },
+        {
+          "name": "lora_stack",
+          "type": "LORA_STACK",
+          "link": 5
+        },
+        {
+          "name": "tuner_data",
+          "type": "TUNER_DATA",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "FOLEYTUNE_MODEL",
+          "links": [],
+          "slot_index": 0
+        },
+        {
+          "name": "prompts",
+          "type": "STRING",
+          "links": [],
+          "slot_index": 1
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [],
+          "slot_index": 2
+        },
+        {
+          "name": "lora_data",
+          "type": "LORA_DATA",
+          "links": [],
+          "slot_index": 3
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "FoleyTuneMergeSelector"
+      },
+      "widgets_values": [
+        2
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      5,
+      0,
+      "FOLEYTUNE_MODEL"
+    ],
+    [
+      2,
+      1,
+      0,
+      8,
+      0,
+      "FOLEYTUNE_MODEL"
+    ],
+    [
+      3,
+      2,
+      0,
+      3,
+      0,
+      "LORA_STACK"
+    ],
+    [
+      4,
+      3,
+      0,
+      5,
+      1,
+      "LORA_STACK"
+    ],
+    [
+      5,
+      3,
+      0,
+      8,
+      1,
+      "LORA_STACK"
+    ],
+    [
+      6,
+      4,
+      0,
+      5,
+      2,
+      "FOLEYTUNE_MERGE_OPTIONS"
+    ],
+    [
+      7,
+      5,
+      4,
+      6,
+      0,
+      "LORA_DATA"
+    ],
+    [
+      8,
+      5,
+      3,
+      7,
+      0,
+      "TUNER_DATA"
+    ],
+    [
+      9,
+      5,
+      3,
+      8,
+      2,
+      "TUNER_DATA"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}

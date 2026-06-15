@@ -169,6 +169,28 @@ For the full training guide with hyperparameter recommendations, checkpoint sele
 
 ---
 
+## LoRA Merging
+
+Combine 2+ trained FoleyTune LoRAs into one, resolving conflicts per transformer block. The merge nodes use a modular pipeline:
+
+```
+LoRA Stack ──► LoRA Stack ──► LoRA AutoTuner ──► (model) ──► Sampler
+(lora #1)      (lora #2)          ▲   │
+Merge Options ──────────────────┘   ├─ lora_data ──► Save Merged LoRA
+Model Loader ──► (hunyuan_model) ───┘   └─ tuner_data ─► Save Tuner Data / Merge Selector
+```
+
+1. Chain a **FoleyTune LoRA Stack** node per LoRA (each adds one `lora_name` + `strength` to a `LORA_STACK`).
+2. (Optional) Add a **FoleyTune Merge Options** node for shared settings (strategy, auto-strength, sparsification, DARE dampening, TIES density, top-N).
+3. Feed the stack into a **FoleyTune LoRA Merger** (manual strategy) or **FoleyTune LoRA AutoTuner** (per-block conflict analysis + ranked candidates).
+4. Connect `lora_data` to **Save Merged LoRA** to write a standalone `.safetensors` loadable by the **LoRA Loader**, and/or `tuner_data` to **Save Tuner Data** / **Merge Selector** to persist and replay ranked configurations.
+
+The merge engine ports the conflict-aware math from [ComfyUI-LoRA-Optimizer](https://github.com/ethanfel/ComfyUI-LoRA-Optimizer): TIES sign election, excess-conflict baseline (distinguishes real conflict from orthogonal-LoRA sign noise), Karcher-mean SLERP for 3+ LoRAs, and energy-based auto-strength.
+
+> **Note (breaking change):** the Merger / AutoTuner now take a `LORA_STACK` input instead of the old `lora_name_1..4` slots. Build the stack with **FoleyTune LoRA Stack** nodes. See the example graph in [`example_workflows/FoleyTune_LoRA_Merge.json`](example_workflows/FoleyTune_LoRA_Merge.json).
+
+---
+
 ## Node Reference
 
 ### Inference (7 nodes)
@@ -203,6 +225,19 @@ For the full training guide with hyperparameter recommendations, checkpoint sele
 | **FoleyTune LoRA Evaluator** | Compare adapters with spectral metrics and generated audio |
 | **FoleyTune VAE Roundtrip** | Diagnostic: encode/decode audio through DAC to check codec quality |
 | **FoleyTune Checkpoint Finalizer** | Strip optimizer/scheduler state from a checkpoint, keeping only the adapter weights and metadata |
+
+### LoRA Merging (8 nodes)
+
+| Node | Description |
+|---|---|
+| **FoleyTune LoRA Stack** | Build a chainable `LORA_STACK` (one `lora_name` + `strength` per node) for the merge nodes |
+| **FoleyTune Merge Options** | Shared merge settings (strategy, auto-strength + floor, sparsification, DARE dampening, TIES density/sign, top-N) — overrides node widgets |
+| **FoleyTune LoRA Merger** | Merge a stack with a single chosen strategy (TIES / SLERP / weighted average). Emits `LORA_DATA` |
+| **FoleyTune LoRA AutoTuner** | Per-block conflict analysis, scores a grid of candidates, applies the top-ranked. Emits `TUNER_DATA` (ranked alternatives) + `LORA_DATA` |
+| **FoleyTune Merge Selector** | Replay a chosen ranked config from `TUNER_DATA` without re-analyzing |
+| **FoleyTune Save Merged LoRA** | SVD-decompose merged deltas into a `.safetensors` (+`.json`) checkpoint loadable by the LoRA Loader |
+| **FoleyTune Save Tuner Data** | Persist AutoTuner rankings to the `tuner_data` folder |
+| **FoleyTune Load Tuner Data** | Reload saved rankings for the Merge Selector |
 
 ### Dataset Preparation (16 nodes)
 

@@ -256,5 +256,140 @@ class TestComputeDelta(unittest.TestCase):
         torch.testing.assert_close(deltas["conv"], expected)
 
 
+class TestExcessConflict(unittest.TestCase):
+
+    def test_identical_zero_excess(self):
+        from lora.merge_math import sample_conflict
+        a = torch.randn(500)
+        r = sample_conflict(a, a)
+        self.assertAlmostEqual(r["excess_conflict"], 0.0, places=4)
+
+    def test_uncorrelated_low_excess_despite_half_conflict(self):
+        from lora.merge_math import sample_conflict
+        torch.manual_seed(0)
+        a = torch.randn(20000)
+        b = torch.randn(20000)
+        r = sample_conflict(a, b)
+        # Raw conflict ~0.5 (random sign disagreement) but the arccos baseline
+        # explains it — so EXCESS is near zero.
+        self.assertAlmostEqual(r["conflict_ratio"], 0.5, delta=0.05)
+        self.assertLess(r["excess_conflict"], 0.1)
+
+    def test_concentrated_conflict_high_excess(self):
+        from lora.merge_math import sample_conflict
+        # Large-magnitude dim agrees (drives cosine high); two above-noise dims
+        # disagree (drive sign-mismatch high) -> genuine excess conflict.
+        a = torch.tensor([10.0, 1.0, 1.0]).repeat(200)
+        b = torch.tensor([10.0, -1.0, -1.0]).repeat(200)
+        r = sample_conflict(a, b)
+        self.assertGreater(r["cos_sim"], 0.9)        # magnitude-weighted alignment high
+        self.assertGreater(r["excess_conflict"], 0.3)  # but real conflict surfaces
+
+
+class TestKarcherSlerp(unittest.TestCase):
+
+    def test_slerp_n_returns_input_shape(self):
+        from lora.merge_math import merge_slerp_n
+        a = torch.randn(16, 8)
+        b = torch.randn(16, 8)
+        c = torch.randn(16, 8)
+        result = merge_slerp_n([(a, 1.0), (b, 1.0), (c, 1.0)])
+        self.assertEqual(result.shape, (16, 8))
+
+    def test_slerp_n_permutation_invariant(self):
+        from lora.merge_math import merge_slerp_n
+        torch.manual_seed(1)
+        a, b, c = torch.randn(128), torch.randn(128), torch.randn(128)
+        r1 = merge_slerp_n([(a, 1.0), (b, 1.0), (c, 1.0)])
+        r2 = merge_slerp_n([(c, 1.0), (a, 1.0), (b, 1.0)])
+        torch.testing.assert_close(r1, r2, atol=1e-4, rtol=1e-4)
+
+    def test_slerp_n_identical_directions_parallel(self):
+        from lora.merge_math import merge_slerp_n
+        v = torch.randn(64)
+        result = merge_slerp_n([(v, 1.0), (2.0 * v, 1.0), (3.0 * v, 1.0)])
+        cos = torch.dot(result, v) / (result.norm() * v.norm())
+        self.assertAlmostEqual(cos.item(), 1.0, places=4)
+
+
+class TestAutoStrengthFloor(unittest.TestCase):
+
+    def test_explicit_floor_honored_on_aligned_stack(self):
+        from lora.merge_math import compute_auto_strength
+        norms = [100.0, 100.0]
+        dots = {(0, 1): 80.0}  # aligned (cos=0.8) -> no orthogonal floor
+        scale = compute_auto_strength([1.0, 1.0], norms, dots, floor=0.9)
+        self.assertAlmostEqual(scale, 0.9, places=4)
+
+    def test_explicit_zero_floor_allows_reduction(self):
+        from lora.merge_math import compute_auto_strength
+        norms = [100.0, 100.0]
+        dots = {(0, 1): 80.0}
+        scale = compute_auto_strength([1.0, 1.0], norms, dots, floor=0.0)
+        self.assertLess(scale, 1.0)
+
+    def test_orthogonal_default_floor_is_one(self):
+        from lora.merge_math import compute_auto_strength, THRESHOLDS
+        self.assertEqual(THRESHOLDS["auto_strength_orthogonal_floor"], 1.0)
+        scale = compute_auto_strength([1.0, 1.0], [100.0, 100.0], {(0, 1): 0.0})
+        self.assertAlmostEqual(scale, 1.0, places=4)
+
+
+class TestExtractLoraSvd(unittest.TestCase):
+
+    def test_linear_full_rank_roundtrip(self):
+        from lora.merge_math import extract_lora_svd
+        torch.manual_seed(2)
+        up0 = torch.randn(16, 4)
+        down0 = torch.randn(4, 8)
+        delta = up0 @ down0
+        down, up, r = extract_lora_svd(delta, rank=4, rank_mode="fixed")
+        recon = up @ down
+        torch.testing.assert_close(recon, delta, atol=1e-4, rtol=1e-4)
+        self.assertEqual(r, 4)
+
+    def test_near_zero_returns_none(self):
+        from lora.merge_math import extract_lora_svd
+        self.assertIsNone(extract_lora_svd(torch.zeros(8, 8)))
+
+    def test_conv_reshape_roundtrip(self):
+        from lora.merge_math import extract_lora_svd
+        torch.manual_seed(3)
+        c_out, c_in, k = 6, 3, 3
+        delta = torch.randn(c_out, c_in, k)
+        mat = delta.reshape(c_out, c_in * k)
+        down, up, r = extract_lora_svd(mat, rank=min(c_out, c_in * k), rank_mode="fixed")
+        down_c = down.reshape(r, c_in, k)
+        up_c = up.reshape(c_out, r, 1)
+        recon = torch.einsum("or,rik->oik", up_c.squeeze(-1), down_c)
+        torch.testing.assert_close(recon, delta, atol=1e-4, rtol=1e-4)
+
+
+class TestScoreConfig(unittest.TestCase):
+
+    def test_ties_beats_avg_on_high_conflict(self):
+        from lora.merge_math import score_config
+        high = [{"avg_cos_sim": 0.3, "avg_conflict": 0.6, "excess_conflict": 0.5}]
+        ties, _ = score_config("ties", "disabled", 0.7, high)
+        wavg, _ = score_config("weighted_average", "disabled", 0.7, high)
+        self.assertGreater(ties, wavg)
+
+    def test_avg_beats_ties_on_low_conflict(self):
+        from lora.merge_math import score_config
+        low = [{"avg_cos_sim": 0.1, "avg_conflict": 0.05, "excess_conflict": 0.02}]
+        ties, _ = score_config("ties", "disabled", 0.7, low)
+        wavg, _ = score_config("weighted_average", "disabled", 0.7, low)
+        self.assertGreater(wavg, ties)
+
+    def test_score_in_unit_range(self):
+        from lora.merge_math import score_config
+        metrics = [{"avg_cos_sim": 0.2, "avg_conflict": 0.3, "excess_conflict": 0.2}]
+        for approach in ("per_block_adaptive", "ties", "weighted_average", "slerp"):
+            for spars in ("disabled", "dare", "conflict_aware"):
+                s, _ = score_config(approach, spars, 0.7, metrics)
+                self.assertGreaterEqual(s, 0.0)
+                self.assertLessEqual(s, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

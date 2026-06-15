@@ -1679,7 +1679,7 @@ class FoleyTuneLoRARangeTester:
         lines = [header]
         for i, (st, path) in enumerate(cand):
             logger.info(f"[RangeTester] {i + 1}/{len(cand)} — step {st} — {os.path.basename(path)}")
-            model = FoleyTuneLoRALoaderPath._load(hunyuan_model, path, lora_strength)
+            model, _prompts = FoleyTuneLoRALoaderPath._load(hunyuan_model, path, lora_strength)
             try:
                 audio_first, _ = sampler.generate_audio(
                     model, hunyuan_deps, features, seed, steps, cfg_scale,

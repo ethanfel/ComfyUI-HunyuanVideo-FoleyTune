@@ -238,7 +238,7 @@ The merge engine ports the conflict-aware math from [ComfyUI-LoRA-Optimizer](htt
 | **FoleyTune LoRA Merger** | Merge a stack with a single chosen strategy (TIES / SLERP / weighted average). Emits `FOLEYTUNE_LORA_DATA` |
 | **FoleyTune LoRA AutoTuner** | Per-block conflict analysis, scores a grid of candidates, applies the one `selection` points at. Emits `FOLEYTUNE_TUNER_DATA` (ranked alternatives) + `FOLEYTUNE_LORA_DATA`. Accepts `tuner_data` to **replay** a saved ranking (skips analysis) |
 | **FoleyTune Merge Selector** | Replay a chosen ranked config from `FOLEYTUNE_TUNER_DATA` without re-analyzing |
-| **FoleyTune Save Merged LoRA** | SVD-decompose merged deltas into a `.safetensors` (+`.json`) checkpoint loadable by the LoRA Loader |
+| **FoleyTune Save Merged LoRA** | SVD-decompose merged deltas into a `.safetensors` (+`.json`) checkpoint loadable by the LoRA Loader. `save_folder` picks which configured loras directory to write into |
 | **FoleyTune Save Tuner Data** | Persist AutoTuner rankings to the `tuner_data` folder |
 | **FoleyTune Load Tuner Data** | Reload saved rankings for the Merge Selector |
 

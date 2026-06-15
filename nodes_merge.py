@@ -852,14 +852,20 @@ class FoleyTuneSaveMergedLoRA:
 
     @classmethod
     def INPUT_TYPES(cls):
+        lora_folders = folder_paths.get_folder_paths("loras")
+        folder_choices = lora_folders if lora_folders else [os.path.join(folder_paths.models_dir, "loras")]
         return {
             "required": {
                 "lora_data": ("FOLEYTUNE_LORA_DATA", {
                     "tooltip": "Merged result from a Merger / AutoTuner / Merge Selector.",
                 }),
+                "save_folder": (folder_choices, {
+                    "tooltip": "Which loras folder to save into. Lists the configured lora paths from "
+                               "ComfyUI and extra_model_paths.yaml.",
+                }),
                 "filename": ("STRING", {
                     "default": "merged_lora",
-                    "tooltip": "Output name under the loras folder (subdirs allowed). The extension is "
+                    "tooltip": "Output name under the chosen folder (subdirs allowed). The extension is "
                                "added from save_format. A sidecar .json holds the metadata.",
                 }),
                 "save_rank": ("INT", {
@@ -899,12 +905,12 @@ class FoleyTuneSaveMergedLoRA:
         ".safetensors (+ .json) or .pt checkpoint loadable by FoleyTune LoRA Loader."
     )
 
-    def save_lora(self, lora_data, filename, save_rank, save_format,
+    def save_lora(self, lora_data, save_folder, filename, save_rank, save_format,
                   prompt="", description="", energy_threshold=0.99):
         if not lora_data or not lora_data.get("deltas"):
             raise ValueError("Save Merged LoRA: empty lora_data.")
 
-        loras_dir = folder_paths.get_folder_paths("loras")[0]
+        loras_dir = save_folder
         rank_mode = "fixed" if save_rank > 0 else "auto"
         rank_cap = save_rank if save_rank > 0 else lora_data.get("rank_hint", 0)
 

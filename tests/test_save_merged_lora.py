@@ -54,7 +54,7 @@ class TestSaveMergedLoRA(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _mock_folder_paths.get_folder_paths = lambda x: [tmp]
             node = FoleyTuneSaveMergedLoRA()
-            (out_path,) = node.save_lora(lora_data, "merged_test", 0, "safetensors")
+            (out_path,) = node.save_lora(lora_data, tmp, "merged_test", 0, "safetensors")
             self.assertTrue(os.path.exists(out_path))
             self.assertTrue(os.path.exists(out_path.replace(".safetensors", ".json")))
 
@@ -81,7 +81,7 @@ class TestSaveMergedLoRA(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             _mock_folder_paths.get_folder_paths = lambda x: [tmp]
-            (out_path,) = FoleyTuneSaveMergedLoRA().save_lora(lora_data, "uni", 0, "safetensors")
+            (out_path,) = FoleyTuneSaveMergedLoRA().save_lora(lora_data, tmp, "uni", 0, "safetensors")
             from safetensors.torch import load_file
             sd = load_file(out_path)
             a_ranks = {v.shape[0] for k, v in sd.items() if k.endswith(".lora_A")}
@@ -104,7 +104,7 @@ class TestSaveMergedLoRA(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             _mock_folder_paths.get_folder_paths = lambda x: [tmp]
-            (out_path,) = FoleyTuneSaveMergedLoRA().save_lora(lora_data, "k", 0, "safetensors")
+            (out_path,) = FoleyTuneSaveMergedLoRA().save_lora(lora_data, tmp, "k", 0, "safetensors")
             from safetensors.torch import load_file
             sd = load_file(out_path)
             self.assertIn("triple_blocks.1.audio_self_proj.lora_A", sd)

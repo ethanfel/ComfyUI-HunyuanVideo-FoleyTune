@@ -66,6 +66,34 @@ class TestSaveMergedLoRA(unittest.TestCase):
             rel_err = (recon[module_path] - delta).norm() / delta.norm()
             self.assertLess(rel_err.item(), 0.05)
 
+    def test_auto_rank_pads_to_uniform_rank(self):
+        # Two layers with different intrinsic ranks; auto mode must still emit a
+        # single uniform rank so the LoRA Loader's single-rank wrap can load it.
+        torch.manual_seed(11)
+        low = torch.randn(64, 2) @ torch.randn(2, 32)     # rank-2
+        high = torch.randn(64, 12) @ torch.randn(12, 32)  # rank-12
+        deltas = {"triple_blocks.0.audio_self_proj": low,
+                  "triple_blocks.1.audio_self_proj": high}
+        lora_data = {
+            "deltas": deltas, "rank_hint": 64, "alpha": 64.0, "use_rslora": False,
+            "target_suffixes": ["audio_self_proj"], "prompts": [], "source_names": [],
+            "is_conv": {k: False for k in deltas},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            _mock_folder_paths.get_folder_paths = lambda x: [tmp]
+            (out_path,) = FoleyTuneSaveMergedLoRA().save_lora(lora_data, "uni", 0, "safetensors")
+            from safetensors.torch import load_file
+            sd = load_file(out_path)
+            a_ranks = {v.shape[0] for k, v in sd.items() if k.endswith(".lora_A")}
+            self.assertEqual(len(a_ranks), 1, f"non-uniform lora_A ranks: {a_ranks}")
+            # And the merge still reconstructs each layer despite zero-padding.
+            ckpt = nodes_merge._load_adapter_checkpoint(out_path)
+            s, rank, alpha, ur, tgt, pr = nodes_merge._parse_checkpoint(ckpt)
+            recon = compute_deltas(s, rank, alpha, strength=1.0, use_rslora=ur)
+            for layer, orig in deltas.items():
+                rel = (recon[layer] - orig).norm() / orig.norm()
+                self.assertLess(rel.item(), 0.05, f"{layer} rel err {rel.item()}")
+
     def test_keys_follow_loader_convention(self):
         delta = torch.randn(8, 4)
         lora_data = {

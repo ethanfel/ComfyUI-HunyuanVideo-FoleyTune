@@ -908,7 +908,9 @@ class FoleyTuneSaveMergedLoRA:
         rank_mode = "fixed" if save_rank > 0 else "auto"
         rank_cap = save_rank if save_rank > 0 else lora_data.get("rank_hint", 0)
 
-        state_dict = {}
+        # Pass 1: SVD-decompose each layer. In auto mode the rank can differ per
+        # layer, so we keep the 2D factors and the true rank, then unify below.
+        extracted = []  # (module_path, is_conv, shape, down2d [r,in], up2d [out,r], r)
         max_rank = 0
         skipped = []
         for module_path, delta in lora_data["deltas"].items():
@@ -926,21 +928,35 @@ class FoleyTuneSaveMergedLoRA:
                                    rank_mode=rank_mode)
             if res is None:
                 continue
-            down, up, r = res  # down [r, in], up [out, r]
+            down, up, r = res  # down [r, in], up [out, r] (2D)
             max_rank = max(max_rank, r)
-            if is_conv:
-                c_out, c_in, k = d.shape
-                down = down.reshape(r, c_in, k)            # [r, c_in, k]
-                up = up.reshape(c_out, r, 1)               # [c_out, r, 1]
-            state_dict[f"{module_path}.lora_A"] = down.to(torch.bfloat16).contiguous()
-            state_dict[f"{module_path}.lora_B"] = up.to(torch.bfloat16).contiguous()
+            extracted.append((module_path, is_conv, tuple(d.shape), down, up, r))
 
-        if not state_dict:
+        if not extracted:
             raise ValueError("Save Merged LoRA: no decomposable layers (all near-zero/unsupported).")
         if skipped:
             logger.warning("Save Merged LoRA: skipped %d non-2D/3D layers.", len(skipped))
 
+        # Pass 2: pad every layer to a UNIFORM rank (= max). The LoRA Loader wraps
+        # all target layers at meta["rank"] and copies weights by key, so per-layer
+        # ranks must match; zero-padding the extra rank dims preserves up @ down
+        # exactly (the padded singular directions contribute nothing).
         chosen_rank = max_rank
+        state_dict = {}
+        for module_path, is_conv, shape, down, up, r in extracted:
+            in_f, out_f = down.shape[1], up.shape[0]
+            if r < chosen_rank:
+                down_p = torch.zeros(chosen_rank, in_f, dtype=down.dtype)
+                down_p[:r] = down
+                up_p = torch.zeros(out_f, chosen_rank, dtype=up.dtype)
+                up_p[:, :r] = up
+                down, up = down_p, up_p
+            if is_conv:
+                c_out, c_in, k = shape
+                down = down.reshape(chosen_rank, c_in, k)   # [rank, c_in, k]
+                up = up.reshape(c_out, chosen_rank, 1)      # [c_out, rank, 1]
+            state_dict[f"{module_path}.lora_A"] = down.to(torch.bfloat16).contiguous()
+            state_dict[f"{module_path}.lora_B"] = up.to(torch.bfloat16).contiguous()
         meta = {
             "rank": chosen_rank,
             "alpha": float(chosen_rank),     # scaling = alpha/rank = 1.0 -> strength 1.0 reproduces merge

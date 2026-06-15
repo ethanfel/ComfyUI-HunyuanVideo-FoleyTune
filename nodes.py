@@ -1526,6 +1526,10 @@ class FoleyTuneVideoCombiner:
         for b in range(n_items):
             prefix_b = (f"{filename_prefix}_{label_list[b]}"
                         if b < len(label_list) else filename_prefix)
+            # Strip control chars (newlines etc.) so a multi-line label/prefix can't leak
+            # into the saved filename and later corrupt the Content-Disposition header
+            # when ComfyUI serves the preview (aiohttp rejects control chars in headers).
+            prefix_b = re.sub(r"[\x00-\x1f\x7f]+", "_", str(prefix_b)).strip("_ ") or "FoleyTune"
             full_output_folder, filename, _, _, _ = folder_paths.get_save_image_path(prefix_b, output_dir)
             os.makedirs(full_output_folder, exist_ok=True)
 

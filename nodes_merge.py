@@ -348,13 +348,13 @@ class FoleyTuneLoRAStack:
                 }),
             },
             "optional": {
-                "lora_stack": ("LORA_STACK", {
+                "lora_stack": ("FOLEYTUNE_LORA_STACK", {
                     "tooltip": "Chain the output of another LoRA Stack node here to add more LoRAs. Leave empty for the first LoRA.",
                 }),
             },
         }
 
-    RETURN_TYPES = ("LORA_STACK",)
+    RETURN_TYPES = ("FOLEYTUNE_LORA_STACK",)
     RETURN_NAMES = ("lora_stack",)
     FUNCTION = "add_to_stack"
     CATEGORY = "FoleyTune"
@@ -456,7 +456,7 @@ class FoleyTuneLoRAMerger:
                 "hunyuan_model": ("FOLEYTUNE_MODEL", {
                     "tooltip": "Base FoleyTune model to merge the LoRAs into.",
                 }),
-                "lora_stack": ("LORA_STACK", {
+                "lora_stack": ("FOLEYTUNE_LORA_STACK", {
                     "tooltip": "Stack of 2+ LoRAs from FoleyTune LoRA Stack node(s).",
                 }),
                 "merge_strategy": (["ties", "weighted_average", "slerp"], {
@@ -476,7 +476,7 @@ class FoleyTuneLoRAMerger:
             },
         }
 
-    RETURN_TYPES = ("FOLEYTUNE_MODEL", "STRING", "LORA_DATA")
+    RETURN_TYPES = ("FOLEYTUNE_MODEL", "STRING", "FOLEYTUNE_LORA_DATA")
     RETURN_NAMES = ("model", "prompts", "lora_data")
     FUNCTION = "merge"
     CATEGORY = "FoleyTune"
@@ -544,7 +544,7 @@ class FoleyTuneLoRAAutoTuner:
                 "hunyuan_model": ("FOLEYTUNE_MODEL", {
                     "tooltip": "Base FoleyTune model to merge the LoRAs into.",
                 }),
-                "lora_stack": ("LORA_STACK", {
+                "lora_stack": ("FOLEYTUNE_LORA_STACK", {
                     "tooltip": "Stack of 2+ LoRAs from FoleyTune LoRA Stack node(s).",
                 }),
                 "top_n": ("INT", {
@@ -566,7 +566,7 @@ class FoleyTuneLoRAAutoTuner:
                                "not taken from here. Uses sensible defaults if not connected. "
                                "Ignored when tuner_data is connected (replay uses the saved settings).",
                 }),
-                "tuner_data": ("TUNER_DATA", {
+                "tuner_data": ("FOLEYTUNE_TUNER_DATA", {
                     "tooltip": "Connect saved results (Load Tuner Data) or another AutoTuner's tuner_data "
                                "to REPLAY them: analysis + scoring are skipped and the saved ranking is "
                                "applied directly (respecting 'selection'). Re-tunes from scratch if left empty. "
@@ -575,7 +575,7 @@ class FoleyTuneLoRAAutoTuner:
             },
         }
 
-    RETURN_TYPES = ("FOLEYTUNE_MODEL", "STRING", "STRING", "TUNER_DATA", "LORA_DATA")
+    RETURN_TYPES = ("FOLEYTUNE_MODEL", "STRING", "STRING", "FOLEYTUNE_TUNER_DATA", "FOLEYTUNE_LORA_DATA")
     RETURN_NAMES = ("model", "prompts", "report", "tuner_data", "lora_data")
     FUNCTION = "auto_merge"
     CATEGORY = "FoleyTune"
@@ -780,10 +780,10 @@ class FoleyTuneMergeSelector:
                 "hunyuan_model": ("FOLEYTUNE_MODEL", {
                     "tooltip": "Base FoleyTune model to merge into (same base the AutoTuner ran on).",
                 }),
-                "lora_stack": ("LORA_STACK", {
+                "lora_stack": ("FOLEYTUNE_LORA_STACK", {
                     "tooltip": "The same LoRA stack the AutoTuner ranked (rebuilt with the same Stack nodes).",
                 }),
-                "tuner_data": ("TUNER_DATA", {
+                "tuner_data": ("FOLEYTUNE_TUNER_DATA", {
                     "tooltip": "Ranked configs from a FoleyTune LoRA AutoTuner (or Load Tuner Data).",
                 }),
                 "selection": ("INT", {
@@ -794,7 +794,7 @@ class FoleyTuneMergeSelector:
             },
         }
 
-    RETURN_TYPES = ("FOLEYTUNE_MODEL", "STRING", "STRING", "LORA_DATA")
+    RETURN_TYPES = ("FOLEYTUNE_MODEL", "STRING", "STRING", "FOLEYTUNE_LORA_DATA")
     RETURN_NAMES = ("model", "prompts", "report", "lora_data")
     FUNCTION = "select_merge"
     CATEGORY = "FoleyTune"
@@ -854,7 +854,7 @@ class FoleyTuneSaveMergedLoRA:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "lora_data": ("LORA_DATA", {
+                "lora_data": ("FOLEYTUNE_LORA_DATA", {
                     "tooltip": "Merged result from a Merger / AutoTuner / Merge Selector.",
                 }),
                 "filename": ("STRING", {
@@ -986,7 +986,7 @@ class FoleyTuneSaveTunerData:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "tuner_data": ("TUNER_DATA", {
+                "tuner_data": ("FOLEYTUNE_TUNER_DATA", {
                     "tooltip": "Ranked configs from a FoleyTune LoRA AutoTuner.",
                 }),
                 "filename": ("STRING", {
@@ -1058,7 +1058,7 @@ class FoleyTuneLoadTunerData:
             },
         }
 
-    RETURN_TYPES = ("TUNER_DATA", "STRING", "STRING")
+    RETURN_TYPES = ("FOLEYTUNE_TUNER_DATA", "STRING", "STRING")
     RETURN_NAMES = ("tuner_data", "prompt", "description")
     FUNCTION = "load"
     CATEGORY = "FoleyTune"

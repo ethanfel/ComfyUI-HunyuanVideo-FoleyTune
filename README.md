@@ -180,7 +180,7 @@ Merge Options ──────────────────┘   ├─
 Model Loader ──► (hunyuan_model) ───┘   └─ tuner_data ─► Save Tuner Data / Merge Selector
 ```
 
-1. Chain a **FoleyTune LoRA Stack** node per LoRA (each adds one `lora_name` + `strength` to a `LORA_STACK`).
+1. Chain a **FoleyTune LoRA Stack** node per LoRA (each adds one `lora_name` + `strength` to a `FOLEYTUNE_LORA_STACK`).
 2. (Optional) Add a **FoleyTune Merge Options** node for shared tuning (auto-strength + floor, sparsification, DARE dampening, TIES density/sign). The merge *strategy* lives on the Merger and *top-N* on the AutoTuner — each node's own knob.
 3. Feed the stack into a **FoleyTune LoRA Merger** (manual strategy) or **FoleyTune LoRA AutoTuner** (per-block conflict analysis + ranked candidates).
 4. Connect `lora_data` to **Save Merged LoRA** to write a standalone `.safetensors` loadable by the **LoRA Loader**, and/or `tuner_data` to **Save Tuner Data** to persist the ranked configurations.
@@ -188,7 +188,9 @@ Model Loader ──► (hunyuan_model) ───┘   └─ tuner_data ─► S
 
 The merge engine ports the conflict-aware math from [ComfyUI-LoRA-Optimizer](https://github.com/ethanfel/ComfyUI-LoRA-Optimizer): TIES sign election, excess-conflict baseline (distinguishes real conflict from orthogonal-LoRA sign noise), Karcher-mean SLERP for 3+ LoRAs, and energy-based auto-strength.
 
-> **Note (breaking change):** the Merger / AutoTuner now take a `LORA_STACK` input instead of the old `lora_name_1..4` slots. Build the stack with **FoleyTune LoRA Stack** nodes. See the example graph in [`example_workflows/FoleyTune_LoRA_Merge.json`](example_workflows/FoleyTune_LoRA_Merge.json).
+> **Note (breaking change):** the Merger / AutoTuner now take a `FOLEYTUNE_LORA_STACK` input instead of the old `lora_name_1..4` slots. Build the stack with **FoleyTune LoRA Stack** nodes. See the example graph in [`example_workflows/FoleyTune_LoRA_Merge.json`](example_workflows/FoleyTune_LoRA_Merge.json).
+
+> **Use the FoleyTune save/merge nodes, not another pack's.** The merge data types are namespaced (`FOLEYTUNE_LORA_DATA`, `FOLEYTUNE_TUNER_DATA`, `FOLEYTUNE_LORA_STACK`) specifically so they can't be wired into a different pack's identically-named `LORA_DATA`/`TUNER_DATA`/`LORA_STACK` sockets (e.g. ComfyUI-LoRA-Optimizer's *Save Merged LoRA*), which expect a different internal schema and would crash. Always connect `lora_data` → **FoleyTune Save Merged LoRA**.
 
 ---
 
@@ -231,11 +233,11 @@ The merge engine ports the conflict-aware math from [ComfyUI-LoRA-Optimizer](htt
 
 | Node | Description |
 |---|---|
-| **FoleyTune LoRA Stack** | Build a chainable `LORA_STACK` (one `lora_name` + `strength` per node) for the merge nodes |
+| **FoleyTune LoRA Stack** | Build a chainable `FOLEYTUNE_LORA_STACK` (one `lora_name` + `strength` per node) for the merge nodes |
 | **FoleyTune Merge Options** | Shared merge settings (strategy, auto-strength + floor, sparsification, DARE dampening, TIES density/sign, top-N) — overrides node widgets |
-| **FoleyTune LoRA Merger** | Merge a stack with a single chosen strategy (TIES / SLERP / weighted average). Emits `LORA_DATA` |
-| **FoleyTune LoRA AutoTuner** | Per-block conflict analysis, scores a grid of candidates, applies the one `selection` points at. Emits `TUNER_DATA` (ranked alternatives) + `LORA_DATA`. Accepts `tuner_data` to **replay** a saved ranking (skips analysis) |
-| **FoleyTune Merge Selector** | Replay a chosen ranked config from `TUNER_DATA` without re-analyzing |
+| **FoleyTune LoRA Merger** | Merge a stack with a single chosen strategy (TIES / SLERP / weighted average). Emits `FOLEYTUNE_LORA_DATA` |
+| **FoleyTune LoRA AutoTuner** | Per-block conflict analysis, scores a grid of candidates, applies the one `selection` points at. Emits `FOLEYTUNE_TUNER_DATA` (ranked alternatives) + `FOLEYTUNE_LORA_DATA`. Accepts `tuner_data` to **replay** a saved ranking (skips analysis) |
+| **FoleyTune Merge Selector** | Replay a chosen ranked config from `FOLEYTUNE_TUNER_DATA` without re-analyzing |
 | **FoleyTune Save Merged LoRA** | SVD-decompose merged deltas into a `.safetensors` (+`.json`) checkpoint loadable by the LoRA Loader |
 | **FoleyTune Save Tuner Data** | Persist AutoTuner rankings to the `tuner_data` folder |
 | **FoleyTune Load Tuner Data** | Reload saved rankings for the Merge Selector |

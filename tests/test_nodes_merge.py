@@ -39,7 +39,7 @@ class TestFoleyTuneLoRAStack(unittest.TestCase):
         self.assertIn("lora_stack", inputs["optional"])
 
     def test_return_type(self):
-        self.assertEqual(FoleyTuneLoRAStack.RETURN_TYPES, ("LORA_STACK",))
+        self.assertEqual(FoleyTuneLoRAStack.RETURN_TYPES, ("FOLEYTUNE_LORA_STACK",))
 
     def test_add_to_stack_chaining(self):
         node = FoleyTuneLoRAStack()
@@ -104,7 +104,7 @@ class TestFoleyTuneLoRAMerger(unittest.TestCase):
 
     def test_return_types(self):
         self.assertEqual(FoleyTuneLoRAMerger.RETURN_TYPES,
-                         ("FOLEYTUNE_MODEL", "STRING", "LORA_DATA"))
+                         ("FOLEYTUNE_MODEL", "STRING", "FOLEYTUNE_LORA_DATA"))
 
     def test_group_deltas_by_block(self):
         merger = FoleyTuneLoRAMerger()
@@ -141,7 +141,7 @@ class TestFoleyTuneLoRAAutoTuner(unittest.TestCase):
     def test_return_types_include_tuner_and_lora_data(self):
         self.assertEqual(
             FoleyTuneLoRAAutoTuner.RETURN_TYPES,
-            ("FOLEYTUNE_MODEL", "STRING", "STRING", "TUNER_DATA", "LORA_DATA"))
+            ("FOLEYTUNE_MODEL", "STRING", "STRING", "FOLEYTUNE_TUNER_DATA", "FOLEYTUNE_LORA_DATA"))
 
     def test_analyze_block_returns_strategy(self):
         tuner = FoleyTuneLoRAAutoTuner()

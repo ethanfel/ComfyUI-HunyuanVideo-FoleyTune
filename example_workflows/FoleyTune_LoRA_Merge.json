@@ -56,7 +56,7 @@
       "inputs": [
         {
           "name": "lora_stack",
-          "type": "LORA_STACK",
+          "type": "FOLEYTUNE_LORA_STACK",
           "link": null,
           "shape": 7
         }
@@ -64,7 +64,7 @@
       "outputs": [
         {
           "name": "lora_stack",
-          "type": "LORA_STACK",
+          "type": "FOLEYTUNE_LORA_STACK",
           "links": [
             3
           ],
@@ -96,7 +96,7 @@
       "inputs": [
         {
           "name": "lora_stack",
-          "type": "LORA_STACK",
+          "type": "FOLEYTUNE_LORA_STACK",
           "link": 3,
           "shape": 7
         }
@@ -104,7 +104,7 @@
       "outputs": [
         {
           "name": "lora_stack",
-          "type": "LORA_STACK",
+          "type": "FOLEYTUNE_LORA_STACK",
           "links": [
             4,
             5
@@ -180,7 +180,7 @@
         },
         {
           "name": "lora_stack",
-          "type": "LORA_STACK",
+          "type": "FOLEYTUNE_LORA_STACK",
           "link": 4
         },
         {
@@ -211,7 +211,7 @@
         },
         {
           "name": "tuner_data",
-          "type": "TUNER_DATA",
+          "type": "FOLEYTUNE_TUNER_DATA",
           "links": [
             8,
             9
@@ -220,7 +220,7 @@
         },
         {
           "name": "lora_data",
-          "type": "LORA_DATA",
+          "type": "FOLEYTUNE_LORA_DATA",
           "links": [
             7
           ],
@@ -252,7 +252,7 @@
       "inputs": [
         {
           "name": "lora_data",
-          "type": "LORA_DATA",
+          "type": "FOLEYTUNE_LORA_DATA",
           "link": 7
         }
       ],
@@ -293,7 +293,7 @@
       "inputs": [
         {
           "name": "tuner_data",
-          "type": "TUNER_DATA",
+          "type": "FOLEYTUNE_TUNER_DATA",
           "link": 8
         }
       ],
@@ -337,12 +337,12 @@
         },
         {
           "name": "lora_stack",
-          "type": "LORA_STACK",
+          "type": "FOLEYTUNE_LORA_STACK",
           "link": 5
         },
         {
           "name": "tuner_data",
-          "type": "TUNER_DATA",
+          "type": "FOLEYTUNE_TUNER_DATA",
           "link": 9
         }
       ],
@@ -367,7 +367,7 @@
         },
         {
           "name": "lora_data",
-          "type": "LORA_DATA",
+          "type": "FOLEYTUNE_LORA_DATA",
           "links": [],
           "slot_index": 3
         }
@@ -403,7 +403,7 @@
       0,
       3,
       0,
-      "LORA_STACK"
+      "FOLEYTUNE_LORA_STACK"
     ],
     [
       4,
@@ -411,7 +411,7 @@
       0,
       5,
       1,
-      "LORA_STACK"
+      "FOLEYTUNE_LORA_STACK"
     ],
     [
       5,
@@ -419,7 +419,7 @@
       0,
       8,
       1,
-      "LORA_STACK"
+      "FOLEYTUNE_LORA_STACK"
     ],
     [
       6,
@@ -435,7 +435,7 @@
       4,
       6,
       0,
-      "LORA_DATA"
+      "FOLEYTUNE_LORA_DATA"
     ],
     [
       8,
@@ -443,7 +443,7 @@
       3,
       7,
       0,
-      "TUNER_DATA"
+      "FOLEYTUNE_TUNER_DATA"
     ],
     [
       9,
@@ -451,7 +451,7 @@
       3,
       8,
       2,
-      "TUNER_DATA"
+      "FOLEYTUNE_TUNER_DATA"
     ]
   ],
   "groups": [],

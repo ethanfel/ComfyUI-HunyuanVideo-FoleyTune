@@ -27,7 +27,7 @@ with unittest.mock.patch.dict("sys.modules", _comfy_mocks):
     import nodes_merge
     from nodes_merge import (
         FoleyTuneSaveMergedLoRA, FoleyTuneSaveTunerData, FoleyTuneLoadTunerData,
-        FoleyTuneMergeSelector, _apply_block_merge,
+        FoleyTuneMergeSelector, FoleyTuneLoRAAutoTuner, _apply_block_merge,
     )
     from lora.merge_math import compute_deltas
 
@@ -144,6 +144,48 @@ class TestMergeSelectorEdge(unittest.TestCase):
             model, [], {"top_n": []}, 1)
         self.assertIs(out_model, model)
         self.assertIsNone(lora_data)
+
+
+class _BlockModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        blk = nn.Module()
+        blk.lin = nn.Linear(8, 8, bias=False)
+        self.triple_blocks = nn.ModuleList([blk])
+
+
+class TestAutoTunerReplay(unittest.TestCase):
+
+    def test_replay_skips_analysis_and_applies_saved_config(self):
+        model = _BlockModel()
+        layer = "triple_blocks.0.lin"
+        before = model.triple_blocks[0].lin.weight.data.clone()
+        entries = [
+            {"name": "a", "strength": 1.0, "deltas": {layer: torch.ones(8, 8)},
+             "rank": 4, "alpha": 4.0, "suffixes": ("lin",), "prompts": []},
+            {"name": "b", "strength": 1.0, "deltas": {layer: torch.ones(8, 8) * 3.0},
+             "rank": 4, "alpha": 4.0, "suffixes": ("lin",), "prompts": []},
+        ]
+        tuner_data = {
+            "top_n": [{"rank": 1, "config": {"triple_blocks.0": "weighted_average"},
+                       "approach": "weighted_average", "sparsification": "disabled",
+                       "score_heuristic": 0.7, "score_breakdown": {}}],
+            "auto_strength_scale": 1.0,
+            "source_names": ["a", "b"],
+            "sparsification_density": 0.7, "dare_dampening": 0.0,
+            "ties_density": 0.7, "ties_sign_method": "frequency",
+        }
+        with unittest.mock.patch.object(nodes_merge, "_collect_loras_from_stack",
+                                        return_value=entries):
+            out_model, prompts, report, out_td, lora_data = FoleyTuneLoRAAutoTuner().auto_merge(
+                model, [], top_n=3, selection=1, tuner_data=tuner_data)
+        # auto_merge deep-copies the input; the merge lands on the returned model.
+        out_weight = dict(out_model.named_modules())[layer].weight.data
+        # weighted_average of ones and threes -> twos, applied to the weight
+        torch.testing.assert_close(out_weight, before + 2.0)
+        self.assertIn("REPLAY", report)
+        self.assertEqual(out_td["top_n"][0]["config"], {"triple_blocks.0": "weighted_average"})
+        self.assertIsNotNone(lora_data)
 
 
 if __name__ == "__main__":

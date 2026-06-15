@@ -563,7 +563,14 @@ class FoleyTuneLoRAAutoTuner:
                 "merge_options": ("FOLEYTUNE_MERGE_OPTIONS", {
                     "tooltip": "Optional shared tuning (auto-strength, sparsification, TIES settings). "
                                "The AutoTuner picks the merge STRATEGY itself, per block — strategy is "
-                               "not taken from here. Uses sensible defaults if not connected.",
+                               "not taken from here. Uses sensible defaults if not connected. "
+                               "Ignored when tuner_data is connected (replay uses the saved settings).",
+                }),
+                "tuner_data": ("TUNER_DATA", {
+                    "tooltip": "Connect saved results (Load Tuner Data) or another AutoTuner's tuner_data "
+                               "to REPLAY them: analysis + scoring are skipped and the saved ranking is "
+                               "applied directly (respecting 'selection'). Re-tunes from scratch if left empty. "
+                               "Use the same lora_stack the data was tuned on.",
                 }),
             },
         }
@@ -632,104 +639,123 @@ class FoleyTuneLoRAAutoTuner:
             "excess_conflict": excess_conflict,
         }
 
-    def auto_merge(self, hunyuan_model, lora_stack, top_n=3, selection=1, merge_options=None):
-        opts = _resolve_options(merge_options)
-
+    def auto_merge(self, hunyuan_model, lora_stack, top_n=3, selection=1,
+                   merge_options=None, tuner_data=None):
         entries = _collect_loras_from_stack(lora_stack)
         if len(entries) < 2:
             raise ValueError("Need at least 2 LoRAs with non-zero strength to merge.")
-
         n_loras = len(entries)
 
-        # --- Auto-strength (computed once, applied to all candidates) ---
-        scale = 1.0
-        if opts["auto_strength"] == "enabled":
-            floor = opts["auto_strength_floor"]
-            scale = _compute_auto_scale(entries, None if floor < 0 else floor)
-            logger.info("Auto-strength scale: %.4f", scale)
-        weights = [e["strength"] * scale for e in entries]
+        if tuner_data and tuner_data.get("top_n"):
+            # ---- REPLAY: apply a saved ranking, skip analysis + scoring ----
+            replayed = True
+            ranked = tuner_data["top_n"]
+            scale = float(tuner_data.get("auto_strength_scale", 1.0))
+            block_analysis = tuner_data.get("block_decisions", {})
+            merge_settings = {
+                "sparsification_density": tuner_data.get("sparsification_density", 0.7),
+                "dare_dampening": tuner_data.get("dare_dampening", 0.0),
+                "ties_density": tuner_data.get("ties_density", 0.7),
+                "ties_sign_method": tuner_data.get("ties_sign_method", "frequency"),
+            }
+            out_tuner_data = dict(tuner_data)
+            saved_names = tuner_data.get("source_names")
+            if saved_names and saved_names != [e["name"] for e in entries]:
+                logger.warning("AutoTuner replay: lora_stack %s differs from tuner_data source %s "
+                               "— some block configs may fall back to weighted_average.",
+                               [e["name"] for e in entries], saved_names)
+        else:
+            # ---- FRESH: analyze per block, score a candidate grid, rank ----
+            replayed = False
+            opts = _resolve_options(merge_options)
+            scale = 1.0
+            if opts["auto_strength"] == "enabled":
+                floor = opts["auto_strength_floor"]
+                scale = _compute_auto_scale(entries, None if floor < 0 else floor)
+                logger.info("Auto-strength scale: %.4f", scale)
+            analysis_weights = [e["strength"] * scale for e in entries]
 
-        # --- Per-block analysis (config-independent — done once) ---
-        all_layers = set()
-        for e in entries:
-            all_layers.update(e["deltas"].keys())
-        block_groups = _group_layers_by_block(all_layers)
-
-        block_analysis = {}
-        for block, layer_names in block_groups.items():
-            per_lora = []
+            all_layers = set()
             for e in entries:
-                per_lora.append({l: e["deltas"][l] for l in layer_names if l in e["deltas"]})
-            block_analysis[block] = self._analyze_block(per_lora, weights)
-        block_metrics = list(block_analysis.values())
+                all_layers.update(e["deltas"].keys())
+            block_groups = _group_layers_by_block(all_layers)
+            block_analysis = {}
+            for block, layer_names in block_groups.items():
+                per_lora = [{l: e["deltas"][l] for l in layer_names if l in e["deltas"]}
+                            for e in entries]
+                block_analysis[block] = self._analyze_block(per_lora, analysis_weights)
+            block_metrics = list(block_analysis.values())
 
-        # --- Score the candidate grid ---
-        candidates = []
-        for approach in _AUTOTUNE_APPROACHES:
-            for spars in _AUTOTUNE_SPARSIFICATIONS:
-                s, breakdown = score_config(
-                    approach, spars, opts["sparsification_density"], block_metrics)
-                if approach == "per_block_adaptive":
-                    config = {b: a["strategy"] for b, a in block_analysis.items()}
-                else:
-                    config = {b: approach for b in block_analysis}
-                candidates.append({
-                    "approach": approach, "sparsification": spars,
-                    "config": config, "score_heuristic": round(s, 6),
-                    "score_breakdown": breakdown,
-                })
-        candidates.sort(key=lambda c: c["score_heuristic"], reverse=True)
-        ranked = candidates[:max(1, int(top_n))]
-        for i, c in enumerate(ranked):
-            c["rank"] = i + 1
+            candidates = []
+            for approach in _AUTOTUNE_APPROACHES:
+                for spars in _AUTOTUNE_SPARSIFICATIONS:
+                    s, breakdown = score_config(
+                        approach, spars, opts["sparsification_density"], block_metrics)
+                    if approach == "per_block_adaptive":
+                        config = {b: a["strategy"] for b, a in block_analysis.items()}
+                    else:
+                        config = {b: approach for b in block_analysis}
+                    candidates.append({
+                        "approach": approach, "sparsification": spars,
+                        "config": config, "score_heuristic": round(s, 6),
+                        "score_breakdown": breakdown,
+                    })
+            candidates.sort(key=lambda c: c["score_heuristic"], reverse=True)
+            ranked = candidates[:max(1, int(top_n))]
+            for i, c in enumerate(ranked):
+                c["rank"] = i + 1
 
-        # --- Merge the selected candidate for real (default = top-ranked) ---
+            merge_settings = {
+                "sparsification_density": opts["sparsification_density"],
+                "dare_dampening": opts["dare_dampening"],
+                "ties_density": opts["ties_density"],
+                "ties_sign_method": opts["ties_sign_method"],
+            }
+            out_tuner_data = {
+                "algo_version": "foley-merge-1",
+                "source_names": [e["name"] for e in entries],
+                "strengths": [e["strength"] for e in entries],
+                "auto_strength": opts["auto_strength"],
+                "auto_strength_floor": opts["auto_strength_floor"],
+                "auto_strength_scale": scale,
+                "block_decisions": block_analysis,
+                "top_n": ranked,
+                "prompt": "",
+                "description": "",
+                **merge_settings,
+            }
+
+        # ---- Merge the selected candidate for real (default = top-ranked) ----
+        weights = [e["strength"] * scale for e in entries]
         sel_idx = max(1, min(int(selection), len(ranked))) - 1
         winner = ranked[sel_idx]
-        win_opts = dict(opts)
-        win_opts["sparsification"] = winner["sparsification"]
+        win_opts = {"sparsification": winner.get("sparsification", "disabled"), **merge_settings}
         model = copy.deepcopy(hunyuan_model)
         n_applied, merged_deltas, strategy_counts, conflict_skipped = _apply_block_merge(
             model, entries, weights,
-            lambda b, cfg=winner["config"]: cfg.get(b, "weighted_average"), win_opts)
+            lambda b, cfg=winner.get("config", {}): cfg.get(b, "weighted_average"), win_opts)
         model.eval()
 
         lora_data = _build_lora_data(entries, merged_deltas, scale=scale)
 
-        tuner_data = {
-            "algo_version": "foley-merge-1",
-            "source_names": [e["name"] for e in entries],
-            "strengths": [e["strength"] for e in entries],
-            "auto_strength": opts["auto_strength"],
-            "auto_strength_floor": opts["auto_strength_floor"],
-            "auto_strength_scale": scale,
-            "sparsification_density": opts["sparsification_density"],
-            "dare_dampening": opts["dare_dampening"],
-            "ties_density": opts["ties_density"],
-            "ties_sign_method": opts["ties_sign_method"],
-            "block_decisions": block_analysis,
-            "top_n": ranked,
-            "prompt": "",
-            "description": "",
-        }
-
         # --- Report ---
-        report_lines = [f"FoleyTune LoRA AutoTuner -- {n_loras} LoRAs", "=" * 50]
+        mode = "REPLAY (from tuner_data)" if replayed else "tune"
+        report_lines = [f"FoleyTune LoRA AutoTuner [{mode}] -- {n_loras} LoRAs", "=" * 50]
         for e in entries:
             report_lines.append(f"  {e['name']} (strength={e['strength']:.2f})")
-        if opts["auto_strength"] == "enabled":
+        if scale != 1.0:
             report_lines.append(f"Auto-strength scale: {scale:.4f}")
         report_lines.append("")
-        report_lines.append("Ranked candidates (heuristic):")
+        report_lines.append("Ranked candidates:")
         for c in ranked:
             report_lines.append(
-                f"  #{c['rank']} {c['approach']} / spars={c['sparsification']} "
-                f"-> score={c['score_heuristic']:.3f} "
-                f"(excess={c['score_breakdown'].get('avg_excess', 0):.1%}, "
-                f"spread={c['score_breakdown'].get('spread', 0):.1%})")
+                f"  #{c.get('rank', '?')} {c.get('approach')} / spars={c.get('sparsification')} "
+                f"-> score={c.get('score_heuristic', 0):.3f} "
+                f"(excess={c.get('score_breakdown', {}).get('avg_excess', 0):.1%}, "
+                f"spread={c.get('score_breakdown', {}).get('spread', 0):.1%})")
         report_lines.append("")
-        report_lines.append(f"Applied: #{winner['rank']} {winner['approach']} / "
-                            f"spars={winner['sparsification']} (selection={sel_idx + 1} of {len(ranked)})")
+        report_lines.append(f"Applied: #{winner.get('rank', sel_idx + 1)} {winner.get('approach')} / "
+                            f"spars={winner.get('sparsification')} (selection={sel_idx + 1} of {len(ranked)})")
         report_lines.append(f"Per-block strategies: {strategy_counts}")
         report_lines.append(f"Applied to {n_applied} layers.")
         if conflict_skipped:
@@ -739,7 +765,7 @@ class FoleyTuneLoRAAutoTuner:
         report = "\n".join(report_lines)
         logger.info(report)
 
-        return (model, "\n".join(lora_data["prompts"]), report, tuner_data, lora_data)
+        return (model, "\n".join(lora_data["prompts"]), report, out_tuner_data, lora_data)
 
 
 # --- Node: Merge Selector ----------------------------------------------------

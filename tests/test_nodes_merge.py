@@ -134,7 +134,9 @@ class TestFoleyTuneLoRAAutoTuner(unittest.TestCase):
         self.assertNotIn("auto_strength", req)
         self.assertNotIn("sparsification", req)
         self.assertNotIn("lora_name_1", req)
-        self.assertIn("merge_options", inputs.get("optional", {}))
+        opt = inputs.get("optional", {})
+        self.assertIn("merge_options", opt)
+        self.assertIn("tuner_data", opt)  # replay input
 
     def test_return_types_include_tuner_and_lora_data(self):
         self.assertEqual(

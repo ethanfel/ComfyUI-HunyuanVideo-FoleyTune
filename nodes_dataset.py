@@ -593,6 +593,14 @@ class FoleyTuneDenoiserSettings:
                     "default": 2048, "min": 512, "max": 8192, "step": 512,
                     "tooltip": "FFT window size. Larger = better frequency resolution, slower.",
                 }),
+                "noise_floor_gate_db": ("FLOAT", {
+                    "default": 0.0, "min": -90.0, "max": 0.0, "step": 1.0,
+                    "tooltip": "GATE: only denoise clips whose noise floor (p10 frame RMS) "
+                               "is ABOVE this dB level; pass cleaner clips through UNTOUCHED. "
+                               "0 = denoise everything (no gate). e.g. -50 = denoise only the "
+                               "genuinely noisy clips and leave clean/wet-detailed ones alone "
+                               "(avoids the denoiser stripping legitimate breathy/wet texture).",
+                }),
             },
         }
 
@@ -605,8 +613,9 @@ class FoleyTuneDenoiserSettings:
         "Quality Filter to denoise clips before scoring."
     )
 
-    def get_settings(self, strength=0.7, stationary=True, n_fft=2048):
-        return ({"strength": strength, "stationary": stationary, "n_fft": n_fft},)
+    def get_settings(self, strength=0.7, stationary=True, n_fft=2048, noise_floor_gate_db=0.0):
+        return ({"strength": strength, "stationary": stationary, "n_fft": n_fft,
+                 "noise_floor_gate_db": noise_floor_gate_db},)
 
 
 class FoleyTuneDatasetQualityFilter:
@@ -732,6 +741,13 @@ class FoleyTuneDatasetQualityFilter:
             strength = denoise_settings["strength"]
             stationary = denoise_settings["stationary"]
             n_fft = denoise_settings["n_fft"]
+            gate_db = float(denoise_settings.get("noise_floor_gate_db", 0.0))
+
+            def _clip_noise_floor_db(_wnp):
+                """p10 frame-RMS in dB — the noise-floor gate metric."""
+                _m = _wnp.mean(axis=0) if _wnp.ndim > 1 else _wnp
+                _fr = np.array([np.sqrt(np.mean(f ** 2)) for f in np.array_split(_m, 100) if len(f)])
+                return 20.0 * np.log10(np.percentile(_fr, 10) + 1e-9)
 
             names = [item["name"] for item in dataset]
             groups = group_by_source(names)
@@ -757,14 +773,21 @@ class FoleyTuneDatasetQualityFilter:
                     quiet_wav.mean(axis=0) if quiet_wav.ndim > 1 else quiet_wav
                 )
 
-            # Denoise each clip
+            # Denoise each clip (noise-floor gate: skip clean clips so the
+            # denoiser never strips their legitimate wet/breathy detail).
             denoised_dataset = []
+            n_gated = 0
             for item in dataset:
                 throw_exception_if_processing_interrupted()
                 wav = item["waveform"][0].float()
                 sr = item["sample_rate"]
                 wav_np = wav.cpu().numpy()
                 rms_in = np.sqrt(np.mean(wav_np ** 2)).clip(1e-8)
+
+                if gate_db < 0.0 and _clip_noise_floor_db(wav_np) < gate_db:
+                    denoised_dataset.append(dict(item))   # cleaner than gate -> untouched
+                    n_gated += 1
+                    continue
 
                 prefix = re.sub(r"_\d+$", "", item["name"])
                 y_noise = noise_profiles.get(prefix)
@@ -789,7 +812,8 @@ class FoleyTuneDatasetQualityFilter:
                 denoised_dataset.append(new_item)
 
             dataset = denoised_dataset
-            print(f"[QualityFilter] Denoised {len(dataset)} clips  "
+            print(f"[QualityFilter] Denoised {len(dataset) - n_gated} clips, passed "
+                  f"{n_gated} clean clips through (gate={gate_db} dB)  "
                   f"strength={strength}  stationary={stationary}", flush=True)
 
         passed = []
@@ -1493,6 +1517,13 @@ class FoleyTuneVideoQualityFilter:
             strength = denoise_settings["strength"]
             stationary = denoise_settings["stationary"]
             n_fft = denoise_settings["n_fft"]
+            gate_db = float(denoise_settings.get("noise_floor_gate_db", 0.0))
+
+            def _clip_noise_floor_db(_wnp):
+                """p10 frame-RMS in dB — the noise-floor gate metric."""
+                _m = _wnp.mean(axis=0) if _wnp.ndim > 1 else _wnp
+                _fr = np.array([np.sqrt(np.mean(f ** 2)) for f in np.array_split(_m, 100) if len(f)])
+                return 20.0 * np.log10(np.percentile(_fr, 10) + 1e-9)
 
             valid = [r for r in results if "error" not in r]
             names = [r["rel"].stem for r in valid]
@@ -1515,13 +1546,19 @@ class FoleyTuneVideoQualityFilter:
                     quiet_wav.mean(axis=0) if quiet_wav.ndim > 1 else quiet_wav
                 )
 
-            # Denoise each clip, recompute scores and CLAP mono
+            # Denoise each clip, recompute scores and CLAP mono (noise-floor gate:
+            # skip clean clips so the denoiser never strips their wet/breathy detail).
+            n_gated = 0
             for i, r in enumerate(valid):
                 throw_exception_if_processing_interrupted()
                 wav = r["wav"][0].float()  # [C, L]
                 sr = r["sr"]
                 wav_np = wav.cpu().numpy()
                 rms_in = np.sqrt(np.mean(wav_np ** 2)).clip(1e-8)
+
+                if gate_db < 0.0 and _clip_noise_floor_db(wav_np) < gate_db:
+                    n_gated += 1   # cleaner than gate -> leave untouched, scores unchanged
+                    continue
 
                 prefix = _re.sub(r"_\d+$", "", names[i])
                 y_noise = noise_profiles.get(prefix)
@@ -1557,7 +1594,8 @@ class FoleyTuneVideoQualityFilter:
                         mono_48k = mono
                     r["mono_48k_np"] = mono_48k.numpy()
 
-            print(f"[VideoQualityFilter] Denoised {len(valid)} clips  "
+            print(f"[VideoQualityFilter] Denoised {len(valid) - n_gated} clips, passed "
+                  f"{n_gated} clean clips through (gate={gate_db} dB)  "
                   f"strength={strength}  stationary={stationary}", flush=True)
 
         # --- CLAP model loading (deferred until after Phase 1 forks are done) ---

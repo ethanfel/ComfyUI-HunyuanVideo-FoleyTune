@@ -1992,6 +1992,33 @@ The WITHIN-RUN MCD floor ≈ the perceptual sweet spot; MCD rising = past it. Ea
 #### Normalization — global_peak across ALL positions
 Per-clip LUFS normalization **PROMOTES BREATHING**: it equalizes loudness across clips, so naturally-quiet breathy clips get boosted (~+4 dB) up to target. Fix at the normalization level: (1) normalize ALL position dirs TOGETHER as one dataset — per-dir anchors each position to its own loudest clip → cross-position inconsistency; the VideoQualityFilter now accepts a folder LIST → one merged, namespaced dataset. (2) Use **`global_peak`** (one gain so the loudest PEAK → −1, uses the headroom) NOT `global_lufs` (anchors the loudest LOUDNESS → −23, leaves the peak ~17 dB below ceiling → whole set too quiet, median −42 LUFS = poor latent-vs-noise SNR at high diffusion timesteps). Correct dataset = one combined dir, global_peak, median ~−23 to −26; verify peaks VARY slightly across positions (one global gain) not all pinned to −1 (per-dir bug).
 
+#### global_peak does NOT amplify noise — source noise is per-shoot; gated denoise (June 2026)
+Symptom: a blowjob model's output had audible background noise; global_peak was suspected of amplifying it. MEASURED instead (performer_c blowjob, source mp4 → global_peak flac, peak/rms/noise-floor dB):
+
+| clip | SOURCE pk / rms / floor | GLOBALPEAK pk / rms / floor | gain |
+|---|---|---|---|
+| clip A (quiet) | −6.9 / −43.4 / −55.7 | −8.8 / −45.2 / −57.6 | **−1.8 dB** |
+| clip B (loud, clipping) | 0.0 / −29.9 / −43.4 | −1.7 / −31.7 / −45.2 | **−1.7 dB** |
+| clip C (quietest) | −19.7 / −50.8 / −57.5 | −21.5 / −52.7 / −59.3 | **−1.8 dB** |
+
+global_peak applies a **uniform −1.8 dB ATTENUATION** (it was un-clipping a 0 dBFS source clip to give true-peak headroom) — it does NOT amplify anything. **The noise is in the SOURCE, and it's per-SHOOT, not uniform** (419-clip set, noise-floor p10/median/p90 = −62 / −54 / −46 dB; **21% noisy** floor>−50, **44% clean** floor<−55; noisiest shoots ~−45 to −51, cleanest shoot −66). Per-clip LUFS would be the *real* amplifier (it'd boost quiet clips +22 dB, dragging their −58 floor to ~−35) → global_peak is the correct choice, same lesson as LUFS-promotes-breathing.
+
+FIX = **noise-floor-gated denoise** (`noise_floor_gate_db` on the Denoiser Settings node, gated in both quality filters, commit `2125ede`). Blanket denoise would strip legitimate wet/breathy detail (the flatness-over-flags-breathy lesson — a denoiser reads wet texture as noise). Gated: denoise ONLY clips whose noise floor > the threshold, pass cleaner clips through UNTOUCHED. Validation (gate −50 dB, 419 clips):
+
+| group | n | floor before → after | change |
+|---|---|---|---|
+| NOISY (floor>−50, denoised) | 88 (21%) | −46.2 → −54.4 dB | **−7.4 dB cleaned** |
+| CLEAN (floor<−50, gated out) | 331 (79%) | −55.9 → −58.0 dB | **−0.1 dB untouched** |
+
+Downstream confirmation — model output @ step 500, trained on denoised vs non-denoised data, matched RMS −27.0 dB:
+
+| trained on | output noise floor | output SNR |
+|---|---|---|
+| **denoised** dataset | **−49.3 dB** | **22.3 dB** |
+| non-denoised | −42.6 dB | 15.5 dB |
+
+The source denoise carries all the way through: the model generates **−6.7 dB quieter background noise** (ear-confirmed "a lot less noisy"). **Net rule: don't blame global_peak for noise (it's correct, even attenuates); diagnose source noise per-shoot; use the gated denoiser (gate ~−50, strength ~0.6) so only noisy shoots get cleaned and the clean/wet clips are preserved.**
+
 #### Branch `fable` — checkpoint & metric correctness (closes the metric↔ear gap)
 **MERGED to main 2026-06-11** (fast-forward, main = fable @ `704acce`; dataset-template recipe followed @ `7d3b509`). (1) **`eval_state_dict`:** pre-fable prodigy_plus mid-run `.pt` stored TRAIN-mode weights (y = x + 0.9(z−x)) while the metrics were computed on the eval-AVERAGED (x) weights — **two different models**, so the `.pt` you auditioned ≠ what the metrics scored (a concrete cause of the divergence, not just Goodhart). From fable, mid-run ckpts also store the eval weights → pick by ear, load = exact match. (2) **`reference_metrics` RMS-aligns** gen→ref → MCD/SC level-robust (work on global-norm datasets again; absolutes not comparable to pre-fix runs OR across runs — see the cross-run caveat below; PBC unaffected). (3) **`eval_negative_prompt`** = CLAP-encoded uncond branch = CFG parity with inference. (4) **`t_range_mode`** clamp (default) vs rescale. RESULT: on fable the MCD-floor + PBC-peak land RIGHT ON the perceptual peak — the metric↔ear gap largely closes; pre-fable runs, keep trusting the ear.
 

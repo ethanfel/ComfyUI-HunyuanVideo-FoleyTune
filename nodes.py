@@ -1445,6 +1445,10 @@ class FoleyTuneVideoCombiner:
                 "save_metadata": ("BOOLEAN", {"default": True, "tooltip":
                     "Embed the ComfyUI workflow + prompt into the output video metadata "
                     "(like ComfyUI does for PNGs). Stream-copied, no re-encode."}),
+                "labels": ("STRING", {"default": "", "forceInput": True, "tooltip":
+                    "Optional per-batch-item labels (newline/comma-separated), e.g. from the LoRA Range Tester. "
+                    "When the audio has a batch (B>1), each item is saved as <filename_prefix>_<label>. "
+                    "Fewer labels than items -> unlabeled items keep the plain prefix + counter."}),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -1460,7 +1464,7 @@ class FoleyTuneVideoCombiner:
 
     def combine(self, video_features, audio, filename_prefix="FoleyTune",
                 audio_codec="aac", save_output=True, save_metadata=True,
-                prompt=None, extra_pnginfo=None):
+                labels="", prompt=None, extra_pnginfo=None):
         import re
         import tempfile
         import soundfile as sf
@@ -1497,91 +1501,97 @@ class FoleyTuneVideoCombiner:
             output_dir = folder_paths.get_temp_directory()
             output_type = "temp"
 
-        full_output_folder, filename, _, _, _ = folder_paths.get_save_image_path(
-            filename_prefix, output_dir)
-        os.makedirs(full_output_folder, exist_ok=True)
-
-        # Auto-increment counter (same pattern as VHS)
-        max_counter = 0
-        matcher = re.compile(rf"{re.escape(filename)}_(\d+)\..+", re.IGNORECASE)
-        for existing_file in os.listdir(full_output_folder):
-            match = matcher.fullmatch(existing_file)
-            if match:
-                file_counter = int(match.group(1))
-                if file_counter > max_counter:
-                    max_counter = file_counter
-        counter = max_counter + 1
-
-        output_filename = f"{filename}_{counter:05}{src_ext}"
-        output_path = os.path.join(full_output_folder, output_filename)
-
-        waveform = audio["waveform"][0].cpu().numpy()  # [C, T]
+        wav = audio["waveform"]
+        if wav.dim() == 2:
+            wav = wav.unsqueeze(0)
+        n_items = wav.shape[0]
         sample_rate = audio["sample_rate"]
+        # Optional per-batch-item labels (newline/comma-separated) — when the audio is a
+        # batch (B>1, e.g. from the LoRA Range Tester), each item is named with its label.
+        label_list = ([s.strip() for s in labels.replace(",", "\n").splitlines() if s.strip()]
+                      if labels else [])
 
         # The latent grid (audio_frame_rate=50) can't represent arbitrary durations
         # exactly: int(duration * 50) floors, so generated audio is up to ~20ms shorter
         # than the source video. With "-c:v copy -shortest", even a few-ms shortfall makes
-        # ffmpeg truncate the copied video to the previous frame/GOP boundary — dropping
-        # whole frames (e.g. 5.06s clip -> 4.81s). Pad the audio with trailing silence up
-        # to the source video duration so the muxed video keeps its full length.
+        # ffmpeg truncate the copied video. Pad with trailing silence to the source duration.
         try:
             src_samples = int(round(_ffprobe_video_info(source_video)["duration"] * sample_rate))
-            if waveform.shape[1] < src_samples:
+        except Exception as e:
+            logger.warning(f"Could not read video duration for audio padding ({e}); muxing as-is.")
+            src_samples = None
+
+        ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+        saved_paths, ui_entries = [], []
+        for b in range(n_items):
+            prefix_b = (f"{filename_prefix}_{label_list[b]}"
+                        if b < len(label_list) else filename_prefix)
+            full_output_folder, filename, _, _, _ = folder_paths.get_save_image_path(prefix_b, output_dir)
+            os.makedirs(full_output_folder, exist_ok=True)
+
+            # Auto-increment counter (same pattern as VHS)
+            max_counter = 0
+            matcher = re.compile(rf"{re.escape(filename)}_(\d+)\..+", re.IGNORECASE)
+            for existing_file in os.listdir(full_output_folder):
+                match = matcher.fullmatch(existing_file)
+                if match:
+                    max_counter = max(max_counter, int(match.group(1)))
+            output_filename = f"{filename}_{max_counter + 1:05}{src_ext}"
+            output_path = os.path.join(full_output_folder, output_filename)
+
+            waveform = wav[b].cpu().numpy()  # [C, T]
+            if src_samples is not None and waveform.shape[1] < src_samples:
                 pad = np.zeros((waveform.shape[0], src_samples - waveform.shape[1]), dtype=waveform.dtype)
                 waveform = np.concatenate([waveform, pad], axis=1)
-        except Exception as e:
-            logger.warning(f"Could not pad audio to video duration ({e}); muxing as-is.")
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp_wav = tmp.name
-        try:
-            sf.write(tmp_wav, waveform.T, sample_rate)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_wav = tmp.name
+            try:
+                sf.write(tmp_wav, waveform.T, sample_rate)
 
-            # Embed the ComfyUI workflow/prompt as container metadata. Passed as
-            # argv (no shell), so the JSON needs no escaping; the video stream is
-            # still -c:v copy, so this adds no re-encode. mp4/mov need
-            # use_metadata_tags to store arbitrary keys; mkv/webm take them natively.
-            metadata_args = []
-            if save_metadata:
-                meta = {}
-                if isinstance(extra_pnginfo, dict) and "workflow" in extra_pnginfo:
-                    meta["workflow"] = json.dumps(extra_pnginfo["workflow"])
-                if prompt is not None:
-                    meta["prompt"] = json.dumps(prompt)
-                if meta:
-                    if src_ext.lower() in (".mp4", ".mov", ".m4v"):
-                        metadata_args += ["-movflags", "use_metadata_tags"]
-                    for key, value in meta.items():
-                        metadata_args += ["-metadata", f"{key}={value}"]
+                # Embed the ComfyUI workflow/prompt as container metadata (argv, no shell;
+                # video is still -c:v copy so no re-encode).
+                metadata_args = []
+                if save_metadata:
+                    meta = {}
+                    if isinstance(extra_pnginfo, dict) and "workflow" in extra_pnginfo:
+                        meta["workflow"] = json.dumps(extra_pnginfo["workflow"])
+                    if prompt is not None:
+                        meta["prompt"] = json.dumps(prompt)
+                    if meta:
+                        if src_ext.lower() in (".mp4", ".mov", ".m4v"):
+                            metadata_args += ["-movflags", "use_metadata_tags"]
+                        for key, value in meta.items():
+                            metadata_args += ["-metadata", f"{key}={value}"]
 
-            ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
-            cmd = [
-                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
-                "-i", str(source_video),
-                "-i", tmp_wav,
-                "-c:v", "copy",
-                "-c:a", audio_codec_eff,
-                "-map", "0:v:0",
-                "-map", "1:a:0",
-                *metadata_args,
-                "-shortest",
-                str(output_path),
-            ]
-            result = subprocess.run(cmd, capture_output=True, timeout=120)
-            if result.returncode != 0:
-                raise RuntimeError(f"ffmpeg mux failed: {result.stderr.decode()}")
-        finally:
-            if os.path.exists(tmp_wav):
-                os.unlink(tmp_wav)
+                cmd = [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", str(source_video),
+                    "-i", tmp_wav,
+                    "-c:v", "copy",
+                    "-c:a", audio_codec_eff,
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                    *metadata_args,
+                    "-shortest",
+                    str(output_path),
+                ]
+                result = subprocess.run(cmd, capture_output=True, timeout=120)
+                if result.returncode != 0:
+                    raise RuntimeError(f"ffmpeg mux failed: {result.stderr.decode()}")
+            finally:
+                if os.path.exists(tmp_wav):
+                    os.unlink(tmp_wav)
 
-        logger.info(f"Muxed audio onto video: {output_path}")
+            logger.info(f"Muxed audio onto video: {output_path}")
+            subfolder = os.path.relpath(full_output_folder, output_dir)
+            if subfolder == ".":
+                subfolder = ""
+            saved_paths.append(str(output_path))
+            ui_entries.append({"filename": output_filename, "subfolder": subfolder,
+                               "type": output_type, "format": f"video/{src_ext.lstrip('.')}"})
 
-        subfolder = os.path.relpath(full_output_folder, output_dir)
-        if subfolder == ".":
-            subfolder = ""
-        return {"ui": {"gifs": [{"filename": output_filename, "subfolder": subfolder,
-                                  "type": output_type, "format": f"video/{src_ext.lstrip('.')}"}]},
-                "result": (str(output_path),)}
+        return {"ui": {"gifs": ui_entries}, "result": ("\n".join(saved_paths),)}
 
 class FoleyTuneLoRARangeTester:
     """Audition every LoRA checkpoint in a step range on one video.
@@ -1620,13 +1630,20 @@ class FoleyTuneLoRARangeTester:
                 "filename_prefix": ("STRING", {"default": "",
                     "tooltip": "Output filename prefix. Empty = the lora_folder's name."}),
                 "label_with_step": ("BOOLEAN", {"default": True,
-                    "tooltip": "Append _step<NNNNN> to each output filename."}),
+                    "tooltip": "Append _step<NNNNN> to each saved video's filename."}),
+                "save_videos": ("BOOLEAN", {"default": True,
+                    "tooltip": "Mux + save each generation onto the video directly. Turn OFF to only output the batched audio (+ labels) for downstream processing — e.g. UniverSR/BWE, then a Video Combiner. The audio_batch + labels outputs are produced either way."}),
                 "sampler_options": ("FOLEYTUNE_SAMPLER_OPTIONS",),
             },
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("report",)
+    RETURN_TYPES = ("AUDIO", "STRING", "STRING")
+    RETURN_NAMES = ("audio_batch", "labels", "report")
+    OUTPUT_TOOLTIPS = (
+        "All generations stacked into one batched AUDIO (B=N, in step order). Route through UniverSR/BWE then a Video Combiner.",
+        "Newline-joined step labels (step<NNNNN>), one per batch item — for naming the downstream saves.",
+        "Text report of what ran.",
+    )
     FUNCTION = "run_range"
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
@@ -1634,7 +1651,8 @@ class FoleyTuneLoRARangeTester:
     def run_range(self, hunyuan_model, hunyuan_deps, features, video_features,
                   lora_folder, step_start, step_end, seed, steps, cfg_scale,
                   step_stride=0, max_renders=0, lora_strength=1.0,
-                  filename_prefix="", label_with_step=True, sampler_options=None):
+                  filename_prefix="", label_with_step=True, sampler_options=None,
+                  save_videos=True):
         import re
         import gc
         import glob
@@ -1674,9 +1692,12 @@ class FoleyTuneLoRARangeTester:
         sampler = FoleyTuneChunkedSampler()
         combiner = FoleyTuneVideoCombiner()
 
-        header = f"LoRA range test: {len(cand)} checkpoint(s) from {os.path.basename(folder.rstrip('/'))} (seed {seed})"
+        mode = "save+output" if save_videos else "audio-only output"
+        header = (f"LoRA range test: {len(cand)} checkpoint(s) from "
+                  f"{os.path.basename(folder.rstrip('/'))} (seed {seed}, {mode})")
         logger.info(header)
         lines = [header]
+        waveforms, labels, sample_rate = [], [], None
         for i, (st, path) in enumerate(cand):
             logger.info(f"[RangeTester] {i + 1}/{len(cand)} — step {st} — {os.path.basename(path)}")
             model, _prompts = FoleyTuneLoRALoaderPath._load(hunyuan_model, path, lora_strength)
@@ -1685,22 +1706,40 @@ class FoleyTuneLoRARangeTester:
                     model, hunyuan_deps, features, seed, steps, cfg_scale,
                     sampler_options=sampler_options,
                 )
-                prefix = f"{base_prefix}_step{st:05d}" if label_with_step else base_prefix
-                res = combiner.combine(
-                    video_features, audio_first, filename_prefix=prefix,
-                    save_output=True, save_metadata=False,
-                )
-                out_path = (res["result"][0] if isinstance(res, dict)
-                            else res[0] if isinstance(res, tuple) else str(res))
-                lines.append(f"  step {st:>6}: {os.path.basename(out_path)}")
+                label = f"step{st:05d}"
+                waveforms.append(audio_first["waveform"])
+                sample_rate = audio_first["sample_rate"]
+                labels.append(label)
+                note = f"  step {st:>6}"
+                if save_videos:
+                    prefix = f"{base_prefix}_step{st:05d}" if label_with_step else base_prefix
+                    res = combiner.combine(
+                        video_features, audio_first, filename_prefix=prefix,
+                        save_output=True, save_metadata=False,
+                    )
+                    out_path = (res["result"][0] if isinstance(res, dict)
+                                else res[0] if isinstance(res, tuple) else str(res))
+                    note += f": {os.path.basename(out_path)}"
+                lines.append(note)
             finally:
                 del model
                 gc.collect()
                 mm.soft_empty_cache()
 
+        # Stack all generations into one batched AUDIO (same video -> same length;
+        # truncate to the shortest as a safety against any off-by-one).
+        if waveforms:
+            min_t = min(w.shape[-1] for w in waveforms)
+            batched = torch.cat([w[..., :min_t] for w in waveforms], dim=0)
+            audio_batch = {"waveform": batched, "sample_rate": sample_rate}
+        else:
+            audio_batch = {"waveform": torch.zeros(1, 1, 1), "sample_rate": 48000}
+        labels_str = "\n".join(labels)
+
         report = "\n".join(lines)
-        logger.info(f"[RangeTester] done: {len(cand)} video(s) saved")
-        return {"ui": {"text": [report]}, "result": (report,)}
+        logger.info(f"[RangeTester] done: {len(cand)} generation(s)"
+                    + (f", {len(cand)} video(s) saved" if save_videos else " (audio-only)"))
+        return {"ui": {"text": [report]}, "result": (audio_batch, labels_str, report)}
 
 
 # -----------------------------------------------------------------------------------

@@ -402,6 +402,11 @@ def extract_lora_svd(delta, rank=0, energy_threshold=0.99, rank_mode="auto"):
     rank_mode='auto': pick the smallest rank retaining ``energy_threshold`` of the
     singular-value energy (capped at the matrix's max rank, and at ``rank`` if > 0).
     rank_mode='fixed': use ``rank`` (capped at max rank).
+
+    Merged deltas are low-rank (sum of input LoRA ranks). When a rank budget is
+    known (``rank`` > 0), a truncated randomized SVD bounded by it is far faster
+    than a full SVD on large layers (e.g. fused QKV), so we use ``svd_lowrank``;
+    SVD runs on the GPU when available. Falls back to a full CPU SVD on any error.
     """
     W = delta.float()
     if W.ndim != 2:
@@ -410,10 +415,24 @@ def extract_lora_svd(delta, rank=0, energy_threshold=0.99, rank_mode="auto"):
     max_rank = min(out_f, in_f)
     if max_rank == 0 or W.abs().max().item() < 1e-12:
         return None
+
+    budget = rank if (rank and rank > 0) else 0
+    dev = "cuda" if torch.cuda.is_available() else W.device
     try:
-        U, S, Vh = torch.linalg.svd(W, full_matrices=False)
+        Wd = W.to(dev)
+        if 0 < budget and (budget + 8) < max_rank:
+            # Truncated/randomized SVD — only the components we could keep.
+            q = min(budget + 8, max_rank)
+            U, S, V = torch.svd_lowrank(Wd, q=q, niter=2)
+            Vh = V.transpose(-2, -1)
+        else:
+            U, S, Vh = torch.linalg.svd(Wd, full_matrices=False)
+        U, S, Vh = U.cpu(), S.cpu(), Vh.cpu()
     except Exception:
-        return None
+        try:
+            U, S, Vh = torch.linalg.svd(W.cpu().float(), full_matrices=False)
+        except Exception:
+            return None
 
     if rank_mode == "fixed" and rank > 0:
         r = min(rank, max_rank)

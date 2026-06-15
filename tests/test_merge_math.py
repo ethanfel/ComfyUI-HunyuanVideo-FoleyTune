@@ -352,6 +352,17 @@ class TestExtractLoraSvd(unittest.TestCase):
         from lora.merge_math import extract_lora_svd
         self.assertIsNone(extract_lora_svd(torch.zeros(8, 8)))
 
+    def test_truncated_path_large_low_rank(self):
+        # Large matrix, low intrinsic rank, with a budget << max_rank -> the
+        # randomized/truncated SVD path. Must still reconstruct accurately.
+        from lora.merge_math import extract_lora_svd
+        torch.manual_seed(5)
+        W = torch.randn(512, 4) @ torch.randn(4, 256)  # rank-4, max_rank=256
+        down, up, r = extract_lora_svd(W, rank=16, energy_threshold=0.999, rank_mode="auto")
+        self.assertLessEqual(r, 16)
+        rel = (up @ down - W).norm() / W.norm()
+        self.assertLess(rel.item(), 0.02)
+
     def test_conv_reshape_roundtrip(self):
         from lora.merge_math import extract_lora_svd
         torch.manual_seed(3)

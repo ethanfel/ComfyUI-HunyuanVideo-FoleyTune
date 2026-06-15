@@ -1583,6 +1583,126 @@ class FoleyTuneVideoCombiner:
                                   "type": output_type, "format": f"video/{src_ext.lstrip('.')}"}]},
                 "result": (str(output_path),)}
 
+class FoleyTuneLoRARangeTester:
+    """Audition every LoRA checkpoint in a step range on one video.
+
+    Point it at a training output folder (containing adapter_step<NNNNN>.pt
+    files), set a step range, and it generates + saves one labeled video per
+    checkpoint (<prefix>_step<NNNNN>) so you can flip through them. Reuses the
+    standard Chunked Sampler + Video Combiner; same seed for every checkpoint so
+    the only thing that changes is the LoRA.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "hunyuan_model": ("FOLEYTUNE_MODEL",),
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
+                "features": ("FOLEYTUNE_FEATURES", {
+                    "tooltip": "Generation features — connect the SAME source you feed the Chunked Sampler (has the prompt/text)."}),
+                "video_features": ("FOLEYTUNE_VIDEO_FEATURES", {
+                    "tooltip": "Video features for muxing — connect the SAME source you feed the Video Combiner (has the video path)."}),
+                "lora_folder": ("STRING", {
+                    "default": "", "tooltip": "Training output dir containing adapter_step<NNNNN>.pt checkpoints."}),
+                "step_start": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 50}),
+                "step_end": ("INT", {"default": 100000, "min": 0, "max": 100000, "step": 50}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "steps": ("INT", {"default": 50, "min": 10, "max": 100, "step": 1}),
+                "cfg_scale": ("FLOAT", {"default": 4.5, "min": 1.0, "max": 10.0, "step": 0.1}),
+            },
+            "optional": {
+                "step_stride": ("INT", {"default": 0, "min": 0, "max": 50000, "step": 50,
+                    "tooltip": "Only test checkpoints whose step is a multiple of this (within the range). 0 = every checkpoint found."}),
+                "max_renders": ("INT", {"default": 0, "min": 0, "max": 200,
+                    "tooltip": "Safety cap: evenly thin to at most this many checkpoints. 0 = no cap."}),
+                "lora_strength": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05}),
+                "filename_prefix": ("STRING", {"default": "",
+                    "tooltip": "Output filename prefix. Empty = the lora_folder's name."}),
+                "label_with_step": ("BOOLEAN", {"default": True,
+                    "tooltip": "Append _step<NNNNN> to each output filename."}),
+                "sampler_options": ("FOLEYTUNE_SAMPLER_OPTIONS",),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("report",)
+    FUNCTION = "run_range"
+    CATEGORY = "FoleyTune"
+    OUTPUT_NODE = True
+
+    def run_range(self, hunyuan_model, hunyuan_deps, features, video_features,
+                  lora_folder, step_start, step_end, seed, steps, cfg_scale,
+                  step_stride=0, max_renders=0, lora_strength=1.0,
+                  filename_prefix="", label_with_step=True, sampler_options=None):
+        import re
+        import gc
+        import glob
+        from .nodes_lora import FoleyTuneLoRALoaderPath
+
+        folder = lora_folder.strip()
+        if not folder or not os.path.isdir(folder):
+            raise FileNotFoundError(f"LoRA folder not found: {folder}")
+
+        # Scan for adapter_step<NNNNN>.pt, parse step, keep those in [start, end].
+        cand = []
+        for p in glob.glob(os.path.join(folder, "adapter_step*.pt")):
+            m = re.search(r"adapter_step0*(\d+)\.pt$", os.path.basename(p))
+            if not m:
+                continue
+            st = int(m.group(1))
+            if step_start <= st <= step_end:
+                if step_stride > 0 and (st % step_stride) != 0:
+                    continue
+                cand.append((st, p))
+        cand.sort()
+        if not cand:
+            raise ValueError(
+                f"No adapter_step*.pt in {folder} within [{step_start}, {step_end}]"
+                + (f" at stride {step_stride}" if step_stride else ""))
+
+        # Optional even-thinning to at most max_renders.
+        if max_renders and len(cand) > max_renders:
+            if max_renders == 1:
+                picks = [len(cand) // 2]
+            else:
+                stepf = (len(cand) - 1) / (max_renders - 1)
+                picks = sorted(set(round(i * stepf) for i in range(max_renders)))
+            cand = [cand[i] for i in picks]
+
+        base_prefix = filename_prefix.strip() or os.path.basename(folder.rstrip("/"))
+        sampler = FoleyTuneChunkedSampler()
+        combiner = FoleyTuneVideoCombiner()
+
+        header = f"LoRA range test: {len(cand)} checkpoint(s) from {os.path.basename(folder.rstrip('/'))} (seed {seed})"
+        logger.info(header)
+        lines = [header]
+        for i, (st, path) in enumerate(cand):
+            logger.info(f"[RangeTester] {i + 1}/{len(cand)} — step {st} — {os.path.basename(path)}")
+            model = FoleyTuneLoRALoaderPath._load(hunyuan_model, path, lora_strength)
+            try:
+                audio_first, _ = sampler.generate_audio(
+                    model, hunyuan_deps, features, seed, steps, cfg_scale,
+                    sampler_options=sampler_options,
+                )
+                prefix = f"{base_prefix}_step{st:05d}" if label_with_step else base_prefix
+                res = combiner.combine(
+                    video_features, audio_first, filename_prefix=prefix,
+                    save_output=True, save_metadata=False,
+                )
+                out_path = (res["result"][0] if isinstance(res, dict)
+                            else res[0] if isinstance(res, tuple) else str(res))
+                lines.append(f"  step {st:>6}: {os.path.basename(out_path)}")
+            finally:
+                del model
+                gc.collect()
+                mm.soft_empty_cache()
+
+        report = "\n".join(lines)
+        logger.info(f"[RangeTester] done: {len(cand)} video(s) saved")
+        return {"ui": {"text": [report]}, "result": (report,)}
+
+
 # -----------------------------------------------------------------------------------
 # NODE MAPPINGS - This is how ComfyUI discovers the nodes.
 # -----------------------------------------------------------------------------------
@@ -1601,6 +1721,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneVideoLoader": FoleyTuneVideoLoader,
     "FoleyTuneVideoLoaderUpload": FoleyTuneVideoLoaderUpload,
     "FoleyTuneVideoCombiner": FoleyTuneVideoCombiner,
+    "FoleyTuneLoRARangeTester": FoleyTuneLoRARangeTester,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneModelLoader": "FoleyTune Model Loader",
@@ -1617,4 +1738,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneVideoLoader": "FoleyTune Video Loader",
     "FoleyTuneVideoLoaderUpload": "FoleyTune Video Loader (Upload)",
     "FoleyTuneVideoCombiner": "FoleyTune Video Combiner",
+    "FoleyTuneLoRARangeTester": "FoleyTune LoRA Range Tester",
 }

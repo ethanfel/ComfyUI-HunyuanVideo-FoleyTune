@@ -829,6 +829,109 @@ class FoleyTuneVAERoundtrip:
 
 # --- Node 2: LoRA Trainer ---------------------------------------------------
 
+class FoleyTuneTrainOptions:
+    """Advanced/experimental settings for the FoleyTune LoRA Trainer.
+
+    Connect to the trainer's `train_options` input to enable auxiliary losses,
+    augmentation, optimizer extras, intensity sub-options, and the eval negative
+    prompt. Every default here is the validated IO recipe (all off / validated
+    values), so attaching this node unchanged is a no-op — only override what you
+    want to experiment with.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "optional": {
+                # ── Auxiliary losses (all off in the IO recipe) ──
+                "cos_sim_weight": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Cosine-similarity aux loss on velocity (phase/correlation alignment). 0.1 to try. 0 = off.",
+                }),
+                "spectral_weight": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 0.5, "step": 0.005,
+                    "tooltip": "Multi-resolution STFT aux loss on the reconstructed clean sample, 2x HF emphasis. 0.02 to try. 0 = off.",
+                }),
+                "hf_phase_switch": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "After this fraction of training, drop t_min/t_max clipping to train the low-noise HF regime. 0.6 to try. 0 = off.",
+                }),
+                "wav_spectral_weight": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Waveform-domain multi-res STFT loss (decodes a crop through DAC, >4kHz error). The only loss that sees true audio HF. 0.1 to try. 0 = off.",
+                }),
+                "wav_spectral_every": ("INT", {"default": 8, "min": 1, "max": 64, "step": 1,
+                    "tooltip": "Compute the waveform spectral loss every N steps (DAC decode is expensive)."}),
+                "wav_spectral_crop": ("INT", {"default": 64, "min": 16, "max": 256, "step": 8,
+                    "tooltip": "Latent-frame crop decoded for the waveform loss (64 ~ 1.3s). Larger = more HF context + VRAM."}),
+                "wav_spectral_adaptive": ("BOOLEAN", {"default": True,
+                    "tooltip": "Energy-adaptive HF weighting (up-weight low-energy bins). Off = flat HF-band L1."}),
+                "temporal_variance_weight": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "SNR-gated multi-scale temporal-diff loss. 0.3 to try. 0 = off.",
+                }),
+                "tv_gate_sigma": ("FLOAT", {"default": 0.3, "min": 0.1, "max": 0.8, "step": 0.05,
+                    "tooltip": "Noise threshold for the temporal loss (fires when t < this). 0.3 default."}),
+                "min_snr_gamma": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 20.0, "step": 1.0,
+                    "tooltip": "Min-SNR loss weighting gamma. 5.0 to try. 0 = off."}),
+                "cfm_lambda": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.5, "step": 0.01,
+                    "tooltip": "Contrastive Flow Matching (arXiv:2506.05350). 0.05 to try. 0 = plain FM. (A wash at fixed LR in our tests.)"}),
+                "channel_weight_mode": (["off", "variance", "inverse"], {"default": "off",
+                    "tooltip": "Per-channel MSE weighting. 'inverse' up-weights HF-carrying low-variance channels. 'off' = uniform."}),
+                "channel_loss_weight": ("BOOLEAN", {"default": False,
+                    "tooltip": "DEPRECATED — use channel_weight_mode."}),
+                # ── Augmentation ──
+                "latent_mixup_alpha": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0,
+                    "tooltip": "Beta-distribution latent interpolation augmentation. 0 = off."}),
+                "latent_noise_sigma": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.1,
+                    "tooltip": "Additive per-element Gaussian noise on target latents. 0 = off."}),
+                "ema_decay": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.9999, "step": 0.0001,
+                    "tooltip": "EMA decay for LoRA weights, applied at save. 0.9995 to try. 0 = off."}),
+                "visual_dropout_prob": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.95, "step": 0.05,
+                    "tooltip": "Per-sample probability of zeroing visual features (decouples identity from sound). 0.5 for generic-style; 0 = identity-preserving."}),
+                "vd_curriculum_ratio": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Ramp visual dropout from 10%% of base to full over this fraction of training. 0 = off."}),
+                # ── Optimizer extras ──
+                "prodigy_d_coef": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 10.0, "step": 0.01,
+                    "tooltip": "Prodigy d_coef: scales the learned step size. Prodigy/Prodigy+ only."}),
+                "prodigy_growth_rate": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100.0, "step": 0.1,
+                    "tooltip": "Prodigy growth_rate: max multiplicative d increase per step. 0 = unlimited. Prodigy only."}),
+                "prodigy_steps": ("INT", {"default": 0, "min": 0, "max": 50000, "step": 100,
+                    "tooltip": "Prodigy+ steps cap for d-adaptation. 0 = off."}),
+                "use_cautious": ("BOOLEAN", {"default": False,
+                    "tooltip": "Prodigy+ cautious updates (sign-aligned). Reaches quality ~1k steps earlier, brighter. Prodigy+ only."}),
+                "use_orthograd": ("BOOLEAN", {"default": False,
+                    "tooltip": "Prodigy+ orthograd. Tested WORSE for foley (TV collapses). Prodigy+ only."}),
+                # ── LoRA extras ──
+                "init_mode": (["standard", "pissa"], {"default": "standard",
+                    "tooltip": "standard (Kaiming A, zero B) or pissa (SVD-based)."}),
+                "use_rslora": ("BOOLEAN", {"default": False,
+                    "tooltip": "Rank-stabilized scaling alpha/sqrt(rank) instead of alpha/rank."}),
+                "lora_plus_ratio": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 32.0,
+                    "tooltip": "B-matrix LR multiplier (LoRA+). >1 overfits on small/medium foley sets — keep 1.0."}),
+                # ── Intensity sub-options (intensity_bias is on the main node) ──
+                "intensity_metric": (["energy", "tv"], {"default": "energy",
+                    "tooltip": "Intensity metric for the weighted sampler. energy = mean latent energy (raises level + cleans moan); tv = std/mean burstiness (pure dynamics)."}),
+                # ── Misc ──
+                "eval_negative_prompt": ("STRING", {"default": "noisy, harsh",
+                    "tooltip": "Negative prompt for the eval-sample CFG uncond branch (CLAP-encoded), matching production. Empty = legacy zero uncond."}),
+                "gradient_checkpointing": ("BOOLEAN", {"default": False,
+                    "tooltip": "Recompute activations to save VRAM (~3-5 GB, ~25%% slower)."}),
+                "freeze_blocks": ("INT", {"default": 0, "min": 0, "max": 17, "step": 1,
+                    "tooltip": "Freeze the first N triple_blocks during finetuning. 0 = train all."}),
+            },
+        }
+
+    RETURN_TYPES = ("TRAIN_OPTIONS",)
+    RETURN_NAMES = ("train_options",)
+    FUNCTION = "build"
+    CATEGORY = "FoleyTune"
+    DESCRIPTION = "Advanced/experimental training settings; plug into the LoRA Trainer's train_options. Defaults = IO recipe (no-op)."
+
+    def build(self, **kwargs):
+        return (dict(kwargs),)
+
+
 class FoleyTuneLoRATrainer:
     """Train a LoRA adapter for FoleyTune via flow matching."""
 
@@ -840,131 +943,60 @@ class FoleyTuneLoRATrainer:
                 "hunyuan_deps": ("FOLEYTUNE_DEPS",),
                 "data_dir": ("STRING", {"default": ""}),
                 "output_dir": ("STRING", {"default": ""}),
-                "target": (list(FOLEY_TARGET_PRESETS.keys()), {"default": "all_attn_mlp"}),
-                "rank": ("INT", {"default": 128, "min": 4, "max": 128, "step": 4}),
-                "alpha": ("FLOAT", {"default": 128.0, "min": 1.0, "max": 128.0}),
-                "lr": ("FLOAT", {"default": 1e-4, "min": 1e-6, "max": 1e-2, "step": 1e-5}),
-                "steps": ("INT", {"default": 15000, "min": 100, "max": 50000}),
+                "target": (list(FOLEY_TARGET_PRESETS.keys()), {"default": "all_blocks_sync_io"}),
+                "rank": ("INT", {"default": 32, "min": 4, "max": 128, "step": 4}),
+                "alpha": ("FLOAT", {"default": 32.0, "min": 1.0, "max": 128.0}),
+                "lr": ("FLOAT", {"default": 5e-5, "min": 1e-6, "max": 1e-2, "step": 1e-5}),
+                "steps": ("INT", {"default": 7000, "min": 100, "max": 50000}),
                 "batch_size": ("INT", {"default": 8, "min": 1, "max": 64}),
                 "grad_accum": ("INT", {"default": 1, "min": 1, "max": 32}),
-                "warmup_steps": ("INT", {"default": 100, "min": 0, "max": 2000}),
-                "save_every": ("INT", {"default": 500, "min": 50, "max": 10000}),
-                "timestep_mode": (["uniform", "logit_normal", "curriculum"], {"default": "curriculum"}),
+                "warmup_steps": ("INT", {"default": 0, "min": 0, "max": 2000}),
+                "save_every": ("INT", {"default": 250, "min": 50, "max": 10000}),
+                "timestep_mode": (["uniform", "logit_normal", "curriculum"], {"default": "uniform"}),
                 "precision": (["bf16", "fp16", "fp32"], {"default": "bf16"}),
                 "seed": ("INT", {"default": 42}),
             },
             "optional": {
-                "logit_normal_sigma": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 3.0}),
+                # ── The validated IO recipe (what you actually set/tune) ──
+                "logit_normal_sigma": ("FLOAT", {"default": 0.8, "min": 0.1, "max": 3.0}),
                 "curriculum_switch": ("FLOAT", {"default": 0.6, "min": 0.1, "max": 0.9}),
-                "init_mode": (["standard", "pissa"], {"default": "standard"}),
-                "use_rslora": ("BOOLEAN", {"default": False}),
-                "lora_dropout": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.3}),
-                "lora_plus_ratio": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 32.0}),
+                "lora_dropout": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 0.3}),
                 "schedule_type": (["constant", "cosine"], {"default": "constant"}),
-                "latent_mixup_alpha": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0}),
-                "latent_noise_sigma": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.1}),
                 "noise_offset": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 0.1, "step": 0.005,
-                    "tooltip": "Per-sample channel-uniform noise added to latents before flow matching. Improves dynamic range unlike latent_noise_sigma which is per-element.",
-                }),
-                "min_snr_gamma": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 20.0, "step": 1.0,
-                    "tooltip": "Min-SNR loss weighting gamma. Downweights high-noise timesteps where gradients are noisy. 5.0 recommended. 0 = disabled.",
-                }),
-                "ema_decay": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 0.9999, "step": 0.0001,
-                    "tooltip": "EMA decay for LoRA weights. Smooths training, used at save time. 0.9995 recommended for fine-tuning. 0 = disabled.",
-                }),
-                "cos_sim_weight": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Weight for cosine similarity auxiliary loss on velocity. Directly targets phase/correlation alignment. 0.1 recommended. 0 = disabled.",
-                }),
-                "spectral_weight": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 0.5, "step": 0.005,
-                    "tooltip": "Weight for multi-resolution STFT auxiliary loss. Reconstructs predicted clean sample and penalises frequency-domain error with 2x HF emphasis. Preserves high-frequency energy when timestep clipping removes the low-noise HF learning regime. 0.02 recommended. 0 = disabled.",
-                }),
-                "hf_phase_switch": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Two-phase curriculum for HF recovery. After this fraction of training, t_min/t_max clipping is removed so the model trains on full timestep range including the low-noise regime where HF detail is learned. Use with spectral_weight for best results. 0.6 recommended. 0 = disabled.",
-                }),
-                "wav_spectral_weight": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Weight for WAVEFORM-domain multi-res STFT loss. Reconstructs the predicted clean latent, decodes a crop through DAC (differentiable), and penalises >4kHz error on the real 48kHz audio. This is the only loss that sees true audio HF (latent STFT cannot). 0.1 recommended. 0 = disabled.",
-                }),
-                "wav_spectral_every": ("INT", {
-                    "default": 8, "min": 1, "max": 64, "step": 1,
-                    "tooltip": "Compute the waveform spectral loss every N steps (DAC decode is expensive). 8 recommended.",
-                }),
-                "wav_spectral_crop": ("INT", {
-                    "default": 64, "min": 16, "max": 256, "step": 8,
-                    "tooltip": "Latent-frame crop length decoded for the waveform loss (64 frames ~ 1.3s at 50fps). Larger = more HF context, more VRAM.",
-                }),
-                "wav_spectral_adaptive": ("BOOLEAN", {
-                    "default": True,
-                    "tooltip": "Energy-adaptive HF weighting: scale HF error by 1/sqrt(target magnitude) to up-weight low-energy time-frequency bins (the collapsed HF). Off = flat HF-band L1.",
-                }),
-                "channel_weight_mode": (["off", "variance", "inverse"], {
-                    "default": "off",
-                    "tooltip": "Per-channel MSE weighting. 'variance' up-weights high-variance LF-bulk channels (legacy). 'inverse' up-weights low-variance channels that carry HF detail — counters diffusion spectral bias. 'off' = uniform.",
-                }),
-                "cfm_lambda": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 0.5, "step": 0.01,
-                    "tooltip": "Contrastive Flow Matching (arXiv:2506.05350). Subtracts lambda x MSE to a different batch sample's velocity target, pushing predicted flows apart to prevent conditional-mean over-smoothing (the 'messy'/flat high-PBC failure mode). 0.05 recommended. 0 = plain FM.",
-                }),
-                "channel_loss_weight": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "DEPRECATED — use channel_weight_mode. When true and mode is off, applies legacy 'variance' weighting.",
-                }),
-                "temporal_variance_weight": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Weight for SNR-gated multi-scale temporal diff loss. Penalises missed temporal transitions at low noise levels. 0.3 recommended. 0 = disabled.",
-                }),
-                "tv_gate_sigma": ("FLOAT", {
-                    "default": 0.3, "min": 0.1, "max": 0.8, "step": 0.05,
-                    "tooltip": "Noise threshold for temporal loss gating. Loss only fires when t < this value (low noise = visible temporal structure). 0.3 recommended.",
-                }),
-                "vd_curriculum_ratio": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Visual dropout curriculum. Ramps dropout from 10% of base to full over this fraction of training. Forces sync learning early, spectral quality later. 0.4 recommended. 0 = disabled.",
+                    "default": 0.03, "min": 0.0, "max": 0.1, "step": 0.005,
+                    "tooltip": "Per-sample channel-uniform noise on latents. Improves dynamic range. 0.03 = validated recipe.",
                 }),
                 "t_min": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 0.2, "step": 0.01,
-                    "tooltip": "Minimum timestep for sampling. Avoids near-clean timesteps. 0.05 recommended.",
+                    "default": 0.05, "min": 0.0, "max": 0.2, "step": 0.01,
+                    "tooltip": "Minimum timestep for sampling (sync clipping). 0.05 = validated.",
                 }),
                 "t_max": ("FLOAT", {
-                    "default": 1.0, "min": 0.8, "max": 1.0, "step": 0.01,
-                    "tooltip": "Maximum timestep for sampling. Avoids near-noise timesteps. 0.95 recommended.",
+                    "default": 0.95, "min": 0.8, "max": 1.0, "step": 0.01,
+                    "tooltip": "Maximum timestep for sampling. 0.95 = validated.",
                 }),
                 "t_range_mode": (["clamp", "rescale"], {
-                    "default": "clamp",
-                    "tooltip": "How to restrict t to [t_min, t_max]. clamp = clip out-of-range draws to the boundary (historical; leaves ~5% point masses at each boundary for uniform sampling). rescale = affine-map into the range, no boundary spikes.",
+                    "default": "rescale",
+                    "tooltip": "How to restrict t to [t_min, t_max]. rescale = affine-map (no boundary spikes); clamp = historical clip.",
                 }),
-                "optimizer_type": (["adamw", "prodigy", "prodigy_plus"], {"default": "adamw"}),
-                "prodigy_d_coef": ("FLOAT", {
-                    "default": 1.0, "min": 0.01, "max": 10.0, "step": 0.01,
-                    "tooltip": "Prodigy d_coef: scales the learned step size. Lower values (e.g. 0.5) reduce effective lr. Only used with Prodigy optimizer.",
+                "optimizer_type": (["adamw", "prodigy", "prodigy_plus"], {"default": "prodigy_plus"}),
+                "schedulefree_c": ("FLOAT", {
+                    "default": 20.0, "min": 0.0, "max": 100.0, "step": 1.0,
+                    "tooltip": "Prodigy+ schedule-free averaging window. 20 = the validated sfc20 recipe (less averaging = sharper, runs long without washing). 0 = optimizer default. Only used with prodigy_plus.",
                 }),
-                "prodigy_growth_rate": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 100.0, "step": 0.1,
-                    "tooltip": "Prodigy growth_rate: max multiplicative increase of d per step. 0 = unlimited (inf). E.g. 1.02 = max 2%% growth per step. Only used with Prodigy optimizer.",
-                }),
-                "visual_dropout_prob": ("FLOAT", {
-                    "default": 0.0, "min": 0.0, "max": 0.95, "step": 0.05,
-                    "tooltip": "Per-sample probability of zeroing visual features during training. Forces the text channel to carry audio-character signal, decoupling identity from sound. Use 0.5 for generic-style LoRAs (no performer binding); leave 0.0 for identity-preserving LoRAs.",
-                }),
-                "gradient_checkpointing": ("BOOLEAN", {"default": False}),
-                "freeze_blocks": ("INT", {
-                    "default": 0, "min": 0, "max": 17, "step": 1,
-                    "tooltip": "Number of early triple_blocks to freeze during finetuning. LoRA weights in blocks 0..N-1 keep their pretrained values. Useful for adapting a pretrained LoRA to a small dataset without catastrophic forgetting. 0 = train all blocks.",
+                "intensity_bias": ("FLOAT", {
+                    "default": 0.5, "min": 0.0, "max": 2.0, "step": 0.1,
+                    "tooltip": "Intensity-weighted clip sampling: draw clips ~ energy^alpha, biasing toward energetic clips (cleaner moan + more dynamics). 0.5 = validated. 0 = uniform sampling.",
                 }),
                 "resume_from": ("STRING", {"default": ""}),
                 "dataset_json": ("STRING", {
                     "default": "",
                     "tooltip": "Path to dataset.json (or comma-separated paths for multiple datasets). When set, uses train/val split instead of scanning data_dir for all .npz files.",
                 }),
-                "eval_negative_prompt": ("STRING", {
-                    "default": "",
-                    "tooltip": "Negative prompt for the eval-sample CFG uncond branch (CLAP-encoded), matching production inference. Empty = legacy zero-embedding uncond. Production default: 'noisy, harsh'.",
+                # Advanced/experimental settings (aux losses, augmentation, optimizer
+                # extras) live on the FoleyTune Train Options node — defaults to the IO
+                # recipe (all off) when not connected.
+                "train_options": ("TRAIN_OPTIONS", {
+                    "tooltip": "Optional: attach a FoleyTune Train Options node to enable advanced/experimental settings (aux losses, augmentation, optimizer extras, intensity sub-options, eval negative prompt). Leave unconnected for the validated IO recipe.",
                 }),
             },
         }
@@ -1000,7 +1032,44 @@ class FoleyTuneLoRATrainer:
               freeze_blocks=0,
               resume_from="", dataset_json="",
               prodigy_d_coef=1.0, prodigy_growth_rate=0.0,
-              eval_negative_prompt=""):
+              eval_negative_prompt="noisy, harsh",
+              schedulefree_c=20, intensity_bias=0.5, intensity_metric="energy",
+              use_cautious=False, use_orthograd=False, prodigy_steps=0,
+              train_options=None):
+
+        # Advanced/experimental settings come from the optional Train Options node;
+        # unconnected -> the IO-recipe defaults above (all off / validated values).
+        _o = train_options or {}
+        init_mode = _o.get("init_mode", init_mode)
+        use_rslora = _o.get("use_rslora", use_rslora)
+        lora_plus_ratio = _o.get("lora_plus_ratio", lora_plus_ratio)
+        latent_mixup_alpha = _o.get("latent_mixup_alpha", latent_mixup_alpha)
+        latent_noise_sigma = _o.get("latent_noise_sigma", latent_noise_sigma)
+        min_snr_gamma = _o.get("min_snr_gamma", min_snr_gamma)
+        ema_decay = _o.get("ema_decay", ema_decay)
+        cos_sim_weight = _o.get("cos_sim_weight", cos_sim_weight)
+        spectral_weight = _o.get("spectral_weight", spectral_weight)
+        hf_phase_switch = _o.get("hf_phase_switch", hf_phase_switch)
+        wav_spectral_weight = _o.get("wav_spectral_weight", wav_spectral_weight)
+        wav_spectral_every = _o.get("wav_spectral_every", wav_spectral_every)
+        wav_spectral_crop = _o.get("wav_spectral_crop", wav_spectral_crop)
+        wav_spectral_adaptive = _o.get("wav_spectral_adaptive", wav_spectral_adaptive)
+        channel_weight_mode = _o.get("channel_weight_mode", channel_weight_mode)
+        cfm_lambda = _o.get("cfm_lambda", cfm_lambda)
+        channel_loss_weight = _o.get("channel_loss_weight", channel_loss_weight)
+        temporal_variance_weight = _o.get("temporal_variance_weight", temporal_variance_weight)
+        tv_gate_sigma = _o.get("tv_gate_sigma", tv_gate_sigma)
+        vd_curriculum_ratio = _o.get("vd_curriculum_ratio", vd_curriculum_ratio)
+        visual_dropout_prob = _o.get("visual_dropout_prob", visual_dropout_prob)
+        prodigy_d_coef = _o.get("prodigy_d_coef", prodigy_d_coef)
+        prodigy_growth_rate = _o.get("prodigy_growth_rate", prodigy_growth_rate)
+        prodigy_steps = _o.get("prodigy_steps", prodigy_steps)
+        use_cautious = _o.get("use_cautious", use_cautious)
+        use_orthograd = _o.get("use_orthograd", use_orthograd)
+        intensity_metric = _o.get("intensity_metric", intensity_metric)
+        eval_negative_prompt = _o.get("eval_negative_prompt", eval_negative_prompt)
+        gradient_checkpointing = _o.get("gradient_checkpointing", gradient_checkpointing)
+        freeze_blocks = _o.get("freeze_blocks", freeze_blocks)
 
         import random
         device = mm.get_torch_device()
@@ -1027,6 +1096,9 @@ class FoleyTuneLoRATrainer:
             dataset_json, prodigy_d_coef, prodigy_growth_rate,
             t_range_mode=t_range_mode,
             eval_negative_prompt=eval_negative_prompt,
+            schedulefree_c=schedulefree_c, intensity_bias=intensity_bias,
+            intensity_metric=intensity_metric, use_cautious=use_cautious,
+            use_orthograd=use_orthograd, prodigy_steps=prodigy_steps,
         )
 
     def _train_inner(self, hunyuan_model, hunyuan_deps, data_dir, output_dir, target, rank,
@@ -1045,7 +1117,9 @@ class FoleyTuneLoRATrainer:
                      gradient_checkpointing, freeze_blocks, resume_from,
                      dataset_json="",
                      prodigy_d_coef=1.0, prodigy_growth_rate=0.0,
-                     t_range_mode="clamp", eval_negative_prompt=""):
+                     t_range_mode="clamp", eval_negative_prompt="",
+                     schedulefree_c=20, intensity_bias=0.5, intensity_metric="energy",
+                     use_cautious=False, use_orthograd=False, prodigy_steps=0):
         import random
 
         torch.manual_seed(seed)
@@ -1166,8 +1240,12 @@ class FoleyTuneLoRATrainer:
             for pg in param_groups:
                 pg.pop("lr", None)
             optimizer = ProdigyPlusScheduleFree(param_groups, lr=1.0, betas=(0.9, 0.999), weight_decay=0.01,
-                                               d_coef=prodigy_d_coef)
+                                               d_coef=prodigy_d_coef, prodigy_steps=int(prodigy_steps),
+                                               use_cautious=bool(use_cautious), schedulefree_c=float(schedulefree_c),
+                                               use_orthograd=bool(use_orthograd))
             optimizer.train()
+            logger.info(f"Prodigy+ Schedule-Free: d_coef={prodigy_d_coef}, sf_c={schedulefree_c}, "
+                        f"cautious={use_cautious}, orthograd={use_orthograd}, prodigy_steps={prodigy_steps}")
             logger.info(f"Using Prodigy+ Schedule-Free (d_coef={prodigy_d_coef}, wd=0.01)")
         else:
             optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.01)
@@ -1260,6 +1338,9 @@ class FoleyTuneLoRATrainer:
             "optimizer_type": optimizer_type,
             "gradient_checkpointing": gradient_checkpointing,
             "freeze_blocks": freeze_blocks,
+            "schedulefree_c": schedulefree_c, "intensity_bias": intensity_bias,
+            "intensity_metric": intensity_metric, "use_cautious": use_cautious,
+            "use_orthograd": use_orthograd, "prodigy_steps": prodigy_steps,
             "n_clips": n_clips, "precision": precision, "seed": seed,
         }
 
@@ -1352,6 +1433,23 @@ class FoleyTuneLoRATrainer:
         logger.info(f"Starting training: {steps} steps, batch {batch_size}, lr {lr}")
         t_start = time.time()
 
+        # Optional intensity-weighted sampling (single-dataset): draw clips with
+        # probability ~ intensity^alpha, biasing toward energetic/dynamic clips.
+        # intensity from the DAC-latent per-frame energy envelope; 'energy' = mean,
+        # 'tv' = std/mean (burstiness). Off (uniform) when intensity_bias <= 0.
+        _sample_w = None
+        if float(intensity_bias) > 0:
+            _scores = []
+            for _d in dataset:
+                _env = _d["latents"][0].float().pow(2).sum(0).clamp(min=1e-12).sqrt()  # [T]
+                _m = _env.mean().clamp(min=1e-8)
+                _scores.append(max((_env.std() / _m).item() if intensity_metric == "tv" else _m.item(), 1e-8))
+            _w = np.asarray(_scores, dtype=np.float64) ** float(intensity_bias)
+            if np.isfinite(_w.sum()) and _w.sum() > 0:
+                _sample_w = _w / _w.sum()
+                logger.info(f"Intensity sampling: bias={intensity_bias} metric={intensity_metric} "
+                            f"(top {_sample_w.max()*n_clips:.2f}x, bottom {_sample_w.min()*n_clips:.2f}x vs uniform)")
+
         step = start_step  # default in case loop doesn't execute
         for step in range(start_step, steps):
             mm.throw_exception_if_processing_interrupted()
@@ -1365,8 +1463,11 @@ class FoleyTuneLoRATrainer:
 
             model.train()
 
-            # Sample batch
-            indices = [np.random.randint(0, n_clips) for _ in range(batch_size)]
+            # Sample batch (intensity-weighted if enabled, else uniform)
+            if _sample_w is not None:
+                indices = np.random.choice(n_clips, size=batch_size, p=_sample_w).tolist()
+            else:
+                indices = [np.random.randint(0, n_clips) for _ in range(batch_size)]
             batch_latents = torch.cat([dataset[i]["latents"] for i in indices], dim=0).to(device, dtype=dtype)
             batch_clip = torch.cat([dataset[i]["clip_features"] for i in indices], dim=0)
             batch_sync = torch.cat([dataset[i]["sync_features"] for i in indices], dim=0)
@@ -3405,6 +3506,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneFeatureExtractor": FoleyTuneFeatureExtractor,
     "FoleyTuneBatchFeatureExtractor": FoleyTuneBatchFeatureExtractor,
     "FoleyTuneLoRATrainer": FoleyTuneLoRATrainer,
+    "FoleyTuneTrainOptions": FoleyTuneTrainOptions,
     "FoleyTuneLoRALoader": FoleyTuneLoRALoader,
     "FoleyTuneLoRALoaderPath": FoleyTuneLoRALoaderPath,
     "FoleyTuneLoRATimelineEntry": FoleyTuneLoRATimelineEntry,
@@ -3419,6 +3521,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneFeatureExtractor": "FoleyTune Feature Extractor",
     "FoleyTuneBatchFeatureExtractor": "FoleyTune Batch Feature Extractor",
     "FoleyTuneLoRATrainer": "FoleyTune LoRA Trainer",
+    "FoleyTuneTrainOptions": "FoleyTune Train Options",
     "FoleyTuneLoRALoader": "FoleyTune LoRA Loader",
     "FoleyTuneLoRALoaderPath": "FoleyTune LoRA Loader (Path)",
     "FoleyTuneLoRATimelineEntry": "FoleyTune LoRA Timeline Entry",

@@ -353,6 +353,37 @@ class FoleyTuneDatasetCompressor:
 
 # ─── Node 4b: Mains Hum Notch ────────────────────────────────────────────────
 
+def _detect_mains_hz(mono_np, sr):
+    """Detect whether a clip carries 50 Hz or 60 Hz mains hum (or neither).
+
+    Mains hum is a sharp narrowband line at the fundamental and/or its low
+    harmonics. Compare the spectral prominence (peak vs local broadband floor)
+    of the 50 Hz family (50/100) against the 60 Hz family (60/120) and return
+    whichever is clearly present, else None. Lets a mixed-origin (online)
+    dataset get each clip notched at its OWN correct mains frequency.
+    """
+    from scipy.signal import welch
+
+    n = mono_np.shape[0]
+    if n < sr // 2:  # need ~0.5 s for a usable low-frequency PSD
+        return None
+    nper = int(min(n, sr))  # ~1 s window -> ~1 Hz resolution (resolves 50 vs 60)
+    f, P = welch(mono_np, fs=sr, nperseg=nper)
+    PdB = 10.0 * np.log10(P + 1e-12)
+
+    def prominence(f0):
+        peak = PdB[(f >= f0 - 1.5) & (f <= f0 + 1.5)]
+        floor = PdB[((f >= f0 - 20) & (f <= f0 - 4)) | ((f >= f0 + 4) & (f <= f0 + 20))]
+        if peak.size == 0 or floor.size == 0:
+            return -np.inf
+        return float(peak.max() - np.median(floor))
+
+    p50 = max(prominence(50.0), prominence(100.0))
+    p60 = max(prominence(60.0), prominence(120.0))
+    best, score = (50.0, p50) if p50 >= p60 else (60.0, p60)
+    return best if score >= 6.0 else None  # >=6 dB peak prominence = a real hum line
+
+
 class FoleyTuneDatasetHumNotch:
     """Surgically remove mains hum (50/60 Hz fundamental + low harmonics) with narrow IIR notches.
 
@@ -370,10 +401,14 @@ class FoleyTuneDatasetHumNotch:
         return {
             "required": {
                 "dataset": (FOLEYTUNE_AUDIO_DATASET,),
-                "mains_hz": (["50", "60"], {
-                    "default": "50",
-                    "tooltip": "Mains frequency: 50 Hz (EU/France/Asia/Africa) or 60 Hz "
-                               "(Americas). Notches this fundamental + its harmonics.",
+                "mains_hz": (["auto", "50", "60", "50+60"], {
+                    "default": "auto",
+                    "tooltip": "Which mains line to notch. ONLINE / mixed-origin content has unknown "
+                               "shoot location (a US studio = 60 Hz, EU = 50 Hz), so default 'auto' "
+                               "detects 50 vs 60 Hz PER CLIP from its spectrum and skips clips with no "
+                               "hum. '50+60' notches both families unconditionally (the notches are so "
+                               "narrow that notching an absent line costs ~nothing). '50' (EU/Asia/"
+                               "Africa) / '60' (Americas) force one frequency.",
                 }),
                 "max_notch_hz": ("FLOAT", {
                     "default": 150.0, "min": 50.0, "max": 500.0, "step": 10.0,
@@ -399,19 +434,32 @@ class FoleyTuneDatasetHumNotch:
         "Tonal hum only — leaves broadband room tone and breath/wet texture intact (unlike denoise)."
     )
 
-    def notch(self, dataset, mains_hz="50", max_notch_hz=150.0, q=30.0):
+    def notch(self, dataset, mains_hz="auto", max_notch_hz=150.0, q=30.0):
         from scipy.signal import iirnotch, filtfilt
 
-        f0 = float(mains_hz)
+        def harmonics(f0, nyq):
+            return [f0 * k for k in range(1, int(max_notch_hz // f0) + 1) if f0 * k < nyq * 0.95]
+
         out = []
-        applied_freqs = []
+        counts = {"50": 0, "60": 0, "both": 0, "none": 0}
         for item in dataset:
             wav = item["waveform"][0]  # [C, L]
             sr = item["sample_rate"]
             nyq = sr / 2.0
 
-            # harmonics of the mains line, up to the cap and safely below Nyquist
-            freqs = [f0 * k for k in range(1, int(max_notch_hz // f0) + 1) if f0 * k < nyq * 0.95]
+            # decide which mains family/families to notch for THIS clip
+            if mains_hz == "auto":
+                det = _detect_mains_hz(wav.mean(0).double().numpy(), sr)
+                bases = [det] if det else []
+                counts["50" if det == 50.0 else "60" if det == 60.0 else "none"] += 1
+            elif mains_hz == "50+60":
+                bases = [50.0, 60.0]
+                counts["both"] += 1
+            else:
+                bases = [float(mains_hz)]
+                counts[mains_hz] += 1
+
+            freqs = sorted({f for b in bases for f in harmonics(b, nyq)})
             if not freqs or wav.shape[-1] < 32:
                 out.append(item)
                 continue
@@ -420,16 +468,22 @@ class FoleyTuneDatasetHumNotch:
             for fc in freqs:
                 b, a = iirnotch(fc, q, fs=sr)
                 x = filtfilt(b, a, x, axis=-1)
-            applied_freqs = freqs
 
             new_item = dict(item)  # preserve origin_name and any extra keys
-            new_item["waveform"] = torch.from_numpy(x).float().unsqueeze(0)
+            # filtfilt can return a negative-stride view -> ascontiguousarray for torch
+            new_item["waveform"] = torch.from_numpy(np.ascontiguousarray(x)).float().unsqueeze(0)
             out.append(new_item)
 
-        lines = ", ".join(f"{f:.0f}" for f in applied_freqs) if applied_freqs else "none"
+        if mains_hz == "auto":
+            summary = (f"auto-detected {counts['50']}x50Hz, {counts['60']}x60Hz, "
+                       f"{counts['none']}x no-hum (skipped untouched)")
+        elif mains_hz == "50+60":
+            summary = f"notched BOTH 50+60 Hz families on all {counts['both']} clips"
+        else:
+            summary = f"notched {mains_hz} Hz family on all {counts[mains_hz]} clips"
         print(
-            f"[FoleyTuneDatasetHumNotch] {len(out)} clips: notched {f0:.0f} Hz mains hum "
-            f"at [{lines}] Hz  Q={q:.0f}  (tonal-only, breath/room-tone preserved)",
+            f"[FoleyTuneDatasetHumNotch] {len(out)} clips: {summary}  "
+            f"(<={max_notch_hz:.0f}Hz, Q={q:.0f}, tonal-only, breath/room-tone preserved)",
             flush=True,
         )
         return (out,)

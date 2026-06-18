@@ -1241,7 +1241,8 @@ class TimelineEditor {
                     const arr = JSON.parse(cand);
                     if (Array.isArray(arr) && arr.length) {
                         this[spec.env] = arr
-                            .filter(p => Array.isArray(p) && p.length >= 2)
+                            .filter(p => Array.isArray(p) && p.length >= 2
+                                    && Number.isFinite(+p[0]) && Number.isFinite(+p[1]))
                             .map(p => ({ t: +p[0], v: Math.max(spec.min, Math.min(spec.max, +p[1])) }));
                         loaded = true;
                         break;

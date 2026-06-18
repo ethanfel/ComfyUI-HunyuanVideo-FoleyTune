@@ -895,22 +895,30 @@ def chunked_denoise_process(
     device = model_dict.device
     audio_frame_rate = cfg.model_config.model_kwargs.audio_frame_rate
     latent_dim = cfg.model_config.model_kwargs.audio_vae_latent_dim
+    # Seam overlap in latent frames, CLAMPED to strictly less than both adjacent
+    # chunk lengths. A short zone (or sub-split remainder) shorter than the SaFa
+    # overlap would otherwise make the overlap exceed the chunk → safa_binary_swap
+    # mask mismatch / negative stitch slices. <=0 means a hard cut (touch/gap).
+    _chunk_lens = [int((ce - cs) * audio_frame_rate) for cs, ce in chunks]
     pair_overlap_frames = [
-        int((chunks[i][1] - chunks[i + 1][0]) * audio_frame_rate)
+        max(0, min(int((chunks[i][1] - chunks[i + 1][0]) * audio_frame_rate),
+                   _chunk_lens[i] - 1, _chunk_lens[i + 1] - 1))
         for i in range(len(chunks) - 1)
     ]
     sample_rate = model_dict.dac_model.sample_rate
 
-    # Per-chunk seam blend: each chunk's zone chooses how its LEFT seam joins the
-    # previous chunk — "safa" (binary-swap during denoising, HF-safe; default) or
-    # "xfade" (denoise independently, equal-power crossfade at stitch; smoother
-    # across very different zones but dulls HF in the overlap). A 0-overlap seam
-    # is a hard cut regardless. Normal (non-timeline) sampling is all "safa".
-    _chunk_blend = [
-        (_segment_at_time(lora_schedule, (cs + ce) / 2.0).get("blend", "safa")
-         if (lora_schedule and _segment_at_time(lora_schedule, (cs + ce) / 2.0)) else "safa")
-        for cs, ce in chunks
-    ]
+    # Per-seam blend (indexed by the RIGHT chunk; seam i joins chunk i-1→i).
+    # A zone picks "safa" (binary swap, HF-safe; default) or "xfade" (equal-power
+    # crossfade; smoother across very different zones, dulls HF) for its LEFT seam.
+    # Sub-split chunks of the SAME zone always blend SaFa internally (xfade must
+    # not leak into a zone's own seams). Normal (non-timeline) sampling = all safa.
+    _chunk_seg = [(_segment_at_time(lora_schedule, (cs + ce) / 2.0) if lora_schedule else None)
+                  for cs, ce in chunks]
+    _seam_blend = ["safa"]  # index 0 unused (first chunk has no left seam)
+    for i in range(1, len(chunks)):
+        _l, _r = _chunk_seg[i - 1], _chunk_seg[i]
+        _seam_blend.append("safa" if (_l is not None and _l is _r)
+                           else (_r.get("blend", "safa") if _r else "safa"))
     # Optional automation envelopes ([[t, v], ...]) — sampled at each chunk's
     # centre, overriding the scalar when present. variance → per-zone variance;
     # cfg → the guidance multiplier in the CFG combine (only effective when the
@@ -1255,7 +1263,7 @@ def chunked_denoise_process(
                 if crossfade_mode == "safa" and keep_windows is None:
                     for c_idx in range(len(chunks) - 1):
                         ovl = pair_overlap_frames[c_idx]
-                        if ovl > 0 and _chunk_blend[c_idx + 1] == "safa":
+                        if ovl > 0 and _seam_blend[c_idx + 1] == "safa":
                             safa_binary_swap(
                                 chunk_latents[c_idx], chunk_latents[c_idx + 1],
                                 ovl, step_idx
@@ -1304,7 +1312,7 @@ def chunked_denoise_process(
             nxt = chunk_latents[c_idx]
             if ovl <= 0:
                 full_latent = torch.cat([full_latent, nxt], dim=-1)
-            elif _chunk_blend[c_idx] == "xfade":
+            elif _seam_blend[c_idx] == "xfade":
                 full_latent = equal_power_crossfade(full_latent, nxt, ovl, dim=-1)
             else:  # safa — meet at the overlap midpoint
                 h = ovl // 2

@@ -2064,7 +2064,7 @@ class FoleyTuneLoRATimeline:
             except (TypeError, ValueError):
                 return []
         var_env = _parse_env(variance_env, 0.0, 1.0)
-        cfg_env_p = _parse_env(cfg_env, 1.0, 30.0)
+        cfg_env_p = _parse_env(cfg_env, 1.0, 10.0)  # matches the lane's cfg range
 
         # fps (loader's video_features > features > 30 fallback) drives the
         # frame-based ruler.

@@ -1875,11 +1875,12 @@ class FoleyTuneLoRATimelineEntry:
                                "Needs hunyuan_deps on the Timeline node. Describe the full audio "
                                "texture — narrow prompts hurt prompt-following.",
                 }),
-                "seed": ("INT", {
-                    "default": -1, "min": -1, "max": 0xffffffffffffffff,
-                    "tooltip": "Per-section seed. -1 = inherit the sampler's global seed (default). "
-                               "Set a value to give THIS section its own noise — re-roll one "
-                               "section to a different take without changing the others.",
+                "seed": ("STRING", {
+                    "default": "sampler",
+                    "tooltip": "Per-section seed. 'sampler' = use the sampler node's global seed "
+                               "(default). Or enter a number to give THIS section its own fixed "
+                               "noise — re-roll one section to a different take without changing "
+                               "the others.",
                 }),
                 "variance_strength": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
@@ -1897,8 +1898,24 @@ class FoleyTuneLoRATimelineEntry:
     FUNCTION = "add_entry"
     CATEGORY = "FoleyTune"
 
+    @staticmethod
+    def _parse_seed(s):
+        """'sampler'/'global'/'' -> -1 (inherit sampler seed); else the int.
+
+        Tolerates the legacy INT widget value (-1 / a number) loaded into the
+        new STRING widget, and any non-numeric junk falls back to inherit.
+        """
+        t = str(s).strip().lower()
+        if t in ("", "sampler", "global", "-1"):
+            return -1
+        try:
+            v = int(t)
+        except ValueError:
+            return -1
+        return v if v >= 0 else -1
+
     def add_entry(self, lora_name, strength, label, color, prev_entries=None, prompt="",
-                  seed=-1, variance_strength=0.0, unique_id=None):
+                  seed="sampler", variance_strength=0.0, unique_id=None):
         entries = list(prev_entries) if prev_entries else []
         # "(none)" = prompt-only segment: base model + this prompt, no LoRA.
         adapter_path = (None if lora_name == _LORA_NONE
@@ -1914,7 +1931,7 @@ class FoleyTuneLoRATimelineEntry:
             "label": label,
             "color": color,
             "prompt": prompt,
-            "seed": int(seed),
+            "seed": self._parse_seed(seed),
             "variance_strength": float(variance_strength),
         })
         return (entries,)

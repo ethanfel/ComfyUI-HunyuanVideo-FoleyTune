@@ -649,11 +649,14 @@ class TimelineEditor {
 
             ctx.fillText(label, centerX, centerY - 6);
 
-            // Frame range
+            // Frame range + duration (frames / fps, so it matches the cut exactly).
             ctx.font = "9px monospace";
             ctx.fillStyle = "#ccc";
             ctx.shadowBlur = 0;
-            ctx.fillText(`f${this._frame(seg.start_sec)}–f${this._frame(seg.end_sec)}`, centerX, centerY + 8);
+            const sf = this._frame(seg.start_sec);
+            const ef = this._frame(seg.end_sec);
+            const durSec = (ef - sf) / this.fps;
+            ctx.fillText(`f${sf}–f${ef} · ${durSec.toFixed(2)}s`, centerX, centerY + 8);
 
             ctx.restore();
         }

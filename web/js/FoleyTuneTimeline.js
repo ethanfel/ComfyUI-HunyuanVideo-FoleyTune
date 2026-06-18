@@ -454,41 +454,55 @@ class TimelineEditor {
         this.render();
     }
 
-    // Adjustable SaFa seam overlap (seconds), from the safa_overlap widget;
-    // falls back to the default constant. Used by the seam toggle + auto-populate.
+    // SaFa seam overlap (seconds), from the safa_overlap widget; falls back to
+    // the default constant. Used by the seam toggle + manual auto-populate.
     _safaOverlap() {
         const wgt = this.node?.widgets?.find(w => w.name === "safa_overlap");
         const v = wgt ? Number(wgt.value) : SAFA_OVERLAP_SEC;
         return (Number.isFinite(v) && v > 0) ? v : SAFA_OVERLAP_SEC;
     }
 
-    _autoSafa() {
-        const wgt = this.node?.widgets?.find(w => w.name === "auto_populate_safa");
-        return !!(wgt && wgt.value);
+    // Write a computed overlap back to the safa_overlap widget (auto mode shows
+    // the value it solved for). Clamped to the widget's range.
+    _setSafaOverlap(v) {
+        const wgt = this.node?.widgets?.find(w => w.name === "safa_overlap");
+        if (!wgt) return;
+        const mn = wgt.options?.min ?? 0.25, mx = wgt.options?.max ?? 7.5;
+        wgt.value = Math.max(mn, Math.min(mx, Math.round(v * 100) / 100));
+        if (wgt.callback) wgt.callback(wgt.value);
     }
 
-    // Fill the timeline with 8s zones, assigning entries in chain order
-    // (cycling). SaFa ON → overlapping 8s zones (mirrors compute_chunk_boundaries
-    // / plain auto-chunked sampling); OFF → contiguous 8s tiles (hard cuts, last
-    // zone is the remainder). Replaces any existing zones.
+    _safaMode() {
+        const wgt = this.node?.widgets?.find(w => w.name === "safa_mode");
+        return (wgt && typeof wgt.value === "string") ? wgt.value : "manual";
+    }
+
+    // Fill the timeline with 8s zones, entries in chain order (cycling). Seams
+    // per safa_mode: none = contiguous tiles (hard cuts); manual = overlap by
+    // safa_overlap (fixed); auto = overlap COMPUTED to fill the clip exactly
+    // (evened), written back to safa_overlap. Replaces existing zones.
     _autoPopulate() {
         if (!(this.duration > 0) || !this.entries.length) return;
-        const W = SNAP_SEC, dur = this.duration, safa = this._autoSafa();
+        const W = SNAP_SEC, dur = this.duration, mode = this._safaMode();
         let chunks;
         if (dur <= W + 1e-6) {
             chunks = [[0, dur]];
-        } else if (safa) {
-            // Fixed safa_overlap per seam (same as the manual seam toggle) —
-            // 8s zones striding by W-overlap, NOT an evened-out overlap. Last
-            // zone is the remainder.
+        } else if (mode === "none") {
+            const n = Math.ceil(dur / W);
+            chunks = [];
+            for (let i = 0; i < n; i++) chunks.push([i * W, Math.min((i + 1) * W, dur)]);
+        } else if (mode === "auto") {
+            // Evened overlap that fills exactly (compute_chunk_boundaries).
+            const n = Math.max(2, Math.ceil((dur - W) / (W - 1.6)) + 1);
+            const stride = (dur - W) / (n - 1);
+            chunks = [];
+            for (let i = 0; i < n; i++) { const s = i * stride; chunks.push([s, Math.min(s + W, dur)]); }
+            this._setSafaOverlap(W - stride);
+        } else {  // manual
             const stride = W - this._safaOverlap();
             const n = Math.ceil((dur - W) / stride) + 1;
             chunks = [];
             for (let i = 0; i < n; i++) { const s = i * stride; chunks.push([s, Math.min(s + W, dur)]); }
-        } else {
-            const n = Math.ceil(dur / W);
-            chunks = [];
-            for (let i = 0; i < n; i++) chunks.push([i * W, Math.min((i + 1) * W, dur)]);
         }
         this.segments = chunks.map(([s, eSec], i) => {
             const seg = { start_sec: this._snapSec(s), end_sec: this._snapSec(eSec) };
@@ -496,6 +510,40 @@ class TimelineEditor {
             return seg;
         });
         this.selectedIdx = -1;
+        this._commitFlush();
+        this.render();
+    }
+
+    // Re-pack the CURRENT zones after manual edits (deleted zones, toggled
+    // seams, resizes). Keeps each zone's length and which seams are SaFa
+    // (overlapping); recomputes the overlap. auto mode → even the SaFa seams so
+    // the chain fills the clip exactly (writes the value to safa_overlap);
+    // manual mode → re-apply the fixed safa_overlap. none mode → all hard cuts.
+    _refreshSafa() {
+        const segs = [...this.segments].sort((a, b) => a.start_sec - b.start_sec);
+        if (segs.length < 2) return;
+        const dur = this.duration, mode = this._safaMode();
+        // Which seams are currently SaFa (zones overlap)?
+        const isSafa = segs.map((s, i) => i > 0 && (segs[i - 1].end_sec - s.start_sec) > 1e-3);
+        const k = isSafa.filter(Boolean).length;
+
+        let O;
+        if (mode === "none") {
+            O = 0; isSafa.fill(false);
+        } else if (mode === "auto") {
+            if (k === 0) return;  // no SaFa seams to even
+            const totalLen = segs.reduce((a, s) => a + (s.end_sec - s.start_sec), 0);
+            O = Math.max(0, (segs[0].start_sec + totalLen - dur) / k);
+            this._setSafaOverlap(O);
+        } else {  // manual
+            O = this._safaOverlap();
+        }
+        // Re-pack from the first zone, applying O at SaFa seams, 0 at hard cuts.
+        for (let i = 1; i < segs.length; i++) {
+            const L = segs[i].end_sec - segs[i].start_sec;
+            segs[i].start_sec = this._snapSec(segs[i - 1].end_sec - (isSafa[i] ? O : 0));
+            segs[i].end_sec = segs[i].start_sec + L;
+        }
         this._commitFlush();
         this.render();
     }
@@ -1049,9 +1097,14 @@ app.registerExtension({
             }, 0);
 
             // Auto-populate: fill the timeline with 8s zones (entries in order;
-            // SaFa-overlapping or contiguous per the auto_populate_safa toggle).
+            // seams per the safa_mode dropdown).
             this.addWidget("button", "Auto-populate 8s zones", null, () => {
                 node._timelineEditor?._autoPopulate();
+            });
+            // Refresh: re-pack existing zones after manual edits (recompute the
+            // SaFa overlap across the currently-enabled seams).
+            this.addWidget("button", "Refresh SaFa overlap", null, () => {
+                node._timelineEditor?._refreshSafa();
             });
 
             // DOM Widget. Use a neutral widget type (NOT "preview") — the

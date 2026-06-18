@@ -1999,19 +1999,21 @@ class FoleyTuneLoRATimeline:
                     "tooltip": "Self-contained path only (features unconnected): the CFG negative "
                                "prompt (global). Ignored if `features` is connected.",
                 }),
-                "auto_populate_safa": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": "Option for the 'Auto-populate 8s zones' button: ON = the auto zones "
-                               "OVERLAP (SaFa-blended seams); OFF = contiguous 8s tiles (hard cuts). "
-                               "Read by the timeline UI only.",
+                "safa_mode": (["none", "manual", "auto"], {
+                    "default": "manual",
+                    "tooltip": "How the 'Auto-populate' button lays seams:\n"
+                               "• none = contiguous 8s tiles, hard cuts\n"
+                               "• manual = 8s zones overlapping by safa_overlap (fixed)\n"
+                               "• auto = 8s zones with overlap COMPUTED to fill the clip exactly "
+                               "(evened, like plain auto-chunked sampling ~2.6s); the computed value "
+                               "is written back to safa_overlap. Read by the timeline UI only.",
                 }),
                 "safa_overlap": ("FLOAT", {
-                    "default": 1.5, "min": 0.25, "max": 4.0, "step": 0.05,
+                    "default": 1.5, "min": 0.25, "max": 7.5, "step": 0.05,
                     "tooltip": "SaFa seam overlap in seconds — how far a zone slides left to blend "
-                               "with its neighbour when you toggle a seam or auto-populate. Bigger = "
-                               "smoother seam but more double-generation (plain auto-chunked sampling "
-                               "uses ~2.6s). Applies to NEW toggles/auto-populate; existing seams keep "
-                               "the overlap they were made with.",
+                               "with its neighbour (manual mode + the seam toggle). Bigger = smoother "
+                               "but more double-generation. In 'auto' mode this is COMPUTED (and the "
+                               "Refresh button re-evens it across the currently-enabled seams).",
                 }),
             },
         }
@@ -2024,7 +2026,7 @@ class FoleyTuneLoRATimeline:
 
     def build_schedule(self, entries, segments_json="[]", features=None,
                        video_features=None, hunyuan_deps=None, video_path="",
-                       base_prompt="", negative_prompt="", auto_populate_safa=False,
+                       base_prompt="", negative_prompt="", safa_mode="manual",
                        safa_overlap=1.5):
         try:
             segments = json.loads(segments_json) if (segments_json or "").strip() else []

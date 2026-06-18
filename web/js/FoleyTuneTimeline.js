@@ -447,6 +447,14 @@ class TimelineEditor {
         this.render();
     }
 
+    // Adjustable SaFa seam overlap (seconds), from the safa_overlap widget;
+    // falls back to the default constant. Used by the seam toggle + auto-populate.
+    _safaOverlap() {
+        const wgt = this.node?.widgets?.find(w => w.name === "safa_overlap");
+        const v = wgt ? Number(wgt.value) : SAFA_OVERLAP_SEC;
+        return (Number.isFinite(v) && v > 0) ? v : SAFA_OVERLAP_SEC;
+    }
+
     _autoSafa() {
         const wgt = this.node?.widgets?.find(w => w.name === "auto_populate_safa");
         return !!(wgt && wgt.value);
@@ -463,10 +471,10 @@ class TimelineEditor {
         if (dur <= W + 1e-6) {
             chunks = [[0, dur]];
         } else if (safa) {
-            // Fixed SAFA_OVERLAP_SEC per seam (same as the manual seam toggle) —
+            // Fixed safa_overlap per seam (same as the manual seam toggle) —
             // 8s zones striding by W-overlap, NOT an evened-out overlap. Last
             // zone is the remainder.
-            const stride = W - SAFA_OVERLAP_SEC;
+            const stride = W - this._safaOverlap();
             const n = Math.ceil((dur - W) / stride) + 1;
             chunks = [];
             for (let i = 0; i < n; i++) { const s = i * stride; chunks.push([s, Math.min(s + W, dur)]); }
@@ -606,7 +614,7 @@ class TimelineEditor {
         if (i <= 0) return;  // first zone has no left seam
         const prev = sorted[i - 1];
         const overlapping = this._seamOverlap(prev, seg) > 1e-3;
-        const targetStart = overlapping ? prev.end_sec : prev.end_sec - SAFA_OVERLAP_SEC;
+        const targetStart = overlapping ? prev.end_sec : prev.end_sec - this._safaOverlap();
         let delta = this._snapSec(targetStart) - seg.start_sec;
         if (delta < 0) delta = Math.max(delta, -seg.start_sec);  // don't push the chain below 0
         for (let j = i; j < sorted.length; j++) {

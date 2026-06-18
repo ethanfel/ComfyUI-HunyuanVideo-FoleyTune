@@ -590,11 +590,11 @@ _MIN_GEN_SEC = 5.0  # pad short segment chunks to >= this many seconds of contex
 SAFA_OVERLAP_SEC = 1.5  # overlap pulled in at a SaFa seam (must match nodes_lora packing)
 
 
-def _schedule_to_chunks(schedule, window):
-    """Timeline chunks = the zones themselves (positions already packed by
-    build_schedule: touching = hard cut, overlapping = SaFa seam). Each zone is
-    one chunk; a zone longer than the model window is sub-split into overlapping
-    sub-chunks (SaFa-blended within). Returns [(start, end), ...] in order.
+def _schedule_to_chunks(schedule, window, overlap=SAFA_OVERLAP_SEC):
+    """Timeline chunks = the zones themselves (positions already set by the UI:
+    touching = hard cut, overlapping = SaFa seam). Each zone is one chunk; a zone
+    longer than the model window is sub-split into sub-chunks overlapping by
+    `overlap` (SaFa-blended within). Returns [(start, end), ...] in order.
     """
     chunks = []
     for s in sorted(schedule, key=lambda z: z["start_sec"]):
@@ -604,7 +604,7 @@ def _schedule_to_chunks(schedule, window):
         else:
             logger.warning(f"LoRA timeline: zone {a:.1f}-{b:.1f}s exceeds the {window:.0f}s "
                            f"window — sub-splitting it into multiple chunks.")
-            for cs, ce in compute_chunk_boundaries(b - a, window, min(SAFA_OVERLAP_SEC, window * 0.5)):
+            for cs, ce in compute_chunk_boundaries(b - a, window, min(overlap, window * 0.5)):
                 chunks.append((round(a + cs, 6), round(a + ce, 6)))
     return chunks
 
@@ -838,7 +838,8 @@ def chunked_denoise_process(
     keep_windows = None
     if lora_schedule:
         _window = max((ce - cs for cs, ce in chunks), default=features["duration"])
-        chunks = _schedule_to_chunks(lora_schedule, _window)
+        _overlap = float(lora_schedule[0].get("safa_overlap", SAFA_OVERLAP_SEC))
+        chunks = _schedule_to_chunks(lora_schedule, _window, _overlap)
         crossfade_mode = "safa"
         _sorted = sorted(lora_schedule, key=lambda z: z["start_sec"])
         _seams = sum(1 for i in range(len(_sorted) - 1)

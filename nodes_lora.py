@@ -2002,8 +2002,16 @@ class FoleyTuneLoRATimeline:
                 "auto_populate_safa": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "Option for the 'Auto-populate 8s zones' button: ON = the auto zones "
-                               "OVERLAP (SaFa-blended seams, matches plain auto-chunked sampling); "
-                               "OFF = contiguous 8s tiles (hard cuts). Read by the timeline UI only.",
+                               "OVERLAP (SaFa-blended seams); OFF = contiguous 8s tiles (hard cuts). "
+                               "Read by the timeline UI only.",
+                }),
+                "safa_overlap": ("FLOAT", {
+                    "default": 1.5, "min": 0.25, "max": 4.0, "step": 0.05,
+                    "tooltip": "SaFa seam overlap in seconds — how far a zone slides left to blend "
+                               "with its neighbour when you toggle a seam or auto-populate. Bigger = "
+                               "smoother seam but more double-generation (plain auto-chunked sampling "
+                               "uses ~2.6s). Applies to NEW toggles/auto-populate; existing seams keep "
+                               "the overlap they were made with.",
                 }),
             },
         }
@@ -2016,7 +2024,8 @@ class FoleyTuneLoRATimeline:
 
     def build_schedule(self, entries, segments_json="[]", features=None,
                        video_features=None, hunyuan_deps=None, video_path="",
-                       base_prompt="", negative_prompt="", auto_populate_safa=False):
+                       base_prompt="", negative_prompt="", auto_populate_safa=False,
+                       safa_overlap=1.5):
         try:
             segments = json.loads(segments_json) if (segments_json or "").strip() else []
         except (json.JSONDecodeError, TypeError):
@@ -2108,6 +2117,7 @@ class FoleyTuneLoRATimeline:
                 "strength": float(seg.get("strength", entry["strength"])),
                 "fade_in": float(seg.get("fade_in", 0.0)),
                 "fade_out": float(seg.get("fade_out", 0.0)),
+                "safa_overlap": float(safa_overlap),  # sub-split intra-zone overlap (>8s zones)
                 "seed": int(entry.get("seed", -1)),                       # -1 = inherit global
                 "variance_strength": float(entry.get("variance_strength", 0.0)),
             }

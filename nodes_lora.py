@@ -1875,6 +1875,19 @@ class FoleyTuneLoRATimelineEntry:
                                "Needs hunyuan_deps on the Timeline node. Describe the full audio "
                                "texture — narrow prompts hurt prompt-following.",
                 }),
+                "seed": ("INT", {
+                    "default": -1, "min": -1, "max": 0xffffffffffffffff,
+                    "tooltip": "Per-section seed. -1 = inherit the sampler's global seed (default). "
+                               "Set a value to give THIS section its own noise — re-roll one "
+                               "section to a different take without changing the others.",
+                }),
+                "variance_strength": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Foley seed-variance enhancer: perturb this section's CLAP prompt "
+                               "embedding to push for more take-to-take variety (shifts the sound "
+                               "balance — moan vs slap vs wet — without touching video sync). "
+                               "0 = off. Try 0.05-0.2. Reproducible via this section's seed.",
+                }),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -1885,7 +1898,7 @@ class FoleyTuneLoRATimelineEntry:
     CATEGORY = "FoleyTune"
 
     def add_entry(self, lora_name, strength, label, color, prev_entries=None, prompt="",
-                  unique_id=None):
+                  seed=-1, variance_strength=0.0, unique_id=None):
         entries = list(prev_entries) if prev_entries else []
         # "(none)" = prompt-only segment: base model + this prompt, no LoRA.
         adapter_path = (None if lora_name == _LORA_NONE
@@ -1901,6 +1914,8 @@ class FoleyTuneLoRATimelineEntry:
             "label": label,
             "color": color,
             "prompt": prompt,
+            "seed": int(seed),
+            "variance_strength": float(variance_strength),
         })
         return (entries,)
 
@@ -2089,6 +2104,8 @@ class FoleyTuneLoRATimeline:
                 "fade_in": float(seg.get("fade_in", 0.0)),
                 "fade_out": float(seg.get("fade_out", 0.0)),
                 "crossfade_sec": crossfade_sec,  # per-schedule; read by the sampler
+                "seed": int(entry.get("seed", -1)),                       # -1 = inherit global
+                "variance_strength": float(entry.get("variance_strength", 0.0)),
             }
             entry_prompt = (entry.get("prompt") or "").strip()
             if entry_prompt and entry_prompt in prompt_feats:

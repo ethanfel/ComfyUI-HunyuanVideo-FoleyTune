@@ -950,6 +950,19 @@ def chunked_denoise_process(
         chunk_dur = t_end - t_start
         latent_len = int(chunk_dur * audio_frame_rate)
 
+        # Resolve this chunk's timeline segment up front — drives the per-section
+        # seed (own noise) and variance (CLAP-embedding perturbation). Resolve by
+        # keep-window centre (the gen window may straddle a neighbour).
+        _seg = _segment_at_time(lora_schedule, _resolve_center(c_idx, t_start, t_end))
+        _seg_seed = int(_seg.get("seed", -1)) if _seg else -1
+        # Per-section seed: a fresh generator seeded with the section's seed (+chunk
+        # offset so a multi-chunk section doesn't repeat its noise). -1 = inherit the
+        # global generator (sequential draws, original behaviour).
+        _chunk_gen = generator
+        if _seg_seed >= 0:
+            _chunk_gen = torch.Generator(device=device).manual_seed(
+                (int(_seg_seed) + c_idx) & 0xffffffffffffffff)
+
         if shared_noise is not None:
             frame_start = int(t_start * audio_frame_rate)
             frame_end = int(t_end * audio_frame_rate)
@@ -961,7 +974,7 @@ def chunked_denoise_process(
         else:
             latent = prepare_latents_with_generator(
                 chunk_schedulers[c_idx], batch_size, latent_dim, latent_len,
-                target_dtype, device, generator
+                target_dtype, device, _chunk_gen
             )
         chunk_latents.append(latent)
 
@@ -970,12 +983,21 @@ def chunked_denoise_process(
         # Per-segment prompt: swap the positive text_feat for the segment's own
         # (encoded by the Timeline node); uncond stays global. _pad_or_trim_time
         # below reconciles any sequence-length difference before the CFG concat.
-        # Resolve by keep-window centre (the gen window may straddle a neighbour).
-        _seg = _segment_at_time(lora_schedule, _resolve_center(c_idx, t_start, t_end))
         _seg_text = _seg.get("text_feat") if _seg else None
+        _text = (_seg_text if _seg_text is not None else c_feats["text_feat"])
+        # Seed-variance enhancer: perturb this section's CLAP embedding with seeded
+        # Gaussian noise (scaled by the embedding's own std) to add take-to-take
+        # variety — shifts the sound balance, leaving the video-sync features alone.
+        _var = float(_seg.get("variance_strength", 0.0)) if _seg else 0.0
+        if _var > 0:
+            _vseed = ((int(_seg_seed) if _seg_seed >= 0 else generator.initial_seed())
+                      + c_idx) & 0xffffffffffffffff
+            _tf = _text.detach().float().cpu()
+            _vg = torch.Generator().manual_seed(_vseed)
+            _pert = torch.randn(_tf.shape, generator=_vg)
+            _text = (_tf + _var * _tf.std() * _pert).to(_text.dtype)
         chunk_text_feats.append({
-            "text_feat": (_seg_text if _seg_text is not None
-                          else c_feats["text_feat"]).to(device),
+            "text_feat": _text.to(device),
             "uncond_text_feat": c_feats["uncond_text_feat"].to(device),
         })
 

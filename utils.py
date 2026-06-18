@@ -866,9 +866,11 @@ def chunked_denoise_process(
              if (chunks[i][1] - chunks[i + 1][0]) > 1e-3 else "cut")
             for i in range(len(chunks) - 1)) or "—"
         _env = lora_schedule[0].get("variance_env")
+        _cenv = lora_schedule[0].get("cfg_env")
         logger.info(f"LoRA timeline: {len(lora_schedule)} zone(s) → {len(chunks)} chunks / "
                     f"{features['duration']:.2f}s. seams: [{_seam_desc}]"
-                    + ("  (variance: automation lane)" if _env else ""))
+                    + ("  (variance lane)" if _env else "")
+                    + ("  (cfg lane)" if _cenv else ""))
         for _ci, (_cs, _ce) in enumerate(chunks):
             _seg = _segment_at_time(lora_schedule, (_cs + _ce) / 2.0)
             _lora = os.path.basename(_seg["lora_path"]) if (_seg and _seg.get("lora_path")) else "base"
@@ -878,6 +880,7 @@ def chunked_denoise_process(
             _pr = (_seg.get("prompt", "") if _seg else "")[:30]
             logger.info(f"  c{_ci} [{_cs:.2f},{_ce:.2f}]s  lora={_lora}  "
                         f"seed={'global' if _sd < 0 else _sd}  var={_vr:.2f}"
+                        + (f"  cfg={_sample_env(_cenv, (_cs + _ce) / 2.0):.2f}" if _cenv else "")
                         + (f"  prompt={_pr!r}" if _pr else ""))
 
     # LoRA/prompt for a chunk is resolved by its KEEP-window centre (the segment
@@ -908,9 +911,16 @@ def chunked_denoise_process(
          if (lora_schedule and _segment_at_time(lora_schedule, (cs + ce) / 2.0)) else "safa")
         for cs, ce in chunks
     ]
-    # Optional variance automation envelope ([[t, v], ...]) — when present it
-    # OVERRIDES per-zone variance_strength, sampled at each chunk's centre.
+    # Optional automation envelopes ([[t, v], ...]) — sampled at each chunk's
+    # centre, overriding the scalar when present. variance → per-zone variance;
+    # cfg → the guidance multiplier in the CFG combine (only effective when the
+    # global guidance_scale > 1, i.e. the uncond path exists, which it does).
     _var_env = lora_schedule[0].get("variance_env") if lora_schedule else None
+    _cfg_env = lora_schedule[0].get("cfg_env") if lora_schedule else None
+    _chunk_guidance = [
+        (_sample_env(_cfg_env, (cs + ce) / 2.0) if _cfg_env else guidance_scale)
+        for cs, ce in chunks
+    ]
 
     # --- LoRA schedule: save base state for hot-swapping ---
     # Only needed if at least one segment actually carries a LoRA. A prompt-only
@@ -1230,9 +1240,11 @@ def chunked_denoise_process(
                         )["x"]
 
                     if guidance_scale > 1.0:
-                        # CFG combine in fp32 (matches reference; scheduler integrates fp32)
+                        # CFG combine in fp32 (matches reference; scheduler integrates fp32).
+                        # The MULTIPLIER may be per-chunk (cfg automation lane); the
+                        # global guidance_scale still gates the path / latent doubling.
                         uncond_pred, text_pred = noise_pred.float().chunk(2)
-                        noise_pred = uncond_pred + guidance_scale * (text_pred - uncond_pred)
+                        noise_pred = uncond_pred + _chunk_guidance[c_idx] * (text_pred - uncond_pred)
 
                     chunk_latents[c_idx] = chunk_schedulers[c_idx].step(noise_pred, t, latents)[0]
                     pbar.update(1)

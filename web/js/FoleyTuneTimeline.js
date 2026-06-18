@@ -22,7 +22,17 @@ const LANE_TOP = RULER_H + TRACK_H;        // y where the variance lane starts
 const LANE_PAD = 8;                        // inner vertical padding of the lane
 const CANVAS_H = RULER_H + TRACK_H + LANE_H;
 const TOTAL_H = THUMB_H + CANVAS_H + PREVIEW_H;
-const VAR_PT_R = 5;       // variance breakpoint hit/draw radius (px)
+const VAR_PT_R = 5;       // automation breakpoint hit/draw radius (px)
+// Params the automation lane can edit (click the lane label to switch). Each
+// has its own value range, envelope array, and persisted widget/property.
+const LANE_SPEC = {
+    variance: { min: 0, max: 1,  label: "variance", line: "rgba(120,220,170,0.95)",
+                dot: "rgba(150,235,190,0.95)", text: "rgba(140,220,180,0.9)",
+                env: "varEnv", widget: "varWidget", prop: "foleytune_var_env" },
+    cfg:      { min: 1, max: 10, label: "cfg", line: "rgba(255,180,120,0.95)",
+                dot: "rgba(255,205,150,0.95)", text: "rgba(255,200,150,0.9)",
+                env: "cfgEnv", widget: "cfgWidget", prop: "foleytune_cfg_env" },
+};
 const MIN_SEG_FRAMES = 1;   // shortest segment, in frames
 const DEFAULT_FPS = 30;     // fallback when the video fps is unknown
 const SNAP_SEC = 8;         // magnetic grid for segment boundaries (hold Shift to disable)
@@ -48,6 +58,8 @@ class TimelineEditor {
         this.fps = DEFAULT_FPS;
         this._frameTimer = null;
         this.varEnv = [];        // variance automation breakpoints [{t, v}], sorted by t
+        this.cfgEnv = [];        // cfg automation breakpoints [{t, v}]
+        this.laneParam = "variance";  // which param the lane edits (click label to switch)
 
         // Hide the segments_json + variance_env STRING widgets WITHOUT converting
         // them. A multiline STRING owns a DOM <textarea>, so we zero its node
@@ -71,6 +83,7 @@ class TimelineEditor {
         };
         this.segWidget = hideWidget("segments_json");
         this.varWidget = hideWidget("variance_env");
+        this.cfgWidget = hideWidget("cfg_env");
 
         this._buildDOM();
         this._bindEvents();
@@ -254,15 +267,21 @@ class TimelineEditor {
             }
         }
 
-        // Variance lane: grab an existing breakpoint or add one, then drag it.
+        // Automation lane: label toggles variance↔cfg; else grab/add a breakpoint.
         if (this._inLane(y)) {
+            if (this._laneLabelHit(x, y)) {
+                this.laneParam = this.laneParam === "variance" ? "cfg" : "variance";
+                this.render();
+                return;
+            }
+            const env = this._activeEnv();
             const i = this._laneHit(x, y);
             let pt;
             if (i >= 0) {
-                pt = this.varEnv[i];
+                pt = env[i];
             } else {
                 pt = { t: Math.max(0, Math.min(this.duration, this._xToSecRaw(x))), v: this._yToVal(y) };
-                this.varEnv.push(pt);
+                env.push(pt);
             }
             this.drag = { type: "var", pt };
             this.canvas.setPointerCapture(e.pointerId);
@@ -584,11 +603,11 @@ class TimelineEditor {
         e.preventDefault();
         e.stopPropagation();
         const { x, y } = this._pointerPos(e);
-        // Variance lane: right-click a breakpoint to remove it.
+        // Automation lane: right-click a breakpoint to remove it.
         if (this._inLane(y)) {
             const i = this._laneHit(x, y);
             if (i >= 0) {
-                this.varEnv.splice(i, 1);
+                this._activeEnv().splice(i, 1);
                 this._commitFlush();
                 this.render();
             }
@@ -704,17 +723,20 @@ class TimelineEditor {
         const json = JSON.stringify(this.segments);
         // Backend reads the widget value (positional in widgets_values).
         if (this.segWidget) this.segWidget.value = json;
-        // Variance lane → [[t, v], ...] (sorted), same dual-store.
-        const envArr = [...this.varEnv].sort((a, b) => a.t - b.t)
-            .map(p => [+p.t.toFixed(4), +p.v.toFixed(4)]);
-        const envJson = JSON.stringify(envArr);
-        if (this.varWidget) this.varWidget.value = envJson;
         // Mirror into node.properties, which serializes BY NAME — so the data
         // survives widget reordering / node-definition changes that would
         // otherwise scramble the positional widget slot and scrap the segments.
         this.node.properties = this.node.properties || {};
         this.node.properties.foleytune_segments = json;
-        this.node.properties.foleytune_var_env = envJson;
+        // Each automation lane → [[t, v], ...] (sorted), same dual-store.
+        for (const k of Object.keys(LANE_SPEC)) {
+            const spec = LANE_SPEC[k];
+            const arr = [...this[spec.env]].sort((a, b) => a.t - b.t)
+                .map(p => [+p.t.toFixed(4), +p.v.toFixed(4)]);
+            const j = JSON.stringify(arr);
+            if (this[spec.widget]) this[spec.widget].value = j;
+            this.node.properties[spec.prop] = j;
+        }
     }
 
     // --- Resize ---
@@ -785,62 +807,79 @@ class TimelineEditor {
         this._drawPlayhead(ctx, w);
     }
 
-    // --- Variance automation lane (under the zone track) ---
+    // --- Automation lane (under the zone track): variance OR cfg ---
     _inLane(y) { return y >= LANE_TOP && y <= LANE_TOP + LANE_H; }
-    _valY(v) {  // value 0..1 -> y (0 at bottom, 1 at top)
-        const inner = LANE_H - 2 * LANE_PAD;
-        return LANE_TOP + LANE_PAD + (1 - Math.max(0, Math.min(1, v))) * inner;
+    _activeSpec() { return LANE_SPEC[this.laneParam] || LANE_SPEC.variance; }
+    _activeEnv() { return this[this._activeSpec().env]; }
+    _valY(v) {  // param value -> y (range min at bottom, max at top)
+        const s = this._activeSpec(), inner = LANE_H - 2 * LANE_PAD;
+        const n = (s.max > s.min) ? (v - s.min) / (s.max - s.min) : 0;
+        return LANE_TOP + LANE_PAD + (1 - Math.max(0, Math.min(1, n))) * inner;
     }
     _yToVal(y) {
-        const inner = LANE_H - 2 * LANE_PAD;
-        return Math.max(0, Math.min(1, (LANE_TOP + LANE_PAD + inner - y) / inner));
+        const s = this._activeSpec(), inner = LANE_H - 2 * LANE_PAD;
+        const n = Math.max(0, Math.min(1, (LANE_TOP + LANE_PAD + inner - y) / inner));
+        return s.min + n * (s.max - s.min);
     }
-    _laneHit(x, y) {  // index of the breakpoint near (x,y), or -1
-        for (let i = 0; i < this.varEnv.length; i++) {
-            const px = this._secToX(this.varEnv[i].t), py = this._valY(this.varEnv[i].v);
+    _laneHit(x, y) {  // index of an active-env breakpoint near (x,y), or -1
+        const env = this._activeEnv();
+        for (let i = 0; i < env.length; i++) {
+            const px = this._secToX(env[i].t), py = this._valY(env[i].v);
             if ((x - px) ** 2 + (y - py) ** 2 <= (VAR_PT_R + 3) ** 2) return i;
         }
         return -1;
     }
+    _laneLabelHit(x, y) {
+        const r = this._laneLabelRect;
+        return !!(r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h);
+    }
 
     _drawVarLane(ctx, w) {
-        const yBot = LANE_TOP + LANE_H;
+        const s = this._activeSpec();
         ctx.save();
         ctx.fillStyle = "#0c0c16";
         ctx.fillRect(0, LANE_TOP, w, LANE_H);
         ctx.strokeStyle = "#2a2a3a"; ctx.lineWidth = 1;
         ctx.beginPath(); ctx.moveTo(0, LANE_TOP + 0.5); ctx.lineTo(w, LANE_TOP + 0.5); ctx.stroke();
-        // 0 / 0.5 / 1 guide lines
-        ctx.strokeStyle = "rgba(120,200,160,0.12)";
-        for (const v of [0, 0.5, 1]) {
+        ctx.strokeStyle = "rgba(150,160,190,0.10)";  // min / mid / max guides
+        for (const v of [s.min, (s.min + s.max) / 2, s.max]) {
             const gy = this._valY(v);
             ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(w, gy); ctx.stroke();
         }
-        ctx.fillStyle = "rgba(140,220,180,0.85)";
-        ctx.font = "9px sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "top";
-        ctx.fillText("variance", 4, LANE_TOP + 3);
+        // Clickable param label — switches the lane between variance and cfg.
+        const labelTxt = `▸ ${s.label}`;
+        ctx.font = "bold 9px sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "top";
+        const lw = ctx.measureText(labelTxt).width + 8;
+        this._laneLabelRect = { x: 3, y: LANE_TOP + 2, w: lw, h: 13 };
+        ctx.fillStyle = "rgba(40,46,60,0.9)";
+        ctx.fillRect(this._laneLabelRect.x, this._laneLabelRect.y, lw, 13);
+        ctx.fillStyle = s.text;
+        ctx.fillText(labelTxt, 7, LANE_TOP + 3);
 
-        const env = [...this.varEnv].sort((a, b) => a.t - b.t);
+        const env = [...this._activeEnv()].sort((a, b) => a.t - b.t);
         if (!env.length) {
-            ctx.fillStyle = "rgba(140,220,180,0.45)";
+            ctx.fillStyle = "rgba(170,180,200,0.42)";
             ctx.textAlign = "center"; ctx.textBaseline = "middle";
-            ctx.fillText("click to add variance keyframes (overrides per-zone variance)",
+            ctx.fillText(`click to add ${s.label} keyframes  ·  click “${s.label}” to switch lane`,
                          w / 2, LANE_TOP + LANE_H / 2);
             ctx.restore();
             return;
         }
-        // Polyline (flat-held at the ends), then breakpoints.
-        ctx.strokeStyle = "rgba(120,220,170,0.95)"; ctx.lineWidth = 1.5;
+        ctx.strokeStyle = s.line; ctx.lineWidth = 1.5;  // flat-held polyline
         ctx.beginPath();
         ctx.moveTo(0, this._valY(env[0].v));
         for (const p of env) ctx.lineTo(this._secToX(p.t), this._valY(p.v));
         ctx.lineTo(w, this._valY(env[env.length - 1].v));
         ctx.stroke();
+        ctx.font = "8px monospace"; ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+        const dp = this.laneParam === "cfg" ? 1 : 2;
         for (const p of env) {
             const px = this._secToX(p.t), py = this._valY(p.v);
             ctx.beginPath(); ctx.arc(px, py, VAR_PT_R, 0, Math.PI * 2);
             ctx.fillStyle = "#1a1a28"; ctx.fill();
-            ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(150,235,190,0.95)"; ctx.stroke();
+            ctx.lineWidth = 1.5; ctx.strokeStyle = s.dot; ctx.stroke();
+            ctx.fillStyle = s.text;
+            ctx.fillText(p.v.toFixed(dp), px, py - VAR_PT_R - 1);
         }
         ctx.restore();
     }
@@ -1189,19 +1228,26 @@ class TimelineEditor {
     // to the widget value (for graphs saved before properties mirroring). If the
     // widget slot was scrambled, re-committing repairs it from the good source.
     _restore() {
-        // Variance lane (node.properties > widget). [[t,v],...] -> [{t,v}].
-        const envProp = this.node.properties && this.node.properties.foleytune_var_env;
-        for (const cand of [envProp, this.varWidget && this.varWidget.value]) {
-            if (!cand || cand === "[]") continue;
-            try {
-                const arr = JSON.parse(cand);
-                if (Array.isArray(arr) && arr.length) {
-                    this.varEnv = arr
-                        .filter(p => Array.isArray(p) && p.length >= 2)
-                        .map(p => ({ t: +p[0], v: Math.max(0, Math.min(1, +p[1])) }));
-                    break;
-                }
-            } catch (_) { /* try next */ }
+        let loaded = false;
+        // Automation lanes (node.properties > widget). [[t,v],...] -> [{t,v}],
+        // clamped to each param's range.
+        for (const k of Object.keys(LANE_SPEC)) {
+            const spec = LANE_SPEC[k];
+            const cands = [this.node.properties && this.node.properties[spec.prop],
+                           this[spec.widget] && this[spec.widget].value];
+            for (const cand of cands) {
+                if (!cand || cand === "[]") continue;
+                try {
+                    const arr = JSON.parse(cand);
+                    if (Array.isArray(arr) && arr.length) {
+                        this[spec.env] = arr
+                            .filter(p => Array.isArray(p) && p.length >= 2)
+                            .map(p => ({ t: +p[0], v: Math.max(spec.min, Math.min(spec.max, +p[1])) }));
+                        loaded = true;
+                        break;
+                    }
+                } catch (_) { /* try next */ }
+            }
         }
         const props = this.node.properties && this.node.properties.foleytune_segments;
         for (const candidate of [props, this.segWidget && this.segWidget.value]) {
@@ -1215,7 +1261,7 @@ class TimelineEditor {
                 }
             } catch (_) { /* try next source */ }
         }
-        if (this.varEnv.length) this._commitFlush();  // heal env even with no segments
+        if (loaded) this._commitFlush();  // heal lanes even with no segments
     }
 
     destroy() {

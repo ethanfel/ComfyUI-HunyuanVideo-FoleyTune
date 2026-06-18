@@ -21,7 +21,8 @@ const CANVAS_H = RULER_H + TRACK_H;
 const TOTAL_H = THUMB_H + CANVAS_H + PREVIEW_H;
 const MIN_SEG_FRAMES = 1;   // shortest segment, in frames
 const DEFAULT_FPS = 30;     // fallback when the video fps is unknown
-const SNAP_SEC = 8;         // segment boundaries snap to this grid (hold Shift for fine)
+const SNAP_SEC = 8;         // magnetic grid for segment boundaries (hold Shift to disable)
+const SNAP_PX = 9;          // magnet range in px — beyond this, boundaries move freely
 const PLAYHEAD_COLOR = "#ffcc00";
 
 class TimelineEditor {
@@ -147,18 +148,22 @@ class TimelineEditor {
     _snapSec(sec) { return this._frame(sec) / this.fps; }    // snap sec to a frame
     _minSeg() { return MIN_SEG_FRAMES / this.fps; }          // shortest segment, sec
 
-    // Snap a segment boundary to the SNAP_SEC grid so chunks land on round
-    // boundaries (e.g. 8s). The clip's true ends (0 / duration) are always
-    // candidates so the first/last chunk can reach the real edge. Hold Shift
-    // (fine=true) to drop back to per-frame snapping for an off-grid cut.
+    // MAGNETIC snap toward the SNAP_SEC grid (e.g. 8s) and the clip ends. Only
+    // pulls when the cursor is within SNAP_PX of a line — otherwise the boundary
+    // moves freely (frame-snapped), so any position/size is reachable. Hold
+    // Shift (fine=true) to disable the magnet entirely.
     _snapSegSec(sec, fine) {
         if (fine) return this._snapSec(sec);
-        const grid = Math.round(sec / SNAP_SEC) * SNAP_SEC;
-        let best = grid;
-        for (const c of [0, this.duration]) {
-            if (Math.abs(sec - c) < Math.abs(sec - best)) best = c;
+        let best = null, bestD = Infinity;
+        for (const c of [Math.round(sec / SNAP_SEC) * SNAP_SEC, 0, this.duration]) {
+            const d = Math.abs(sec - c);
+            if (d < bestD) { bestD = d; best = c; }
         }
-        return this._snapSec(Math.max(0, Math.min(this.duration, best)));
+        const pxPerSec = this._canvasW() / Math.max(1e-6, this.duration);
+        if (best !== null && bestD * pxPerSec <= SNAP_PX) {
+            return this._snapSec(Math.max(0, Math.min(this.duration, best)));
+        }
+        return this._snapSec(sec);  // outside the magnet zone: free placement
     }
 
     // Nearest segment to the right/left of `seg` (by facing edge). Used so a

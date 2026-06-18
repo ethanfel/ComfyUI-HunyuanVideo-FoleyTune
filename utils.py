@@ -1033,7 +1033,8 @@ def chunked_denoise_process(
         if _var > 0:
             _vg = torch.Generator(device=device).manual_seed(_vseed)
             _fresh = randn_tensor(latent.shape, device=device, dtype=target_dtype, generator=_vg)
-            latent = math.sqrt(1.0 - _var * _var) * latent + _var * latent.std() * _fresh
+            _scale = latent.std().clamp(min=1e-6)  # guard a degenerate/near-silent chunk
+            latent = math.sqrt(1.0 - _var * _var) * latent + _var * _scale * _fresh
         chunk_latents.append(latent)
 
         c_feats = slice_features_for_chunk(features, t_start, t_end)

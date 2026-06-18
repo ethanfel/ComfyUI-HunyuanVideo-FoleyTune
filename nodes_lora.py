@@ -2111,14 +2111,19 @@ class FoleyTuneLoRATimeline:
         for seg in sorted(segments, key=lambda s: s["start_sec"]):
             entry = _entry_for(seg)
             if entry is None:
-                continue
+                # Don't silently drop the zone (it still draws in the UI) — fall
+                # back to the first entry so it generates, and warn.
+                if not entries:
+                    continue
+                entry = entries[0]
+                logger.warning(
+                    f"LoRA timeline: zone [{seg.get('start_sec')}, {seg.get('end_sec')}]s has "
+                    f"an unresolved entry (id={seg.get('entry_id')!r}) — using entry 0.")
             seg_out = {
                 "lora_path": entry["path"],
                 "start_sec": float(seg["start_sec"]),
                 "end_sec": float(seg["end_sec"]),
-                "strength": float(seg.get("strength", entry["strength"])),
-                "fade_in": float(seg.get("fade_in", 0.0)),
-                "fade_out": float(seg.get("fade_out", 0.0)),
+                "strength": max(0.0, min(2.0, float(seg.get("strength", entry["strength"])))),
                 "safa_overlap": float(safa_overlap),  # sub-split intra-zone overlap (>8s zones)
                 "seed": int(entry.get("seed", -1)),                       # -1 = inherit global
                 "variance_strength": float(entry.get("variance_strength", 0.0)),

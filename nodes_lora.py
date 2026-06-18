@@ -1884,10 +1884,12 @@ class FoleyTuneLoRATimelineEntry:
                 }),
                 "variance_strength": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Foley seed-variance enhancer: perturb this section's CLAP prompt "
-                               "embedding to push for more take-to-take variety (shifts the sound "
-                               "balance — moan vs slap vs wet — without touching video sync). "
-                               "0 = off. Try 0.05-0.2. Reproducible via this section's seed.",
+                    "tooltip": "Take-variation knob: a soft/partial re-roll of THIS section's "
+                               "initial noise toward a fresh take (noise is the strong lever for "
+                               "foley — CLAP/text barely moves it). Variance-preserving, so "
+                               "loudness/tone stay put — only the take changes. 0 = the seed's "
+                               "take; ~0.2-0.4 = a clearly different take, same content; 1 = fully "
+                               "fresh. Reproducible via this section's seed.",
                 }),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},

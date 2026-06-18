@@ -977,6 +977,16 @@ def chunked_denoise_process(
             _chunk_gen = torch.Generator(device=device).manual_seed(
                 (int(_seg_seed) + c_idx) & 0xffffffffffffffff)
 
+        # Per-section variance: a soft/partial re-roll of THIS chunk's initial
+        # noise toward a fresh take. Text/CLAP is too weak to move foley
+        # (video+sync dominate), so variance acts on the noise — the strong
+        # lever — like a fractional seed change. 0 = the seed's take, 1 = fully
+        # fresh. Offset the variance seed so the fresh draw is decorrelated from
+        # this chunk's base noise (else the blend would be a near no-op).
+        _var = min(max(float(_seg.get("variance_strength", 0.0)) if _seg else 0.0, 0.0), 1.0)
+        _vseed = ((int(_seg_seed) if _seg_seed >= 0 else generator.initial_seed())
+                  + 0x5237 + c_idx) & 0xffffffffffffffff
+
         if shared_noise is not None:
             frame_start = int(t_start * audio_frame_rate)
             frame_end = int(t_end * audio_frame_rate)
@@ -990,6 +1000,13 @@ def chunked_denoise_process(
                 chunk_schedulers[c_idx], batch_size, latent_dim, latent_len,
                 target_dtype, device, _chunk_gen
             )
+        # Variance = partial re-roll of the initial noise toward a fresh take.
+        # Variance-preserving blend keeps the latent's own scale, so loudness
+        # and tone are untouched — only the take changes.
+        if _var > 0:
+            _vg = torch.Generator(device=device).manual_seed(_vseed)
+            _fresh = randn_tensor(latent.shape, device=device, dtype=target_dtype, generator=_vg)
+            latent = math.sqrt(1.0 - _var * _var) * latent + _var * latent.std() * _fresh
         chunk_latents.append(latent)
 
         c_feats = slice_features_for_chunk(features, t_start, t_end)
@@ -997,19 +1014,10 @@ def chunked_denoise_process(
         # Per-segment prompt: swap the positive text_feat for the segment's own
         # (encoded by the Timeline node); uncond stays global. _pad_or_trim_time
         # below reconciles any sequence-length difference before the CFG concat.
+        # Per-segment prompt only — variance now acts on the noise above (the
+        # strong lever), not this CLAP embedding (which barely moves foley).
         _seg_text = _seg.get("text_feat") if _seg else None
         _text = (_seg_text if _seg_text is not None else c_feats["text_feat"])
-        # Seed-variance enhancer: perturb this section's CLAP embedding with seeded
-        # Gaussian noise (scaled by the embedding's own std) to add take-to-take
-        # variety — shifts the sound balance, leaving the video-sync features alone.
-        _var = float(_seg.get("variance_strength", 0.0)) if _seg else 0.0
-        if _var > 0:
-            _vseed = ((int(_seg_seed) if _seg_seed >= 0 else generator.initial_seed())
-                      + c_idx) & 0xffffffffffffffff
-            _tf = _text.detach().float().cpu()
-            _vg = torch.Generator().manual_seed(_vseed)
-            _pert = torch.randn(_tf.shape, generator=_vg)
-            _text = (_tf + _var * _tf.std() * _pert).to(_text.dtype)
         chunk_text_feats.append({
             "text_feat": _text.to(device),
             "uncond_text_feat": c_feats["uncond_text_feat"].to(device),

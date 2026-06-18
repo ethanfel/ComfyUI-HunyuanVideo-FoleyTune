@@ -21,6 +21,7 @@ const CANVAS_H = RULER_H + TRACK_H;
 const TOTAL_H = THUMB_H + CANVAS_H + PREVIEW_H;
 const MIN_SEG_FRAMES = 1;   // shortest segment, in frames
 const DEFAULT_FPS = 30;     // fallback when the video fps is unknown
+const SNAP_SEC = 8;         // segment boundaries snap to this grid (hold Shift for fine)
 const PLAYHEAD_COLOR = "#ffcc00";
 
 class TimelineEditor {
@@ -146,6 +147,20 @@ class TimelineEditor {
     _snapSec(sec) { return this._frame(sec) / this.fps; }    // snap sec to a frame
     _minSeg() { return MIN_SEG_FRAMES / this.fps; }          // shortest segment, sec
 
+    // Snap a segment boundary to the SNAP_SEC grid so chunks land on round
+    // boundaries (e.g. 8s). The clip's true ends (0 / duration) are always
+    // candidates so the first/last chunk can reach the real edge. Hold Shift
+    // (fine=true) to drop back to per-frame snapping for an off-grid cut.
+    _snapSegSec(sec, fine) {
+        if (fine) return this._snapSec(sec);
+        const grid = Math.round(sec / SNAP_SEC) * SNAP_SEC;
+        let best = grid;
+        for (const c of [0, this.duration]) {
+            if (Math.abs(sec - c) < Math.abs(sec - best)) best = c;
+        }
+        return this._snapSec(Math.max(0, Math.min(this.duration, best)));
+    }
+
     _pointerPos(e) {
         // getBoundingClientRect reflects LiteGraph's zoom (CSS transform), but
         // _secToX/_canvasW use the canvas's logical width. Rescale screen px to
@@ -253,14 +268,14 @@ class TimelineEditor {
                 const dSecRaw = this._canvasW() > 0
                     ? ((x - this.drag.startX) / this._canvasW()) * this.duration : 0;
                 const len = this.drag.origEnd - this.drag.origStart;
-                const ns = this._snapSec(Math.max(0, Math.min(this.duration - len, this.drag.origStart + dSecRaw)));
+                const ns = this._snapSegSec(Math.max(0, Math.min(this.duration - len, this.drag.origStart + dSecRaw)), e.shiftKey);
                 seg.start_sec = ns;
                 seg.end_sec = ns + len;
             } else if (this.drag.type === "resize-left") {
-                // Edge follows the cursor, snapped to a frame, clamped to [0,dur].
-                seg.start_sec = Math.min(seg.end_sec - this._minSeg(), this._xToSec(x));
+                // Edge snaps to the SNAP_SEC grid (Shift = per-frame), clamped to [0,dur].
+                seg.start_sec = Math.min(seg.end_sec - this._minSeg(), this._snapSegSec(this._xToSecRaw(x), e.shiftKey));
             } else if (this.drag.type === "resize-right") {
-                seg.end_sec = Math.max(seg.start_sec + this._minSeg(), this._xToSec(x));
+                seg.end_sec = Math.max(seg.start_sec + this._minSeg(), this._snapSegSec(this._xToSecRaw(x), e.shiftKey));
             }
             this._commitDebounced();
             this.render();
@@ -570,6 +585,12 @@ class TimelineEditor {
         const stepF = this._tickStepFrames(w);
         for (let f = 0; f <= totalF; f += stepF) {
             ctx.fillRect(this._secToX(f / this.fps), RULER_H, 1, TRACK_H);
+        }
+
+        // Brighter lines at each SNAP_SEC boundary — these are the snap targets.
+        ctx.fillStyle = "#3a5a8c";
+        for (let s = SNAP_SEC; s < this.duration; s += SNAP_SEC) {
+            ctx.fillRect(this._secToX(s), RULER_H, 1, TRACK_H);
         }
     }
 

@@ -44,19 +44,26 @@ class TimelineEditor {
         this.fps = DEFAULT_FPS;
         this._frameTimer = null;
 
-        // Find and hide the segments_json widget. It's a multiline STRING, so it
-        // owns a DOM <textarea>; flipping .type does NOT remove that element —
-        // without hiding it explicitly it stays visible and inflates node height.
+        // Hide the segments_json widget WITHOUT converting it. A multiline STRING
+        // owns a DOM <textarea>, so we zero its node height and display:none the
+        // textarea. We must NOT set .type = "converted-widget": that changes how
+        // the widget participates in widgets_values, so on save/load its slot
+        // misaligns and the JSON leaks into the next text widget (the positive
+        // prompt). Keeping it a normal STRING widget holds a stable slot. (.hidden
+        // is also avoided — it can drop the value from widgets_values entirely.)
         this.segWidget = node.widgets?.find(w => w.name === "segments_json");
         if (this.segWidget) {
             this.segWidget.computeSize = () => [0, -4];
-            this.segWidget.type = "converted-widget";
-            // Hide the DOM <textarea> too (keeps the value serialized, unlike
-            // .hidden which can drop it from widgets_values).
-            const el = this.segWidget.inputEl
-                || this.segWidget.element
-                || (this.segWidget.options && this.segWidget.options.element);
-            if (el && el.style) el.style.display = "none";
+            const hideEl = () => {
+                const el = this.segWidget.inputEl
+                    || this.segWidget.element
+                    || (this.segWidget.options && this.segWidget.options.element);
+                if (el && el.style) el.style.display = "none";
+            };
+            hideEl();
+            // ComfyUI re-shows the textarea on some re-layouts; re-hide on the
+            // next frame so it stays gone.
+            setTimeout(hideEl, 0);
         }
 
         this._buildDOM();

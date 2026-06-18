@@ -2125,6 +2125,7 @@ class FoleyTuneLoRATimeline:
                 "end_sec": float(seg["end_sec"]),
                 "strength": max(0.0, min(2.0, float(seg.get("strength", entry["strength"])))),
                 "safa_overlap": float(safa_overlap),  # sub-split intra-zone overlap (>8s zones)
+                "blend": ("xfade" if str(seg.get("blend", "safa")) == "xfade" else "safa"),
                 "seed": int(entry.get("seed", -1)),                       # -1 = inherit global
                 "variance_strength": float(entry.get("variance_strength", 0.0)),
             }

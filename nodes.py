@@ -503,10 +503,14 @@ class FoleyTuneChunkedSampler:
         # Compute chunk boundaries
         min_overlap = chunk_duration * 0.2
         chunks = compute_chunk_boundaries(duration, chunk_duration, min_overlap)
-        logger.info(f"Chunked generation: {len(chunks)} chunks for {duration:.1f}s "
-                     f"(chunk={chunk_duration}s, mode={crossfade_mode})")
-        for i, (ts, te) in enumerate(chunks):
-            logger.info(f"  Chunk {i}: [{ts:.1f}, {te:.1f}]s ({te-ts:.1f}s)")
+        # In timeline mode these global chunks are discarded and re-derived from
+        # the schedule (and SaFa is off), so logging them here is misleading —
+        # chunked_denoise_process logs the real "LoRA timeline: ..." plan instead.
+        if not lora_schedule:
+            logger.info(f"Chunked generation: {len(chunks)} chunks for {duration:.1f}s "
+                         f"(chunk={chunk_duration}s, mode={crossfade_mode})")
+            for i, (ts, te) in enumerate(chunks):
+                logger.info(f"  Chunk {i}: [{ts:.1f}, {te:.1f}]s ({te-ts:.1f}s)")
 
         # Reconcile torch.compile with the requested config: compile, recompile on a
         # config change, or revert to eager when the Torch Compile node is removed.

@@ -161,6 +161,25 @@ class TimelineEditor {
         return this._snapSec(Math.max(0, Math.min(this.duration, best)));
     }
 
+    // Nearest segment to the right/left of `seg` (by facing edge). Used so a
+    // dragged edge pushes its neighbour instead of overlapping it.
+    _neighborRight(seg) {
+        let best = null;
+        for (const o of this.segments) {
+            if (o === seg || o.start_sec < seg.start_sec) continue;
+            if (!best || o.start_sec < best.start_sec) best = o;
+        }
+        return best;
+    }
+    _neighborLeft(seg) {
+        let best = null;
+        for (const o of this.segments) {
+            if (o === seg || o.end_sec > seg.end_sec) continue;
+            if (!best || o.end_sec > best.end_sec) best = o;
+        }
+        return best;
+    }
+
     _pointerPos(e) {
         // getBoundingClientRect reflects LiteGraph's zoom (CSS transform), but
         // _secToX/_canvasW use the canvas's logical width. Rescale screen px to
@@ -268,14 +287,38 @@ class TimelineEditor {
                 const dSecRaw = this._canvasW() > 0
                     ? ((x - this.drag.startX) / this._canvasW()) * this.duration : 0;
                 const len = this.drag.origEnd - this.drag.origStart;
-                const ns = this._snapSegSec(Math.max(0, Math.min(this.duration - len, this.drag.origStart + dSecRaw)), e.shiftKey);
+                let ns = this._snapSegSec(Math.max(0, Math.min(this.duration - len, this.drag.origStart + dSecRaw)), e.shiftKey);
+                // Block overlap: keep the segment inside the room between its
+                // neighbours (pushes nothing — a move just can't ride over them).
+                let lo = 0, hi = this.duration - len;
+                for (const o of this.segments) {
+                    if (o === seg) continue;
+                    if (o.end_sec <= this.drag.origStart + 1e-6) lo = Math.max(lo, o.end_sec);
+                    else if (o.start_sec >= this.drag.origEnd - 1e-6) hi = Math.min(hi, o.start_sec - len);
+                }
+                if (hi < lo) hi = lo;
+                ns = Math.max(lo, Math.min(hi, ns));
                 seg.start_sec = ns;
                 seg.end_sec = ns + len;
             } else if (this.drag.type === "resize-left") {
                 // Edge snaps to the SNAP_SEC grid (Shift = per-frame), clamped to [0,dur].
-                seg.start_sec = Math.min(seg.end_sec - this._minSeg(), this._snapSegSec(this._xToSecRaw(x), e.shiftKey));
+                let ns = Math.min(seg.end_sec - this._minSeg(), this._snapSegSec(this._xToSecRaw(x), e.shiftKey));
+                // Push (or roll, when already touching) the left neighbour's
+                // right edge instead of overlapping it.
+                const nb = this._neighborLeft(seg);
+                if (nb && (ns < nb.end_sec || Math.abs(seg.start_sec - nb.end_sec) < 1e-6)) {
+                    ns = Math.max(ns, nb.start_sec + this._minSeg());  // don't crush it
+                    nb.end_sec = ns;
+                }
+                seg.start_sec = ns;
             } else if (this.drag.type === "resize-right") {
-                seg.end_sec = Math.max(seg.start_sec + this._minSeg(), this._snapSegSec(this._xToSecRaw(x), e.shiftKey));
+                let ns = Math.max(seg.start_sec + this._minSeg(), this._snapSegSec(this._xToSecRaw(x), e.shiftKey));
+                const nb = this._neighborRight(seg);
+                if (nb && (ns > nb.start_sec || Math.abs(seg.end_sec - nb.start_sec) < 1e-6)) {
+                    ns = Math.min(ns, nb.end_sec - this._minSeg());
+                    nb.start_sec = ns;
+                }
+                seg.end_sec = ns;
             }
             this._commitDebounced();
             this.render();
@@ -476,7 +519,89 @@ class TimelineEditor {
         this._drawTrack(ctx, w);
         this._drawSegments(ctx, w);
         this._drawCrossfades(ctx, w);
+        this._drawChunkPlan(ctx, w);
         this._drawPlayhead(ctx, w);
+    }
+
+    // The REAL generation chunk plan — how align_chunks_to_schedule() (utils.py)
+    // tiles the whole clip: boundaries are the clip ends + every segment edge,
+    // and any region longer than the chunk window is sub-split evenly. Assumes
+    // the sampler's default chunk_duration = SNAP_SEC (8s). Mirrors the backend
+    // so the timeline shows exactly what will generate — gaps and long-segment
+    // splits included. Returns [[cs, ce], ...].
+    _chunkPlan() {
+        const dur = this.duration;
+        if (!(dur > 0) || !this.segments.length) return [];
+        const W = SNAP_SEC;
+        const bset = new Set([0, dur]);
+        for (const s of this.segments) {
+            bset.add(Math.max(0, Math.min(dur, s.start_sec)));
+            bset.add(Math.max(0, Math.min(dur, s.end_sec)));
+        }
+        const bounds = [...bset].sort((a, b) => a - b);
+        const keep = [];
+        for (let i = 0; i < bounds.length - 1; i++) {
+            const cs = bounds[i], ce = bounds[i + 1];
+            const span = ce - cs;
+            if (span < 1e-3) continue;
+            if (span <= W + 1e-6) { keep.push([cs, ce]); continue; }
+            const n = Math.ceil(span / W), step = span / n;
+            for (let k = 0; k < n; k++) {
+                keep.push([cs + k * step, k === n - 1 ? ce : cs + (k + 1) * step]);
+            }
+        }
+        return keep;
+    }
+
+    _coveredBySegment(cs, ce) {
+        const mid = (cs + ce) / 2;
+        return this.segments.some(s => mid >= s.start_sec - 1e-6 && mid <= s.end_sec + 1e-6);
+    }
+
+    // Overlay the chunk plan: a dashed cut at each chunk boundary, a "cN" index
+    // per chunk, and a diagonal hatch over GAP chunks (no segment — they still
+    // generate as base-model audio, which is the surprise in the logs).
+    _drawChunkPlan(ctx, w) {
+        const plan = this._chunkPlan();
+        if (!plan.length) return;
+        const yTop = RULER_H;
+        const yBot = RULER_H + TRACK_H;
+        ctx.save();
+        for (let i = 0; i < plan.length; i++) {
+            const [cs, ce] = plan[i];
+            const x1 = this._secToX(cs), x2 = this._secToX(ce);
+            if (!this._coveredBySegment(cs, ce)) {
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(x1, yTop, x2 - x1, TRACK_H);
+                ctx.clip();
+                ctx.strokeStyle = "rgba(255,140,0,0.45)";
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                for (let xx = x1 - TRACK_H; xx < x2; xx += 7) {
+                    ctx.moveTo(xx, yBot); ctx.lineTo(xx + TRACK_H, yTop);
+                }
+                ctx.stroke();
+                ctx.restore();
+            }
+            ctx.fillStyle = "rgba(255,205,90,0.95)";
+            ctx.font = "bold 9px monospace";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "top";
+            ctx.fillText(`c${i}`, x1 + 3, yTop + 2);
+        }
+        // Dashed cuts at interior chunk boundaries.
+        ctx.strokeStyle = "rgba(255,175,45,0.9)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        for (let i = 1; i < plan.length; i++) {
+            const x = this._secToX(plan[i][0]);
+            ctx.beginPath();
+            ctx.moveTo(x, yTop); ctx.lineTo(x, yBot);
+            ctx.stroke();
+        }
+        ctx.setLineDash([]);
+        ctx.restore();
     }
 
     // crossfade_frames widget value (the backend blends adjacent segments over

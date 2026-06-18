@@ -50,6 +50,64 @@ def test_cfm_gradient_flows():
     assert torch.isfinite(loss)
 
 
+# -- CFG conditioning dropout (p_uncond) --------------------------------------
+
+class _MockFoleyCFG(_MockFoley):
+    """Mock that also records the conditioning it was called with, plus the
+    empty-sequence builders the inference uncond branch uses."""
+    def forward(self, x, t, cond, clip_feat, sync_feat, drop_visual=None):
+        self.last_clip = clip_feat; self.last_cond = cond; self.last_dv = drop_visual
+        return {"x": self.lin(x)}
+    def get_empty_clip_sequence(self, bs, len):
+        return torch.full((bs, len, 768), 7.0)   # sentinel
+    def get_empty_sync_sequence(self, bs, len):
+        return torch.full((bs, len, 768), 9.0)
+
+
+def _mk_cfg():
+    torch.manual_seed(0)
+    B, C, T = 4, 128, 20
+    return (_MockFoleyCFG(C), torch.randn(B, C, T), torch.rand(B),
+            torch.randn(B, 8, 768), torch.randn(B, 16, 768), torch.randn(B, 4, 768))
+
+
+def test_p_uncond_zero_is_noop():
+    # p_uncond=0 must be identical to omitting it (backward compatible)
+    m, x1, t, cl, sy, tx = _mk_cfg()
+    torch.manual_seed(1); a = flow_matching_loss(m, x1, t, cl, sy, tx, "cpu", torch.float32, p_uncond=0.0).detach()
+    torch.manual_seed(1); b = flow_matching_loss(m, x1, t, cl, sy, tx, "cpu", torch.float32).detach()
+    assert torch.allclose(a, b)
+
+
+def test_p_uncond_nulls_conditioning_with_neg_prompt():
+    # p_uncond=1 -> every sample gets the inference uncond inputs: empty clip + neg text
+    m, x1, t, cl, sy, tx = _mk_cfg()
+    ut = torch.randn(1, 6, 768)  # longer seq -> exercises truncation to text seq=4
+    loss = flow_matching_loss(m, x1, t, cl, sy, tx, "cpu", torch.float32,
+                              p_uncond=1.0, uncond_text_feat=ut)
+    assert (m.last_clip == 7.0).all()                    # clip replaced by empty sequence
+    assert m.last_cond.shape[1] == 4                     # text truncated to model seq len
+    assert torch.allclose(m.last_cond[0], ut[0, :4])     # and it's the negative prompt
+    loss.backward()
+    assert torch.isfinite(loss)
+
+
+def test_p_uncond_zero_text_without_neg_prompt():
+    # No negative prompt -> dropped text is the canonical zero (null) embedding
+    m, x1, t, cl, sy, tx = _mk_cfg()
+    flow_matching_loss(m, x1, t, cl, sy, tx, "cpu", torch.float32,
+                       p_uncond=1.0, uncond_text_feat=None)
+    assert (m.last_cond == 0).all()
+
+
+def test_p_uncond_clears_drop_visual_for_nulled_samples():
+    # uncond samples are explicitly nulled -> they must not also be model-drop_visual'd
+    m, x1, t, cl, sy, tx = _mk_cfg()
+    flow_matching_loss(m, x1, t, cl, sy, tx, "cpu", torch.float32,
+                       p_uncond=1.0, visual_dropout_prob=1.0)
+    assert m.last_dv is None
+
+
 # -- compute_channel_weights --------------------------------------------------
 
 def _latents_with_channel_spread():

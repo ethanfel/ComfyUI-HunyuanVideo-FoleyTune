@@ -495,7 +495,9 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
                        compute_wav_spectral=False,
                        cfm_lambda=0.0,
                        event_envelope=None,
-                       event_strength=1.0):
+                       event_strength=1.0,
+                       p_uncond=0.0,
+                       uncond_text_feat=None):
     """Compute flow matching velocity prediction loss.
 
     Args:
@@ -514,6 +516,15 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
         min_snr_gamma: Min-SNR loss weighting gamma. When > 0, downweights
             high-noise timesteps where gradients are noisy and uninformative,
             focusing learning on the perceptually critical mid-range. Use 5.0.
+        p_uncond: per-sample probability of CFG conditioning dropout. On a fraction
+            of samples, replace ALL conditioning with the exact inputs the inference
+            CFG uncond branch uses (clip/sync -> get_empty_*_sequence, text ->
+            uncond_text_feat or zeros), and compute the normal flow loss. Without this
+            the LoRA never trains the unconditional pass, so its deltas there are
+            uncontrolled extrapolation -> uncond-path drift that high CFG amplifies
+            into fizz. Use 0.1-0.2 to make CFG > 1 clean. 0 = off (legacy).
+        uncond_text_feat: optional [1, seq, 768] negative-prompt CLAP embedding used
+            as the dropped-text target for inference parity; None -> zeros (null text).
 
     Returns:
         loss: scalar MSE loss
@@ -548,6 +559,42 @@ def flow_matching_loss(model, x1, t, clip_feat, sync_feat, text_feat, device, dt
     text_feat = text_feat.to(device=device, dtype=dtype)
     if event_envelope is not None:
         event_envelope = event_envelope.to(device=device, dtype=dtype)
+
+    # CFG conditioning dropout: on a fraction of samples, replace ALL conditioning
+    # with the exact unconditional inputs the inference CFG branch feeds (empty
+    # clip/sync sequences + negative-prompt/zero text — see model_utils.denoise_process).
+    # The base was pretrained with CFG dropout, but a LoRA trained only on conditional
+    # passes leaves uncontrolled deltas on the uncond pass -> drift that high CFG
+    # amplifies into fizz. Training it here makes CFG > 1 clean. Mirrors inference: no
+    # drop_visual on these samples (they are already explicitly nulled).
+    if p_uncond > 0:
+        uncond_mask = torch.rand(B, device=device) < p_uncond  # [B]
+        if bool(uncond_mask.any()):
+            m = uncond_mask.view(B, 1, 1)
+            empty_clip = model.get_empty_clip_sequence(
+                bs=B, len=clip_feat.shape[1]).to(device=device, dtype=dtype)
+            empty_sync = model.get_empty_sync_sequence(
+                bs=B, len=sync_feat.shape[1]).to(device=device, dtype=dtype)
+            clip_feat = torch.where(m, empty_clip, clip_feat)
+            sync_feat = torch.where(m, empty_sync, sync_feat)
+            if uncond_text_feat is not None:
+                ut = uncond_text_feat.to(device=device, dtype=dtype)
+                if ut.shape[0] == 1 and B > 1:
+                    ut = ut.repeat(B, 1, 1)
+                seq_c = text_feat.shape[1]
+                if ut.shape[1] < seq_c:
+                    ut = F.pad(ut, (0, 0, 0, seq_c - ut.shape[1]))
+                elif ut.shape[1] > seq_c:
+                    ut = ut[:, :seq_c]
+                text_feat = torch.where(m, ut, text_feat)
+            else:
+                text_feat = torch.where(m, torch.zeros_like(text_feat), text_feat)
+            # uncond samples are fully nulled already — don't also model-drop their visual
+            if drop_visual is not None:
+                drop_visual = [False if bool(uncond_mask[i]) else drop_visual[i]
+                               for i in range(B)]
+                if not any(drop_visual):
+                    drop_visual = None
 
     # Ensure sync features are padded to multiple of 8 (model assertion)
     sync_len = sync_feat.shape[1]

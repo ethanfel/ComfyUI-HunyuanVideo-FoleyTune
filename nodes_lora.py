@@ -891,6 +891,8 @@ class FoleyTuneTrainOptions:
                     "tooltip": "Per-sample probability of zeroing visual features (decouples identity from sound). 0.5 for generic-style; 0 = identity-preserving."}),
                 "vd_curriculum_ratio": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "Ramp visual dropout from 10%% of base to full over this fraction of training. 0 = off."}),
+                "p_uncond": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.5, "step": 0.05,
+                    "tooltip": "CFG conditioning dropout: fraction of samples trained with ALL conditioning nulled (the inference uncond inputs). Trains the unconditional pass so CFG>1 stops amplifying drift into fizz. 0.1-0.2 to make low CFG clean+tight. 0 = off."}),
                 # ── Optimizer extras ──
                 "prodigy_d_coef": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 10.0, "step": 0.01,
                     "tooltip": "Prodigy d_coef: scales the learned step size. Prodigy/Prodigy+ only."}),
@@ -1028,6 +1030,7 @@ class FoleyTuneLoRATrainer:
               tv_gate_sigma=0.3, vd_curriculum_ratio=0.0,
               t_min=0.0, t_max=1.0, t_range_mode="clamp", optimizer_type="adamw",
               visual_dropout_prob=0.0,
+              p_uncond=0.0,
               gradient_checkpointing=False,
               freeze_blocks=0,
               resume_from="", dataset_json="",
@@ -1061,6 +1064,7 @@ class FoleyTuneLoRATrainer:
         tv_gate_sigma = _o.get("tv_gate_sigma", tv_gate_sigma)
         vd_curriculum_ratio = _o.get("vd_curriculum_ratio", vd_curriculum_ratio)
         visual_dropout_prob = _o.get("visual_dropout_prob", visual_dropout_prob)
+        p_uncond = _o.get("p_uncond", p_uncond)
         prodigy_d_coef = _o.get("prodigy_d_coef", prodigy_d_coef)
         prodigy_growth_rate = _o.get("prodigy_growth_rate", prodigy_growth_rate)
         prodigy_steps = _o.get("prodigy_steps", prodigy_steps)
@@ -1095,6 +1099,7 @@ class FoleyTuneLoRATrainer:
             gradient_checkpointing, freeze_blocks, resume_from,
             dataset_json, prodigy_d_coef, prodigy_growth_rate,
             t_range_mode=t_range_mode,
+            p_uncond=p_uncond,
             eval_negative_prompt=eval_negative_prompt,
             schedulefree_c=schedulefree_c, intensity_bias=intensity_bias,
             intensity_metric=intensity_metric, use_cautious=use_cautious,
@@ -1119,7 +1124,8 @@ class FoleyTuneLoRATrainer:
                      prodigy_d_coef=1.0, prodigy_growth_rate=0.0,
                      t_range_mode="clamp", eval_negative_prompt="",
                      schedulefree_c=20, intensity_bias=0.5, intensity_metric="energy",
-                     use_cautious=False, use_orthograd=False, prodigy_steps=0):
+                     use_cautious=False, use_orthograd=False, prodigy_steps=0,
+                     p_uncond=0.0):
         import random
 
         torch.manual_seed(seed)
@@ -1333,6 +1339,7 @@ class FoleyTuneLoRATrainer:
             "temporal_variance_weight": temporal_variance_weight,
             "tv_gate_sigma": tv_gate_sigma,
             "vd_curriculum_ratio": vd_curriculum_ratio,
+            "p_uncond": p_uncond,
             "t_min": t_min, "t_max": t_max, "t_range_mode": t_range_mode,
             "eval_negative_prompt": eval_negative_prompt,
             "optimizer_type": optimizer_type,
@@ -1529,6 +1536,8 @@ class FoleyTuneLoRATrainer:
                 wav_spectral_adaptive=wav_spectral_adaptive,
                 compute_wav_spectral=_do_wav,
                 cfm_lambda=cfm_lambda,
+                p_uncond=p_uncond,
+                uncond_text_feat=eval_uncond,
             )
             loss = loss / grad_accum
             loss.backward()
@@ -2344,6 +2353,7 @@ class FoleyTuneLoRAScheduler:
         "wav_spectral_weight": 0.0, "wav_spectral_every": 8, "wav_spectral_crop": 64,
         "wav_spectral_adaptive": True, "channel_weight_mode": "off", "cfm_lambda": 0.0, "channel_loss_weight": False,
         "temporal_variance_weight": 0.0, "tv_gate_sigma": 0.3, "vd_curriculum_ratio": 0.0,
+        "p_uncond": 0.0,
         "t_min": 0.0, "t_max": 1.0, "t_range_mode": "clamp", "optimizer_type": "prodigy",
         "prodigy_d_coef": 1.0, "prodigy_growth_rate": 0.0,
         "prodigy_safeguard_warmup": True,
@@ -3055,6 +3065,8 @@ class FoleyTuneLoRAScheduler:
                             cfm_lambda=config.get("cfm_lambda", 0.0),
                             event_envelope=batch_event,
                             event_strength=config.get("event_strength", 1.0),
+                            p_uncond=config.get("p_uncond", 0.0),
+                            uncond_text_feat=_eval_uncond,
                         )
                         loss = loss / config["grad_accum"]
                         loss.backward()

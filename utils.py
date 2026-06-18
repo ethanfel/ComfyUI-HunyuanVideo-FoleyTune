@@ -1043,6 +1043,11 @@ def chunked_denoise_process(
     # --- Precompute per-chunk CFG features ---
     # Cast conditioning to the compute dtype once here; it's constant across steps.
     compute_dtype = next(model_dict.foley_model.parameters()).dtype
+    # Build envelopes when the base model OR any scheduled LoRA *might* use event
+    # conditioning (LoRA metas aren't loaded yet — this is a safe over-estimate).
+    # Whether each chunk actually RECEIVES its envelope is gated in the loop by
+    # that chunk's hot-swapped _event_conditioning_enabled flag, so a non-event
+    # LoRA is never fed an event signal (matches regular sampling).
     _event_enabled = bool(getattr(model_dict.foley_model, "_event_conditioning_enabled", False)) or bool(
         lora_schedule and any(seg.get("lora_path") for seg in lora_schedule)
     )
@@ -1150,20 +1155,28 @@ def chunked_denoise_process(
                     # cfg_in tensors were cast to compute_dtype at build time; only the latent changes.
                     latent_input = latent_input.to(dtype=compute_dtype)
                     current_event_strength = float(getattr(model_dict.foley_model, "_event_strength", 1.0))
+                    # Only feed the event envelope when THIS chunk's active LoRA was
+                    # trained with event conditioning (the hot-swap set this flag from
+                    # the LoRA's meta). Mirrors regular sampling, which passes None
+                    # otherwise — so a non-event LoRA isn't fed an event signal it
+                    # never learned, and a single-zone timeline matches plain sampling.
+                    _chunk_event = (cfg_in["event"]
+                                    if getattr(model_dict.foley_model, "_event_conditioning_enabled", False)
+                                    else None)
 
                     if compute_dtype in (torch.float16, torch.bfloat16):
                         with torch.autocast(device_type=device.type, dtype=compute_dtype):
                             noise_pred = model_dict.foley_model(
                                 x=latent_input, t=t_expand, cond=cfg_in["text"],
                                 clip_feat=cfg_in["clip"], sync_feat=cfg_in["sync"],
-                                event_envelope=cfg_in["event"],
+                                event_envelope=_chunk_event,
                                 event_strength=current_event_strength,
                             )["x"]
                     else:
                         noise_pred = model_dict.foley_model(
                             x=latent_input, t=t_expand, cond=cfg_in["text"],
                             clip_feat=cfg_in["clip"], sync_feat=cfg_in["sync"],
-                            event_envelope=cfg_in["event"],
+                            event_envelope=_chunk_event,
                             event_strength=current_event_strength,
                         )["x"]
 

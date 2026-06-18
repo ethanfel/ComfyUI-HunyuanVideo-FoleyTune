@@ -463,9 +463,11 @@ class TimelineEditor {
         if (dur <= W + 1e-6) {
             chunks = [[0, dur]];
         } else if (safa) {
-            const ov = SAFA_OVERLAP_SEC;
-            const n = Math.ceil((dur - W) / (W - ov)) + 1;
-            const stride = (dur - W) / (n - 1);
+            // Fixed SAFA_OVERLAP_SEC per seam (same as the manual seam toggle) —
+            // 8s zones striding by W-overlap, NOT an evened-out overlap. Last
+            // zone is the remainder.
+            const stride = W - SAFA_OVERLAP_SEC;
+            const n = Math.ceil((dur - W) / stride) + 1;
             chunks = [];
             for (let i = 0; i < n; i++) { const s = i * stride; chunks.push([s, Math.min(s + W, dur)]); }
         } else {

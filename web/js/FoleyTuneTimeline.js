@@ -14,11 +14,15 @@ function resolveColor(entry) {
 const RULER_H = 22;
 const THUMB_H = 60;
 const TRACK_H = 48;
+const LANE_H = 48;        // variance automation lane under the zone track
 const PREVIEW_H = 220;    // frame-preview area below the timeline (scrub player)
 const HANDLE_W = 6;       // visual width of the resize-handle indicator
 const EDGE_GRAB = 10;     // hit tolerance around a segment edge (px, straddles it)
-const CANVAS_H = RULER_H + TRACK_H;
+const LANE_TOP = RULER_H + TRACK_H;        // y where the variance lane starts
+const LANE_PAD = 8;                        // inner vertical padding of the lane
+const CANVAS_H = RULER_H + TRACK_H + LANE_H;
 const TOTAL_H = THUMB_H + CANVAS_H + PREVIEW_H;
+const VAR_PT_R = 5;       // variance breakpoint hit/draw radius (px)
 const MIN_SEG_FRAMES = 1;   // shortest segment, in frames
 const DEFAULT_FPS = 30;     // fallback when the video fps is unknown
 const SNAP_SEC = 8;         // magnetic grid for segment boundaries (hold Shift to disable)
@@ -43,28 +47,30 @@ class TimelineEditor {
         this.videoPath = "";
         this.fps = DEFAULT_FPS;
         this._frameTimer = null;
+        this.varEnv = [];        // variance automation breakpoints [{t, v}], sorted by t
 
-        // Hide the segments_json widget WITHOUT converting it. A multiline STRING
-        // owns a DOM <textarea>, so we zero its node height and display:none the
-        // textarea. We must NOT set .type = "converted-widget": that changes how
-        // the widget participates in widgets_values, so on save/load its slot
-        // misaligns and the JSON leaks into the next text widget (the positive
-        // prompt). Keeping it a normal STRING widget holds a stable slot. (.hidden
-        // is also avoided — it can drop the value from widgets_values entirely.)
-        this.segWidget = node.widgets?.find(w => w.name === "segments_json");
-        if (this.segWidget) {
-            this.segWidget.computeSize = () => [0, -4];
+        // Hide the segments_json + variance_env STRING widgets WITHOUT converting
+        // them. A multiline STRING owns a DOM <textarea>, so we zero its node
+        // height and display:none the textarea. We must NOT set
+        // .type = "converted-widget": that changes how the widget participates in
+        // widgets_values, so on save/load its slot misaligns and the JSON leaks
+        // into the next text widget (the positive prompt). Keeping it a normal
+        // STRING widget holds a stable slot. (.hidden is also avoided — it can
+        // drop the value from widgets_values entirely.)
+        const hideWidget = (name) => {
+            const w = node.widgets?.find(wd => wd.name === name);
+            if (!w) return null;
+            w.computeSize = () => [0, -4];
             const hideEl = () => {
-                const el = this.segWidget.inputEl
-                    || this.segWidget.element
-                    || (this.segWidget.options && this.segWidget.options.element);
+                const el = w.inputEl || w.element || (w.options && w.options.element);
                 if (el && el.style) el.style.display = "none";
             };
             hideEl();
-            // ComfyUI re-shows the textarea on some re-layouts; re-hide on the
-            // next frame so it stays gone.
-            setTimeout(hideEl, 0);
-        }
+            setTimeout(hideEl, 0);  // ComfyUI re-shows it on some re-layouts
+            return w;
+        };
+        this.segWidget = hideWidget("segments_json");
+        this.varWidget = hideWidget("variance_env");
 
         this._buildDOM();
         this._bindEvents();
@@ -248,6 +254,23 @@ class TimelineEditor {
             }
         }
 
+        // Variance lane: grab an existing breakpoint or add one, then drag it.
+        if (this._inLane(y)) {
+            const i = this._laneHit(x, y);
+            let pt;
+            if (i >= 0) {
+                pt = this.varEnv[i];
+            } else {
+                pt = { t: Math.max(0, Math.min(this.duration, this._xToSecRaw(x))), v: this._yToVal(y) };
+                this.varEnv.push(pt);
+            }
+            this.drag = { type: "var", pt };
+            this.canvas.setPointerCapture(e.pointerId);
+            this._commitFlush();
+            this.render();
+            return;
+        }
+
         const hit = this._hitTest(x, y);
 
         if (hit.idx < 0) {
@@ -287,6 +310,13 @@ class TimelineEditor {
         if (this.drag) {
             if (this.drag.type === "scrub") {
                 this._setPlayhead(this._xToSecRaw(x));
+                return;
+            }
+            if (this.drag.type === "var") {
+                this.drag.pt.t = Math.max(0, Math.min(this.duration, this._xToSecRaw(x)));
+                this.drag.pt.v = this._yToVal(y);
+                this._commitDebounced();
+                this.render();
                 return;
             }
             const seg = this.segments[this.drag.idx];
@@ -344,6 +374,8 @@ class TimelineEditor {
 
         if (y < RULER_H) {
             this.canvas.style.cursor = "ew-resize";  // ruler = scrub zone
+        } else if (this._inLane(y)) {
+            this.canvas.style.cursor = this._laneHit(x, y) >= 0 ? "grab" : "crosshair";
         } else if (hit.edge) {
             this.canvas.style.cursor = "ew-resize";
         } else if (hit.idx >= 0) {
@@ -552,6 +584,16 @@ class TimelineEditor {
         e.preventDefault();
         e.stopPropagation();
         const { x, y } = this._pointerPos(e);
+        // Variance lane: right-click a breakpoint to remove it.
+        if (this._inLane(y)) {
+            const i = this._laneHit(x, y);
+            if (i >= 0) {
+                this.varEnv.splice(i, 1);
+                this._commitFlush();
+                this.render();
+            }
+            return;
+        }
         const hit = this._hitTest(x, y);
         if (hit.idx < 0) { this._closeMenu(); return; }
         // Select the zone and open a menu — deletion is a deliberate choice now.
@@ -653,11 +695,17 @@ class TimelineEditor {
         const json = JSON.stringify(this.segments);
         // Backend reads the widget value (positional in widgets_values).
         if (this.segWidget) this.segWidget.value = json;
+        // Variance lane → [[t, v], ...] (sorted), same dual-store.
+        const envArr = [...this.varEnv].sort((a, b) => a.t - b.t)
+            .map(p => [+p.t.toFixed(4), +p.v.toFixed(4)]);
+        const envJson = JSON.stringify(envArr);
+        if (this.varWidget) this.varWidget.value = envJson;
         // Mirror into node.properties, which serializes BY NAME — so the data
         // survives widget reordering / node-definition changes that would
         // otherwise scramble the positional widget slot and scrap the segments.
         this.node.properties = this.node.properties || {};
         this.node.properties.foleytune_segments = json;
+        this.node.properties.foleytune_var_env = envJson;
     }
 
     // --- Resize ---
@@ -724,7 +772,68 @@ class TimelineEditor {
         this._drawSegments(ctx, w);
         this._drawChunkPlan(ctx, w);
         this._drawSeamBadges(ctx);
+        this._drawVarLane(ctx, w);
         this._drawPlayhead(ctx, w);
+    }
+
+    // --- Variance automation lane (under the zone track) ---
+    _inLane(y) { return y >= LANE_TOP && y <= LANE_TOP + LANE_H; }
+    _valY(v) {  // value 0..1 -> y (0 at bottom, 1 at top)
+        const inner = LANE_H - 2 * LANE_PAD;
+        return LANE_TOP + LANE_PAD + (1 - Math.max(0, Math.min(1, v))) * inner;
+    }
+    _yToVal(y) {
+        const inner = LANE_H - 2 * LANE_PAD;
+        return Math.max(0, Math.min(1, (LANE_TOP + LANE_PAD + inner - y) / inner));
+    }
+    _laneHit(x, y) {  // index of the breakpoint near (x,y), or -1
+        for (let i = 0; i < this.varEnv.length; i++) {
+            const px = this._secToX(this.varEnv[i].t), py = this._valY(this.varEnv[i].v);
+            if ((x - px) ** 2 + (y - py) ** 2 <= (VAR_PT_R + 3) ** 2) return i;
+        }
+        return -1;
+    }
+
+    _drawVarLane(ctx, w) {
+        const yBot = LANE_TOP + LANE_H;
+        ctx.save();
+        ctx.fillStyle = "#0c0c16";
+        ctx.fillRect(0, LANE_TOP, w, LANE_H);
+        ctx.strokeStyle = "#2a2a3a"; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(0, LANE_TOP + 0.5); ctx.lineTo(w, LANE_TOP + 0.5); ctx.stroke();
+        // 0 / 0.5 / 1 guide lines
+        ctx.strokeStyle = "rgba(120,200,160,0.12)";
+        for (const v of [0, 0.5, 1]) {
+            const gy = this._valY(v);
+            ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(w, gy); ctx.stroke();
+        }
+        ctx.fillStyle = "rgba(140,220,180,0.85)";
+        ctx.font = "9px sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillText("variance", 4, LANE_TOP + 3);
+
+        const env = [...this.varEnv].sort((a, b) => a.t - b.t);
+        if (!env.length) {
+            ctx.fillStyle = "rgba(140,220,180,0.45)";
+            ctx.textAlign = "center"; ctx.textBaseline = "middle";
+            ctx.fillText("click to add variance keyframes (overrides per-zone variance)",
+                         w / 2, LANE_TOP + LANE_H / 2);
+            ctx.restore();
+            return;
+        }
+        // Polyline (flat-held at the ends), then breakpoints.
+        ctx.strokeStyle = "rgba(120,220,170,0.95)"; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(0, this._valY(env[0].v));
+        for (const p of env) ctx.lineTo(this._secToX(p.t), this._valY(p.v));
+        ctx.lineTo(w, this._valY(env[env.length - 1].v));
+        ctx.stroke();
+        for (const p of env) {
+            const px = this._secToX(p.t), py = this._valY(p.v);
+            ctx.beginPath(); ctx.arc(px, py, VAR_PT_R, 0, Math.PI * 2);
+            ctx.fillStyle = "#1a1a28"; ctx.fill();
+            ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(150,235,190,0.95)"; ctx.stroke();
+        }
+        ctx.restore();
     }
 
     // Single source of truth = zone positions. A seam overlaps (blended) or
@@ -1069,6 +1178,20 @@ class TimelineEditor {
     // to the widget value (for graphs saved before properties mirroring). If the
     // widget slot was scrambled, re-committing repairs it from the good source.
     _restore() {
+        // Variance lane (node.properties > widget). [[t,v],...] -> [{t,v}].
+        const envProp = this.node.properties && this.node.properties.foleytune_var_env;
+        for (const cand of [envProp, this.varWidget && this.varWidget.value]) {
+            if (!cand || cand === "[]") continue;
+            try {
+                const arr = JSON.parse(cand);
+                if (Array.isArray(arr) && arr.length) {
+                    this.varEnv = arr
+                        .filter(p => Array.isArray(p) && p.length >= 2)
+                        .map(p => ({ t: +p[0], v: Math.max(0, Math.min(1, +p[1])) }));
+                    break;
+                }
+            } catch (_) { /* try next */ }
+        }
         const props = this.node.properties && this.node.properties.foleytune_segments;
         for (const candidate of [props, this.segWidget && this.segWidget.value]) {
             if (!candidate || candidate === "[]") continue;
@@ -1081,6 +1204,7 @@ class TimelineEditor {
                 }
             } catch (_) { /* try next source */ }
         }
+        if (this.varEnv.length) this._commitFlush();  // heal env even with no segments
     }
 
     destroy() {

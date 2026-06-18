@@ -150,6 +150,23 @@ def _segment_at_time(lora_schedule, time_sec):
     return None
 
 
+def _sample_env(env, t):
+    """Sample a breakpoint envelope [[t, v], ...] (sorted by t) at time t with
+    linear interpolation and flat hold beyond the ends. Returns None if empty."""
+    if not env:
+        return None
+    if t <= env[0][0]:
+        return float(env[0][1])
+    if t >= env[-1][0]:
+        return float(env[-1][1])
+    for i in range(len(env) - 1):
+        t0, v0 = env[i]
+        t1, v1 = env[i + 1]
+        if t0 <= t <= t1:
+            return float(v0) if t1 <= t0 else float(v0 + (v1 - v0) * (t - t0) / (t1 - t0))
+    return float(env[-1][1])
+
+
 # DAC kwargs + explicit latent_dim (must be 128 or the decoder mismatches)
 # extracted from original pth
 _DAC_KWARGS = dict(
@@ -848,13 +865,16 @@ def chunked_denoise_process(
             (f"SaFa {chunks[i][1] - chunks[i + 1][0]:.2f}s"
              if (chunks[i][1] - chunks[i + 1][0]) > 1e-3 else "cut")
             for i in range(len(chunks) - 1)) or "—"
+        _env = lora_schedule[0].get("variance_env")
         logger.info(f"LoRA timeline: {len(lora_schedule)} zone(s) → {len(chunks)} chunks / "
-                    f"{features['duration']:.2f}s. seams: [{_seam_desc}]")
+                    f"{features['duration']:.2f}s. seams: [{_seam_desc}]"
+                    + ("  (variance: automation lane)" if _env else ""))
         for _ci, (_cs, _ce) in enumerate(chunks):
             _seg = _segment_at_time(lora_schedule, (_cs + _ce) / 2.0)
             _lora = os.path.basename(_seg["lora_path"]) if (_seg and _seg.get("lora_path")) else "base"
             _sd = int(_seg.get("seed", -1)) if _seg else -1
-            _vr = float(_seg.get("variance_strength", 0.0)) if _seg else 0.0
+            _vr = (_sample_env(_env, (_cs + _ce) / 2.0) if _env
+                   else (float(_seg.get("variance_strength", 0.0)) if _seg else 0.0))
             _pr = (_seg.get("prompt", "") if _seg else "")[:30]
             logger.info(f"  c{_ci} [{_cs:.2f},{_ce:.2f}]s  lora={_lora}  "
                         f"seed={'global' if _sd < 0 else _sd}  var={_vr:.2f}"
@@ -888,6 +908,9 @@ def chunked_denoise_process(
          if (lora_schedule and _segment_at_time(lora_schedule, (cs + ce) / 2.0)) else "safa")
         for cs, ce in chunks
     ]
+    # Optional variance automation envelope ([[t, v], ...]) — when present it
+    # OVERRIDES per-zone variance_strength, sampled at each chunk's centre.
+    _var_env = lora_schedule[0].get("variance_env") if lora_schedule else None
 
     # --- LoRA schedule: save base state for hot-swapping ---
     # Only needed if at least one segment actually carries a LoRA. A prompt-only
@@ -1022,6 +1045,8 @@ def chunked_denoise_process(
         # fresh. Offset the variance seed so the fresh draw is decorrelated from
         # this chunk's base noise (else the blend would be a near no-op).
         _var = min(max(float(_seg.get("variance_strength", 0.0)) if _seg else 0.0, 0.0), 1.0)
+        if _var_env:  # the automation lane overrides per-zone variance
+            _var = min(max(_sample_env(_var_env, _resolve_center(c_idx, t_start, t_end)), 0.0), 1.0)
         _vseed = ((int(_seg_seed) if _seg_seed >= 0 else generator.initial_seed())
                   + 0x5237 + c_idx) & 0xffffffffffffffff
 

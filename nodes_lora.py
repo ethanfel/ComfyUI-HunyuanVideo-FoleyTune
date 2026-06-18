@@ -2015,6 +2015,12 @@ class FoleyTuneLoRATimeline:
                                "but more double-generation. In 'auto' mode this is COMPUTED (and the "
                                "Refresh button re-evens it across the currently-enabled seams).",
                 }),
+                "variance_env": ("STRING", {
+                    "default": "[]",
+                    "tooltip": "Variance automation curve [[t,v],...], edited in the lane under the "
+                               "timeline. When non-empty it OVERRIDES per-zone variance, sampled at "
+                               "each chunk's centre. Managed by the timeline UI — leave as-is.",
+                }),
             },
         }
 
@@ -2027,7 +2033,7 @@ class FoleyTuneLoRATimeline:
     def build_schedule(self, entries, segments_json="[]", features=None,
                        video_features=None, hunyuan_deps=None, video_path="",
                        base_prompt="", negative_prompt="", safa_mode="manual",
-                       safa_overlap=1.5):
+                       safa_overlap=1.5, variance_env="[]"):
         try:
             segments = json.loads(segments_json) if (segments_json or "").strip() else []
         except (json.JSONDecodeError, TypeError):
@@ -2035,6 +2041,17 @@ class FoleyTuneLoRATimeline:
             segments = []
         if not isinstance(segments, list):
             segments = []
+
+        # Variance automation envelope [[t, v], ...] from the lane (sanitized:
+        # v clamped 0..1, sorted by t). Empty -> per-zone variance is used.
+        try:
+            _raw_env = json.loads(variance_env) if (variance_env or "").strip() else []
+            var_env = sorted(
+                ([float(p[0]), max(0.0, min(1.0, float(p[1])))]
+                 for p in _raw_env if isinstance(p, (list, tuple)) and len(p) >= 2),
+                key=lambda p: p[0]) if isinstance(_raw_env, list) else []
+        except (json.JSONDecodeError, TypeError, ValueError):
+            var_env = []
 
         # fps (loader's video_features > features > 30 fallback) drives the
         # frame-based ruler.
@@ -2126,6 +2143,7 @@ class FoleyTuneLoRATimeline:
                 "strength": max(0.0, min(2.0, float(seg.get("strength", entry["strength"])))),
                 "safa_overlap": float(safa_overlap),  # sub-split intra-zone overlap (>8s zones)
                 "blend": ("xfade" if str(seg.get("blend", "safa")) == "xfade" else "safa"),
+                "variance_env": var_env,  # timeline-wide; overrides variance when non-empty
                 "seed": int(entry.get("seed", -1)),                       # -1 = inherit global
                 "variance_strength": float(entry.get("variance_strength", 0.0)),
             }

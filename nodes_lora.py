@@ -1999,6 +1999,12 @@ class FoleyTuneLoRATimeline:
                     "tooltip": "Self-contained path only (features unconnected): the CFG negative "
                                "prompt (global). Ignored if `features` is connected.",
                 }),
+                "auto_populate_safa": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Option for the 'Auto-populate 8s zones' button: ON = the auto zones "
+                               "OVERLAP (SaFa-blended seams, matches plain auto-chunked sampling); "
+                               "OFF = contiguous 8s tiles (hard cuts). Read by the timeline UI only.",
+                }),
             },
         }
 
@@ -2010,7 +2016,7 @@ class FoleyTuneLoRATimeline:
 
     def build_schedule(self, entries, segments_json="[]", features=None,
                        video_features=None, hunyuan_deps=None, video_path="",
-                       base_prompt="", negative_prompt=""):
+                       base_prompt="", negative_prompt="", auto_populate_safa=False):
         try:
             segments = json.loads(segments_json) if (segments_json or "").strip() else []
         except (json.JSONDecodeError, TypeError):

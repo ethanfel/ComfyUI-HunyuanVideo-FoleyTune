@@ -389,34 +389,96 @@ class TimelineEditor {
         }
     }
 
+    // Prompt for a LoRA entry index (skips the prompt for a single entry).
+    // Returns the index, or null if cancelled/invalid.
+    _pickEntry(defaultIdx) {
+        if (this.entries.length <= 1) return 0;
+        const labels = this.entries.map((en, i) => `${i}: ${en.label}`).join("\n");
+        const input = prompt(`Select LoRA entry:\n${labels}`, String(defaultIdx ?? 0));
+        if (input === null) return null;
+        const i = parseInt(input, 10);
+        return (i >= 0 && i < this.entries.length) ? i : null;
+    }
+
+    _entryIndexOf(seg) {
+        if (seg.entry_id != null) {
+            const i = this.entries.findIndex(en => en && en.id === seg.entry_id);
+            if (i >= 0) return i;
+        }
+        return seg.entry_index ?? 0;
+    }
+
+    _assignEntry(seg, idx) {
+        seg.entry_id = this.entries[idx].id;
+        seg.entry_index = idx;
+        seg.strength = this.entries[idx].strength;
+    }
+
     _onDblClick(e) {
         e.stopPropagation();
         e.preventDefault();
         if (!this.entries.length || this.duration <= 0) return;
 
-        const { x } = this._pointerPos(e);
-        const sec = this._xToSec(x);
+        const { x, y } = this._pointerPos(e);
 
-        let entryIdx = 0;
-        if (this.entries.length > 1) {
-            const labels = this.entries.map((en, i) => `${i}: ${en.label}`).join("\n");
-            const input = prompt(`Select LoRA entry:\n${labels}`, "0");
-            if (input === null) return;
-            entryIdx = parseInt(input, 10);
-            if (entryIdx < 0 || entryIdx >= this.entries.length) return;
+        // Double-click on a zone = SWITCH its LoRA; on empty space = ADD a zone.
+        const hit = this._hitTest(x, y);
+        if (hit.idx >= 0) {
+            const seg = this.segments[hit.idx];
+            const idx = this._pickEntry(this._entryIndexOf(seg));
+            if (idx === null) return;
+            this._assignEntry(seg, idx);
+            this._commitFlush();
+            this.render();
+            return;
         }
 
+        const idx = this._pickEntry(0);
+        if (idx === null) return;
+        const sec = this._xToSec(x);
         const startSec = this._snapSec(Math.max(0, sec - 2));
         const endSec = this._snapSec(Math.min(this.duration, sec + 2));
-        this.segments.push({
-            entry_id: this.entries[entryIdx].id,  // stable ref (survives reorder)
-            entry_index: entryIdx,                // fallback for older graphs
-            start_sec: startSec,
-            end_sec: endSec,
-            strength: this.entries[entryIdx].strength,
-        });
+        const seg = { start_sec: startSec, end_sec: endSec };
+        this._assignEntry(seg, idx);
+        this.segments.push(seg);
         this.segments.sort((a, b) => a.start_sec - b.start_sec);
         this.selectedIdx = this.segments.length - 1;
+        this._commitFlush();
+        this.render();
+    }
+
+    _autoSafa() {
+        const wgt = this.node?.widgets?.find(w => w.name === "auto_populate_safa");
+        return !!(wgt && wgt.value);
+    }
+
+    // Fill the timeline with 8s zones, assigning entries in chain order
+    // (cycling). SaFa ON → overlapping 8s zones (mirrors compute_chunk_boundaries
+    // / plain auto-chunked sampling); OFF → contiguous 8s tiles (hard cuts, last
+    // zone is the remainder). Replaces any existing zones.
+    _autoPopulate() {
+        if (!(this.duration > 0) || !this.entries.length) return;
+        const W = SNAP_SEC, dur = this.duration, safa = this._autoSafa();
+        let chunks;
+        if (dur <= W + 1e-6) {
+            chunks = [[0, dur]];
+        } else if (safa) {
+            const ov = SAFA_OVERLAP_SEC;
+            const n = Math.ceil((dur - W) / (W - ov)) + 1;
+            const stride = (dur - W) / (n - 1);
+            chunks = [];
+            for (let i = 0; i < n; i++) { const s = i * stride; chunks.push([s, Math.min(s + W, dur)]); }
+        } else {
+            const n = Math.ceil(dur / W);
+            chunks = [];
+            for (let i = 0; i < n; i++) chunks.push([i * W, Math.min((i + 1) * W, dur)]);
+        }
+        this.segments = chunks.map(([s, eSec], i) => {
+            const seg = { start_sec: this._snapSec(s), end_sec: this._snapSec(eSec) };
+            this._assignEntry(seg, i % this.entries.length);
+            return seg;
+        });
+        this.selectedIdx = -1;
         this._commitFlush();
         this.render();
     }
@@ -894,6 +956,12 @@ app.registerExtension({
                 editor._restore();
                 node._timelineEditor = editor;
             }, 0);
+
+            // Auto-populate: fill the timeline with 8s zones (entries in order;
+            // SaFa-overlapping or contiguous per the auto_populate_safa toggle).
+            this.addWidget("button", "Auto-populate 8s zones", null, () => {
+                node._timelineEditor?._autoPopulate();
+            });
 
             // DOM Widget. Use a neutral widget type (NOT "preview") — the
             // "preview" type makes ComfyUI apply image aspect-ratio sizing,

@@ -1875,12 +1875,18 @@ class FoleyTuneLoRATimelineEntry:
                                "Needs hunyuan_deps on the Timeline node. Describe the full audio "
                                "texture — narrow prompts hurt prompt-following.",
                 }),
-                "seed": ("STRING", {
+                "seed_mode": (["sampler", "fixed", "randomize"], {
                     "default": "sampler",
-                    "tooltip": "Per-section seed. 'sampler' = use the sampler node's global seed "
-                               "(default). Or enter a number to give THIS section its own fixed "
-                               "noise — re-roll one section to a different take without changing "
-                               "the others.",
+                    "tooltip": "How THIS section gets its noise seed:\n"
+                               "• sampler = use the sampler node's global seed (default)\n"
+                               "• fixed = use the 'seed' value below — give one section its own "
+                               "take without changing the others\n"
+                               "• randomize = a fresh random seed every run",
+                }),
+                "seed": ("INT", {
+                    "default": 0, "min": 0, "max": 0xffffffffffffffff,
+                    "tooltip": "The seed used when seed_mode = 'fixed'. Ignored for 'sampler' "
+                               "(inherits the global seed) and 'randomize'.",
                 }),
                 "variance_strength": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
@@ -1899,23 +1905,30 @@ class FoleyTuneLoRATimelineEntry:
     CATEGORY = "FoleyTune"
 
     @staticmethod
-    def _parse_seed(s):
-        """'sampler'/'global'/'' -> -1 (inherit sampler seed); else the int.
+    def _resolve_seed(mode, seed):
+        """Map (seed_mode, seed) -> the int the schedule stores.
 
-        Tolerates the legacy INT widget value (-1 / a number) loaded into the
-        new STRING widget, and any non-numeric junk falls back to inherit.
+        -1 = inherit the sampler's global seed; >=0 = this section's own seed.
         """
-        t = str(s).strip().lower()
-        if t in ("", "sampler", "global", "-1"):
-            return -1
-        try:
-            v = int(t)
-        except ValueError:
-            return -1
-        return v if v >= 0 else -1
+        m = str(mode).strip().lower()
+        if m == "fixed":
+            v = int(seed)
+            return v if v >= 0 else 0
+        if m == "randomize":
+            import random
+            return random.randint(0, 0xffffffffffffffff)
+        return -1  # 'sampler' (or anything unexpected) -> inherit global
+
+    @classmethod
+    def IS_CHANGED(cls, seed_mode="sampler", **kwargs):
+        # 'randomize' must re-execute every run to draw a fresh seed; NaN never
+        # equals itself, so ComfyUI treats the node as always-changed.
+        if str(seed_mode).strip().lower() == "randomize":
+            return float("nan")
+        return False
 
     def add_entry(self, lora_name, strength, label, color, prev_entries=None, prompt="",
-                  seed="sampler", variance_strength=0.0, unique_id=None):
+                  seed_mode="sampler", seed=0, variance_strength=0.0, unique_id=None):
         entries = list(prev_entries) if prev_entries else []
         # "(none)" = prompt-only segment: base model + this prompt, no LoRA.
         adapter_path = (None if lora_name == _LORA_NONE
@@ -1931,7 +1944,7 @@ class FoleyTuneLoRATimelineEntry:
             "label": label,
             "color": color,
             "prompt": prompt,
-            "seed": self._parse_seed(seed),
+            "seed": self._resolve_seed(seed_mode, seed),
             "variance_strength": float(variance_strength),
         })
         return (entries,)

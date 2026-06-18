@@ -840,8 +840,9 @@ def chunked_denoise_process(
         _window = max((ce - cs for cs, ce in chunks), default=features["duration"])
         chunks = _schedule_to_chunks(lora_schedule, _window)
         crossfade_mode = "safa"
-        _seams = sum(1 for i in range(len(lora_schedule) - 1)
-                     if lora_schedule[i + 1].get("safa"))
+        _sorted = sorted(lora_schedule, key=lambda z: z["start_sec"])
+        _seams = sum(1 for i in range(len(_sorted) - 1)
+                     if float(_sorted[i + 1]["start_sec"]) < float(_sorted[i]["end_sec"]) - 1e-6)
         logger.info(f"LoRA timeline: {len(chunks)} chunks from {len(lora_schedule)} zone(s), "
                     f"{_seams} SaFa seam(s). chunks={[(round(a, 2), round(b, 2)) for a, b in chunks]}")
 

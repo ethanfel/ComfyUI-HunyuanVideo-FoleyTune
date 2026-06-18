@@ -2086,34 +2086,22 @@ class FoleyTuneLoRATimeline:
             logger.info("LoRA timeline: built features from video_features "
                         "(self-contained, no FeatureExtractor)")
 
-        # "Zones are chunks": pack the sorted zones into a sequence from the first
-        # zone's start. A zone with safa=True pulls SAFA_OVERLAP_SEC left to OVERLAP
-        # its predecessor (the seam SaFa-blends); safa=False just touches (hard cut).
-        # We keep each zone's LENGTH and emit packed start/end — the sampler reads
-        # the overlaps straight off these positions. (Drawn gaps pack out.)
-        from .utils import SAFA_OVERLAP_SEC
+        # "Zones are chunks": the timeline UI already places zones at their final
+        # positions — adjacent zones TOUCH (hard cut) or OVERLAP (a SaFa seam, the
+        # UI shifts them together by SAFA_OVERLAP_SEC). We read those positions
+        # straight through; the sampler derives each seam's overlap from them.
         schedule = []
-        _prev_end = None
         for seg in sorted(segments, key=lambda s: s["start_sec"]):
             entry = _entry_for(seg)
             if entry is None:
                 continue
-            _len = float(seg["end_sec"]) - float(seg["start_sec"])
-            _safa = bool(seg.get("safa", False))
-            if _prev_end is None:
-                _ps = float(seg["start_sec"])
-            else:
-                _ps = _prev_end - (SAFA_OVERLAP_SEC if _safa else 0.0)
-            _pe = _ps + _len
-            _prev_end = _pe
             seg_out = {
                 "lora_path": entry["path"],
-                "start_sec": round(_ps, 6),
-                "end_sec": round(_pe, 6),
+                "start_sec": float(seg["start_sec"]),
+                "end_sec": float(seg["end_sec"]),
                 "strength": float(seg.get("strength", entry["strength"])),
                 "fade_in": float(seg.get("fade_in", 0.0)),
                 "fade_out": float(seg.get("fade_out", 0.0)),
-                "safa": _safa,  # this seam blends with the previous zone (read by the sampler)
                 "seed": int(entry.get("seed", -1)),                       # -1 = inherit global
                 "variance_strength": float(entry.get("variance_strength", 0.0)),
             }

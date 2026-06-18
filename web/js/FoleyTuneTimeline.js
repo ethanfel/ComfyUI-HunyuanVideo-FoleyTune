@@ -236,9 +236,7 @@ class TimelineEditor {
         // SaFa seam badge? Toggle it (blend this zone's left seam) instead of dragging.
         for (const b of (this._seamBadges || [])) {
             if ((x - b.x) ** 2 + (y - b.y) ** 2 <= (b.r + 2) ** 2) {
-                b.ref.safa = !b.ref.safa;
-                this._commitFlush();
-                this.render();
+                this._toggleSeam(b.ref);
                 return;
             }
         }
@@ -416,7 +414,6 @@ class TimelineEditor {
             start_sec: startSec,
             end_sec: endSec,
             strength: this.entries[entryIdx].strength,
-            safa: false,                          // SaFa-blend left seam (toggle via badge)
         });
         this.segments.sort((a, b) => a.start_sec - b.start_sec);
         this.selectedIdx = this.segments.length - 1;
@@ -530,68 +527,74 @@ class TimelineEditor {
         this._drawPlayhead(ctx, w);
     }
 
-    // "Zones are chunks": pack the sorted zones into a sequence from the first
-    // zone's start. A zone with safa=true pulls SAFA_OVERLAP_SEC left to overlap
-    // its predecessor (SaFa seam); otherwise it just touches (hard cut). Mirrors
-    // build_schedule packing. Returns [{start, end, safa, ref}, ...].
-    _packedChunks() {
-        const segs = [...this.segments].sort((a, b) => a.start_sec - b.start_sec);
-        const out = [];
-        let prevEnd = null;
-        for (const s of segs) {
-            const L = s.end_sec - s.start_sec;
-            const start = prevEnd === null ? s.start_sec : prevEnd - (s.safa ? SAFA_OVERLAP_SEC : 0);
-            out.push({ start, end: start + L, safa: !!s.safa, ref: s });
-            prevEnd = start + L;
+    // A seam is SaFa iff the two zones OVERLAP in time (the UI shifts a zone
+    // left by SAFA_OVERLAP_SEC to create the overlap). Single source of truth =
+    // the zone positions, read straight through by the sampler.
+    _seamOverlap(prev, cur) { return prev.end_sec - cur.start_sec; }  // >0 = SaFa, ~0 = hard cut
+
+    // Toggle the seam to the LEFT of `seg`: if it currently overlaps its
+    // predecessor, push back to touching (hard cut); else pull left by
+    // SAFA_OVERLAP_SEC to overlap (SaFa). Shifts this zone AND all later ones so
+    // the rest of the chain rides along (you SEE the clip shift).
+    _toggleSeam(seg) {
+        const sorted = [...this.segments].sort((a, b) => a.start_sec - b.start_sec);
+        const i = sorted.indexOf(seg);
+        if (i <= 0) return;  // first zone has no left seam
+        const prev = sorted[i - 1];
+        const overlapping = this._seamOverlap(prev, seg) > 1e-3;
+        const targetStart = overlapping ? prev.end_sec : prev.end_sec - SAFA_OVERLAP_SEC;
+        let delta = this._snapSec(targetStart) - seg.start_sec;
+        if (delta < 0) delta = Math.max(delta, -seg.start_sec);  // don't push the chain below 0
+        for (let j = i; j < sorted.length; j++) {
+            sorted[j].start_sec += delta;
+            sorted[j].end_sec += delta;
         }
-        return out;
+        this._commitFlush();
+        this.render();
     }
 
-    // Overlay the packed chunk plan: ✕-hatch on SaFa seams (blended), a sharp
-    // dashed line on hard-cut seams, and a "cN" index per chunk at its centre.
+    // Overlay the chunk plan straight from the zone positions: ✕-hatch where
+    // zones overlap (SaFa seam), a sharp dashed line where they touch (hard cut),
+    // and a "cN" index per zone at its centre.
     _drawChunkPlan(ctx, w) {
         if (!(this.duration > 0) || !this.segments.length) return;
-        const plan = this._packedChunks();
-        if (!plan.length) return;
+        const segs = [...this.segments].sort((a, b) => a.start_sec - b.start_sec);
         const yTop = RULER_H, yBot = RULER_H + TRACK_H;
         ctx.save();
-        // SaFa seams: shaded ✕-hatch blend zone over the overlap.
-        for (let i = 1; i < plan.length; i++) {
-            if (!plan[i].safa) continue;
-            const x1 = this._secToX(plan[i].start), x2 = this._secToX(plan[i - 1].end);
-            if (x2 - x1 < 1) continue;
-            ctx.save();
-            ctx.globalAlpha = 0.5;
-            ctx.fillStyle = "rgba(120,170,255,0.55)";
-            ctx.fillRect(x1, yTop + 3, x2 - x1, yBot - yTop - 6);
-            ctx.strokeStyle = "#fff"; ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(x1, yTop + 3); ctx.lineTo(x2, yBot - 3);
-            ctx.moveTo(x1, yBot - 3); ctx.lineTo(x2, yTop + 3);
-            ctx.stroke();
-            ctx.restore();
+        for (let i = 1; i < segs.length; i++) {
+            const ov = this._seamOverlap(segs[i - 1], segs[i]);
+            if (ov > 1e-3) {  // SaFa: shaded ✕-hatch over the overlap
+                const x1 = this._secToX(segs[i].start_sec), x2 = this._secToX(segs[i - 1].end_sec);
+                if (x2 - x1 < 1) continue;
+                ctx.save();
+                ctx.globalAlpha = 0.5;
+                ctx.fillStyle = "rgba(120,170,255,0.55)";
+                ctx.fillRect(x1, yTop + 3, x2 - x1, yBot - yTop - 6);
+                ctx.strokeStyle = "#fff"; ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x1, yTop + 3); ctx.lineTo(x2, yBot - 3);
+                ctx.moveTo(x1, yBot - 3); ctx.lineTo(x2, yTop + 3);
+                ctx.stroke();
+                ctx.restore();
+            } else {  // hard cut: sharp dashed line at the touch
+                const x = this._secToX(segs[i].start_sec);
+                ctx.strokeStyle = "rgba(255,175,45,0.9)"; ctx.lineWidth = 1;
+                ctx.setLineDash([3, 3]);
+                ctx.beginPath(); ctx.moveTo(x, yTop); ctx.lineTo(x, yBot); ctx.stroke();
+                ctx.setLineDash([]);
+            }
         }
-        // Hard-cut seams: sharp dashed line.
-        ctx.strokeStyle = "rgba(255,175,45,0.9)"; ctx.lineWidth = 1;
-        ctx.setLineDash([3, 3]);
-        for (let i = 1; i < plan.length; i++) {
-            if (plan[i].safa) continue;
-            const x = this._secToX(plan[i].start);
-            ctx.beginPath(); ctx.moveTo(x, yTop); ctx.lineTo(x, yBot); ctx.stroke();
-        }
-        ctx.setLineDash([]);
-        // Chunk indices at packed centres.
         ctx.fillStyle = "rgba(255,205,90,0.95)";
         ctx.font = "bold 9px monospace";
         ctx.textAlign = "center"; ctx.textBaseline = "top";
-        for (let i = 0; i < plan.length; i++) {
-            ctx.fillText(`c${i}`, this._secToX((plan[i].start + plan[i].end) / 2), yTop + 2);
+        for (let i = 0; i < segs.length; i++) {
+            ctx.fillText(`c${i}`, this._secToX((segs[i].start_sec + segs[i].end_sec) / 2), yTop + 2);
         }
         ctx.restore();
     }
 
-    // A clickable badge near each zone's left edge toggles SaFa on that seam
-    // (blend with the previous zone). Stored in _seamBadges for hit-testing.
+    // A clickable badge near each zone's left edge toggles SaFa on that seam.
+    // Lit ≈ = overlapping (SaFa), dim | = touching (hard cut). Geometry-driven.
     _drawSeamBadges(ctx) {
         this._seamBadges = [];
         if (!(this.duration > 0)) return;
@@ -602,7 +605,7 @@ class TimelineEditor {
             const left = this._secToX(s.start_sec), right = this._secToX(s.end_sec);
             if (right - left < 36) continue;  // too narrow for a badge
             const x = left + 14;               // inset past the resize-edge grab zone
-            const on = !!s.safa;
+            const on = this._seamOverlap(segs[i - 1], s) > 1e-3;
             ctx.save();
             ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
             ctx.fillStyle = on ? "rgba(90,150,255,0.95)" : "rgba(35,39,51,0.95)";

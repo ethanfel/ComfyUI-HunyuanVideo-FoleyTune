@@ -640,6 +640,15 @@ class TimelineEditor {
             menu.appendChild(s);
         };
 
+        addItem("Rename zone…", () => {
+            const name = prompt("Zone name (blank = use the LoRA label):",
+                                seg.name || "");
+            if (name === null) return;
+            seg.name = name.trim();
+            this._commitFlush();
+            this.render();
+        });
+        sep();
         if (this.entries.length > 1) {
             addItem("Switch LoRA", null, { header: true });
             const cur = this._entryIndexOf(seg);
@@ -1047,9 +1056,11 @@ class TimelineEditor {
         const seg = this.segments[i];
         const entry = this._entryFor(seg);
         const color = resolveColor(entry);
-        // ✎ marks an entry with a per-segment prompt (see entry node).
+        // ✎ marks an entry with a per-segment prompt (see entry node). A
+        // per-zone name (right-click → Rename) overrides the entry's label.
         const hasPrompt = !!(entry.prompt && entry.prompt.trim());
-        const label = (hasPrompt ? "✎ " : "") + (entry.label || "LoRA");
+        const baseName = (seg.name && String(seg.name).trim()) || (entry.label || "LoRA");
+        const label = (hasPrompt ? "✎ " : "") + baseName;
 
         const x = this._secToX(seg.start_sec);
         const x2 = this._secToX(seg.end_sec);

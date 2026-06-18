@@ -56,6 +56,16 @@ class TimelineEditor {
             if (el && el.style) el.style.display = "none";
         }
 
+        // Re-render the crossfade band live when the crossfade_frames widget changes.
+        const xfWidget = node.widgets?.find(w => w.name === "crossfade_frames");
+        if (xfWidget) {
+            const prev = xfWidget.callback;
+            xfWidget.callback = (...args) => {
+                if (prev) prev.apply(xfWidget, args);
+                this.render();
+            };
+        }
+
         this._buildDOM();
         this._bindEvents();
 
@@ -450,7 +460,54 @@ class TimelineEditor {
         this._drawRuler(ctx, w);
         this._drawTrack(ctx, w);
         this._drawSegments(ctx, w);
+        this._drawCrossfades(ctx, w);
         this._drawPlayhead(ctx, w);
+    }
+
+    // crossfade_frames widget value (the backend blends adjacent segments over
+    // this many frames at the video fps; 0 = hard cuts).
+    _crossfadeFrames() {
+        const wgt = this.node?.widgets?.find(w => w.name === "crossfade_frames");
+        const v = wgt ? Number(wgt.value) : 0;
+        return Number.isFinite(v) && v > 0 ? v : 0;
+    }
+
+    // Draw a fade band at each touching segment boundary: a left->right colour
+    // gradient (prev segment -> next segment) with an ✕ hatch, width = crossfade,
+    // centred on the cut. Mirrors the backend's equal-power blend.
+    _drawCrossfades(ctx, w) {
+        const xfFrames = this._crossfadeFrames();
+        if (!xfFrames || this.segments.length < 2) return;
+        const xfSec = xfFrames / this.fps;
+        const y = RULER_H + 3;
+        const h = TRACK_H - 6;
+        const segs = [...this.segments].sort((a, b) => a.start_sec - b.start_sec);
+        for (let i = 0; i < segs.length - 1; i++) {
+            const B = segs[i].end_sec;
+            // only at adjacent (touching) boundaries — skip gaps
+            if (Math.abs(segs[i + 1].start_sec - B) > 1e-3) continue;
+            const x1 = this._secToX(Math.max(segs[i].start_sec, B - xfSec / 2));
+            const x2 = this._secToX(Math.min(segs[i + 1].end_sec, B + xfSec / 2));
+            if (x2 - x1 < 1) continue;
+            const cL = resolveColor(this._entryFor(segs[i]));
+            const cR = resolveColor(this._entryFor(segs[i + 1]));
+            const grad = ctx.createLinearGradient(x1, 0, x2, 0);
+            grad.addColorStop(0, cL);
+            grad.addColorStop(1, cR);
+            ctx.save();
+            ctx.globalAlpha = 0.55;
+            ctx.fillStyle = grad;
+            ctx.fillRect(x1, y, x2 - x1, h);
+            // ✕ hatch reads as "crossfade"
+            ctx.globalAlpha = 0.5;
+            ctx.strokeStyle = "#fff";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(x1, y); ctx.lineTo(x2, y + h);
+            ctx.moveTo(x1, y + h); ctx.lineTo(x2, y);
+            ctx.stroke();
+            ctx.restore();
+        }
     }
 
     _drawPlayhead(ctx) {

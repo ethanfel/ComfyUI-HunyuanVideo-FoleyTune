@@ -981,3 +981,52 @@ app.registerExtension({
         };
     },
 });
+
+
+// Timeline Entry: fold the "inherit the sampler's global seed" choice INTO the
+// native control_after_generate dropdown (instead of a duplicate mode widget).
+// Picking "sampler" parks the seed at -1, the sentinel the backend reads as
+// inherit; fixed/randomize/increment keep working on the number as usual.
+app.registerExtension({
+    name: "FoleyTune.LoRATimelineEntry",
+    async beforeRegisterNodeDef(nodeType, nodeData) {
+        if (nodeData?.name !== "FoleyTuneLoRATimelineEntry") return;
+
+        const onNodeCreated = nodeType.prototype.onNodeCreated;
+        nodeType.prototype.onNodeCreated = function () {
+            onNodeCreated?.apply(this, arguments);
+            const node = this;
+
+            const wire = () => {
+                const seedW = node.widgets?.find(w => w.name === "seed");
+                const ctrlW = node.widgets?.find(w => w.name === "control_after_generate");
+                if (!seedW || !ctrlW) return false;
+
+                const vals = ctrlW.options?.values;
+                if (Array.isArray(vals) && !vals.includes("sampler")) vals.push("sampler");
+
+                if (!ctrlW._ftSamplerHook) {
+                    ctrlW._ftSamplerHook = true;
+                    const orig = ctrlW.callback;
+                    ctrlW.callback = function (...args) {
+                        const r = orig?.apply(this, args);
+                        if (ctrlW.value === "sampler") {
+                            seedW.value = -1;
+                            seedW.callback?.call(seedW, -1);
+                            node.graph?.setDirtyCanvas(true, true);
+                        }
+                        return r;
+                    };
+                    if (ctrlW.value === "sampler") seedW.value = -1;
+                }
+                return true;
+            };
+
+            // control_after_generate is appended a tick after the widgets are
+            // built, so retry a few frames until it exists.
+            let tries = 0;
+            const tick = () => { if (!wire() && tries++ < 20) setTimeout(tick, 50); };
+            setTimeout(tick, 0);
+        };
+    },
+});

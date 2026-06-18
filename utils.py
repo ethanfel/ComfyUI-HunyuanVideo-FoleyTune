@@ -589,7 +589,7 @@ def compute_chunk_boundaries(duration: float, chunk_duration: float, overlap_sec
 _MIN_GEN_SEC = 5.0  # pad short segment chunks to >= this many seconds of context
 
 
-def align_chunks_to_schedule(chunks, lora_schedule, crossfade_sec=0.0):
+def align_chunks_to_schedule(chunks, lora_schedule):
     """Build per-segment chunks with pad-and-trim, returning (gen, keep).
 
     Per-chunk LoRA/text only works if each chunk lies within one segment. The
@@ -659,17 +659,6 @@ def align_chunks_to_schedule(chunks, lora_schedule, crossfade_sec=0.0):
             gs -= (ge - total_end)
             ge = total_end
         gen.append((round(max(total_start, gs), 6), round(min(total_end, ge), 6)))
-
-    # 3. crossfade room: extend each gen window by crossfade_sec on the sides that
-    #    have a neighbour, so the stitch has overlap audio to blend (the keep
-    #    windows still tile exactly; only the generated context grows).
-    if crossfade_sec and crossfade_sec > 0:
-        xf = float(crossfade_sec)
-        gen = [
-            (round(max(total_start, gs - (xf if i > 0 else 0.0)), 6),
-             round(min(total_end, ge + (xf if i < len(gen) - 1 else 0.0)), 6))
-            for i, (gs, ge) in enumerate(gen)
-        ]
 
     return gen, keep
 
@@ -820,18 +809,31 @@ def chunked_denoise_process(
     Returns:
         (audio_waveform, sample_rate) tuple
     """
-    # Align chunk boundaries to LoRA schedule segments (pad-and-trim).
-    # chunks = generated windows (short segments padded with context);
-    # keep_windows = exact frames to output (tile the timeline). None otherwise.
+    # Map the LoRA timeline onto chunks. Two modes:
+    #  • crossfade == 0: pad-and-trim. keep_windows tile the timeline exactly
+    #    (hard cuts on the chosen frames); gen windows are padded for context.
+    #  • crossfade  > 0: SaFa. Cover the timeline with OVERLAPPING <=window chunks
+    #    (like the normal chunker) and blend the seams with SaFa during denoising
+    #    — NOT by extending windows past the model's trained size. Per-chunk
+    #    LoRA/seed/variance/prompt is still resolved by chunk centre below, so
+    #    segment edges become soft (~half a chunk), which is what crossfade means.
     keep_windows = None
     timeline_crossfade_sec = (float(lora_schedule[0].get("crossfade_sec", 0.0))
                               if lora_schedule else 0.0)
     if lora_schedule:
-        chunks, keep_windows = align_chunks_to_schedule(
-            chunks, lora_schedule, crossfade_sec=timeline_crossfade_sec)
-        logger.info(f"LoRA timeline: {len(chunks)} chunks (crossfade {timeline_crossfade_sec:.2f}s). "
-                    f"gen={[(round(a, 2), round(b, 2)) for a, b in chunks]} "
-                    f"keep={[(round(a, 2), round(b, 2)) for a, b in keep_windows]}")
+        if timeline_crossfade_sec > 0:
+            _window = max((ce - cs for cs, ce in chunks), default=features["duration"])
+            _total = chunks[-1][1]
+            chunks = compute_chunk_boundaries(_total, _window, timeline_crossfade_sec)
+            crossfade_mode = "safa"  # blend the overlaps; don't grow the window
+            logger.info(f"LoRA timeline: SaFa crossfade — {len(chunks)} overlapping "
+                        f"{_window:.1f}s chunks, overlap {timeline_crossfade_sec:.2f}s. "
+                        f"chunks={[(round(a, 2), round(b, 2)) for a, b in chunks]}")
+        else:
+            chunks, keep_windows = align_chunks_to_schedule(chunks, lora_schedule)
+            logger.info(f"LoRA timeline: {len(chunks)} chunks (hard cuts). "
+                        f"gen={[(round(a, 2), round(b, 2)) for a, b in chunks]} "
+                        f"keep={[(round(a, 2), round(b, 2)) for a, b in keep_windows]}")
 
     # LoRA/prompt for a chunk is resolved by its KEEP-window centre (the segment
     # it represents) — the padded gen-window centre can fall in a neighbour.
@@ -1183,12 +1185,10 @@ def chunked_denoise_process(
     # timeline, so this reconstructs the full duration with hard cuts on the
     # chosen frames — independent of crossfade_mode.
     if keep_windows is not None:
-        # crossfade_sec > 0: equal-power blend adjacent keep slices over xf frames
-        # (the running latent's tail = prev segment's keep tail; this slice extends
-        # left into its generated context — both cover the same time, so they blend).
-        # 0: hard cut (concatenate exact keep slices, original behaviour).
-        xf_frames = (int(round(timeline_crossfade_sec * audio_frame_rate))
-                     if timeline_crossfade_sec and timeline_crossfade_sec > 0 else 0)
+        # Hard-cut tiling (crossfade == 0): extract each chunk's exact keep slice
+        # (padded context discarded) and concatenate. Keep windows tile the
+        # timeline, so this rebuilds the full duration on the chosen frames.
+        # (crossfade > 0 never reaches here — it uses the SaFa overlap path.)
         full_latent = None
         for c_idx in range(len(chunks)):
             gs, _ge = chunks[c_idx]
@@ -1201,14 +1201,6 @@ def chunked_denoise_process(
             if full_latent is None:
                 full_latent = lat[:, :, sf:ef]
                 continue
-            if xf_frames > 0:
-                sf_ext = max(0, sf - xf_frames)
-                actual_xf = sf - sf_ext
-                slice_ext = lat[:, :, sf_ext:ef]
-                if (actual_xf > 0 and full_latent.shape[-1] >= actual_xf
-                        and slice_ext.shape[-1] >= actual_xf):
-                    full_latent = equal_power_crossfade(full_latent, slice_ext, actual_xf, dim=-1)
-                    continue
             full_latent = torch.cat([full_latent, lat[:, :, sf:ef]], dim=-1)
         with torch.inference_mode():
             dac_weight = next(model_dict.dac_model.parameters())

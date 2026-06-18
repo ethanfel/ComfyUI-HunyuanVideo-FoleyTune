@@ -1990,11 +1990,14 @@ class FoleyTuneLoRATimeline:
                 }),
                 "crossfade_frames": ("INT", {
                     "default": 0, "min": 0, "max": 120, "step": 1,
-                    "tooltip": "Crossfade duration at segment boundaries, in video frames. 0 = hard "
-                               "cuts (default). >0 = equal-power blend over this many frames, reusing "
-                               "each segment's generated context (no re-generation) — the SaFa "
-                               "equivalent for the timeline. Best for continuous video where you "
-                               "vary seed/variance per section; shown as a fade band on the timeline.",
+                    "tooltip": "Crossfade between sections, in video frames. 0 = hard cuts: keep "
+                               "windows tile the timeline exactly, razor-sharp segment edges "
+                               "(default). >0 = SaFa: cover the timeline with OVERLAPPING <=8s "
+                               "chunks (this many frames of overlap) and blend the seams during "
+                               "denoising — no window growth, so no quality loss past the model's "
+                               "8s window. Segment edges become soft (~half a chunk). Best for "
+                               "continuous video where you vary variance per section. ~6-30 frames "
+                               "is a good range; bigger overlap = smoother but more compute.",
                 }),
                 "base_prompt": ("STRING", {
                     "default": "", "multiline": True,

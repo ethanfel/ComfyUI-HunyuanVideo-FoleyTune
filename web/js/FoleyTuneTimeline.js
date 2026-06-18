@@ -523,17 +523,19 @@ class TimelineEditor {
         this._drawRuler(ctx, w);
         this._drawTrack(ctx, w);
         this._drawSegments(ctx, w);
-        this._drawCrossfades(ctx, w);
         this._drawChunkPlan(ctx, w);
         this._drawPlayhead(ctx, w);
     }
 
-    // The REAL generation chunk plan — how align_chunks_to_schedule() (utils.py)
-    // tiles the whole clip: boundaries are the clip ends + every segment edge,
-    // and any region longer than the chunk window is sub-split evenly. Assumes
-    // the sampler's default chunk_duration = SNAP_SEC (8s). Mirrors the backend
-    // so the timeline shows exactly what will generate — gaps and long-segment
-    // splits included. Returns [[cs, ce], ...].
+    _crossfadeFrames() {
+        const wgt = this.node?.widgets?.find(w => w.name === "crossfade_frames");
+        const v = wgt ? Number(wgt.value) : 0;
+        return Number.isFinite(v) && v > 0 ? v : 0;
+    }
+
+    // Hard-cut chunk plan (crossfade == 0) — mirrors align_chunks_to_schedule:
+    // boundaries are the clip ends + every segment edge, regions longer than the
+    // 8s window sub-split evenly. Returns [[cs, ce], ...].
     _chunkPlan() {
         const dur = this.duration;
         if (!(dur > 0) || !this.segments.length) return [];
@@ -558,19 +560,69 @@ class TimelineEditor {
         return keep;
     }
 
+    // SaFa chunk plan (crossfade > 0) — mirrors compute_chunk_boundaries:
+    // overlapping <=8s chunks covering the clip, overlap = crossfade. The seams
+    // are SaFa-blended during denoising. Returns [[cs, ce], ...].
+    _overlapChunks() {
+        const dur = this.duration, W = SNAP_SEC;
+        if (!(dur > 0)) return [];
+        if (dur <= W + 1e-6) return [[0, dur]];
+        const ov = Math.min(this._crossfadeFrames() / this.fps, W * 0.5);
+        const n = Math.ceil((dur - W) / Math.max(1e-6, W - ov)) + 1;
+        const stride = (dur - W) / (n - 1);
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const s = i * stride;
+            out.push([s, Math.min(s + W, dur)]);
+        }
+        return out;
+    }
+
     _coveredBySegment(cs, ce) {
         const mid = (cs + ce) / 2;
         return this.segments.some(s => mid >= s.start_sec - 1e-6 && mid <= s.end_sec + 1e-6);
     }
 
-    // Overlay the chunk plan: a dashed cut at each chunk boundary, a "cN" index
-    // per chunk, and a diagonal hatch over GAP chunks (no segment — they still
-    // generate as base-model audio, which is the surprise in the logs).
+    // Overlay the real generation chunk plan so what you see = what generates.
+    //  • crossfade == 0: dashed cut per chunk boundary, "cN" index, and a hatch
+    //    over GAP chunks (no segment — they still generate as base audio).
+    //  • crossfade  > 0: SaFa — overlapping chunks; shade the overlap (blend)
+    //    zones with an ✕ hatch and label each chunk at its centre.
     _drawChunkPlan(ctx, w) {
+        if (!(this.duration > 0) || !this.segments.length) return;
+        const yTop = RULER_H, yBot = RULER_H + TRACK_H;
+
+        if (this._crossfadeFrames() > 0) {
+            const plan = this._overlapChunks();
+            ctx.save();
+            for (let i = 0; i < plan.length - 1; i++) {
+                const ovS = plan[i + 1][0], ovE = plan[i][1];   // SaFa-blended overlap
+                if (ovE - ovS < 1e-3) continue;
+                const x1 = this._secToX(ovS), x2 = this._secToX(ovE);
+                ctx.save();
+                ctx.globalAlpha = 0.5;
+                ctx.fillStyle = "rgba(120,170,255,0.55)";
+                ctx.fillRect(x1, yTop + 3, x2 - x1, yBot - yTop - 6);
+                ctx.strokeStyle = "#fff"; ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x1, yTop + 3); ctx.lineTo(x2, yBot - 3);
+                ctx.moveTo(x1, yBot - 3); ctx.lineTo(x2, yTop + 3);
+                ctx.stroke();
+                ctx.restore();
+            }
+            ctx.fillStyle = "rgba(255,205,90,0.95)";
+            ctx.font = "bold 9px monospace";
+            ctx.textAlign = "center"; ctx.textBaseline = "top";
+            for (let i = 0; i < plan.length; i++) {
+                const [cs, ce] = plan[i];
+                ctx.fillText(`c${i}`, this._secToX((cs + ce) / 2), yTop + 2);
+            }
+            ctx.restore();
+            return;
+        }
+
         const plan = this._chunkPlan();
         if (!plan.length) return;
-        const yTop = RULER_H;
-        const yBot = RULER_H + TRACK_H;
         ctx.save();
         for (let i = 0; i < plan.length; i++) {
             const [cs, ce] = plan[i];
@@ -591,11 +643,9 @@ class TimelineEditor {
             }
             ctx.fillStyle = "rgba(255,205,90,0.95)";
             ctx.font = "bold 9px monospace";
-            ctx.textAlign = "left";
-            ctx.textBaseline = "top";
+            ctx.textAlign = "left"; ctx.textBaseline = "top";
             ctx.fillText(`c${i}`, x1 + 3, yTop + 2);
         }
-        // Dashed cuts at interior chunk boundaries.
         ctx.strokeStyle = "rgba(255,175,45,0.9)";
         ctx.lineWidth = 1;
         ctx.setLineDash([3, 3]);
@@ -607,52 +657,6 @@ class TimelineEditor {
         }
         ctx.setLineDash([]);
         ctx.restore();
-    }
-
-    // crossfade_frames widget value (the backend blends adjacent segments over
-    // this many frames at the video fps; 0 = hard cuts).
-    _crossfadeFrames() {
-        const wgt = this.node?.widgets?.find(w => w.name === "crossfade_frames");
-        const v = wgt ? Number(wgt.value) : 0;
-        return Number.isFinite(v) && v > 0 ? v : 0;
-    }
-
-    // Draw a fade band at each touching segment boundary: a left->right colour
-    // gradient (prev segment -> next segment) with an ✕ hatch, width = crossfade,
-    // centred on the cut. Mirrors the backend's equal-power blend.
-    _drawCrossfades(ctx, w) {
-        const xfFrames = this._crossfadeFrames();
-        if (!xfFrames || this.segments.length < 2) return;
-        const xfSec = xfFrames / this.fps;
-        const y = RULER_H + 3;
-        const h = TRACK_H - 6;
-        const segs = [...this.segments].sort((a, b) => a.start_sec - b.start_sec);
-        for (let i = 0; i < segs.length - 1; i++) {
-            const B = segs[i].end_sec;
-            // only at adjacent (touching) boundaries — skip gaps
-            if (Math.abs(segs[i + 1].start_sec - B) > 1e-3) continue;
-            const x1 = this._secToX(Math.max(segs[i].start_sec, B - xfSec / 2));
-            const x2 = this._secToX(Math.min(segs[i + 1].end_sec, B + xfSec / 2));
-            if (x2 - x1 < 1) continue;
-            const cL = resolveColor(this._entryFor(segs[i]));
-            const cR = resolveColor(this._entryFor(segs[i + 1]));
-            const grad = ctx.createLinearGradient(x1, 0, x2, 0);
-            grad.addColorStop(0, cL);
-            grad.addColorStop(1, cR);
-            ctx.save();
-            ctx.globalAlpha = 0.55;
-            ctx.fillStyle = grad;
-            ctx.fillRect(x1, y, x2 - x1, h);
-            // ✕ hatch reads as "crossfade"
-            ctx.globalAlpha = 0.5;
-            ctx.strokeStyle = "#fff";
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(x1, y); ctx.lineTo(x2, y + h);
-            ctx.moveTo(x1, y + h); ctx.lineTo(x2, y);
-            ctx.stroke();
-            ctx.restore();
-        }
     }
 
     _drawPlayhead(ctx) {

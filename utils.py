@@ -841,11 +841,24 @@ def chunked_denoise_process(
         _overlap = float(lora_schedule[0].get("safa_overlap", SAFA_OVERLAP_SEC))
         chunks = _schedule_to_chunks(lora_schedule, _window, _overlap)
         crossfade_mode = "safa"
-        _sorted = sorted(lora_schedule, key=lambda z: z["start_sec"])
-        _seams = sum(1 for i in range(len(_sorted) - 1)
-                     if float(_sorted[i + 1]["start_sec"]) < float(_sorted[i]["end_sec"]) - 1e-6)
-        logger.info(f"LoRA timeline: {len(chunks)} chunks from {len(lora_schedule)} zone(s), "
-                    f"{_seams} SaFa seam(s). chunks={[(round(a, 2), round(b, 2)) for a, b in chunks]}")
+        # Per-chunk plan log — exactly what each chunk generates (range, LoRA,
+        # seed, variance) and how each seam is joined (hard cut vs SaFa + the
+        # real overlap, which the auto/refresh evening can make large).
+        _seam_desc = ", ".join(
+            (f"SaFa {chunks[i][1] - chunks[i + 1][0]:.2f}s"
+             if (chunks[i][1] - chunks[i + 1][0]) > 1e-3 else "cut")
+            for i in range(len(chunks) - 1)) or "—"
+        logger.info(f"LoRA timeline: {len(lora_schedule)} zone(s) → {len(chunks)} chunks / "
+                    f"{features['duration']:.2f}s. seams: [{_seam_desc}]")
+        for _ci, (_cs, _ce) in enumerate(chunks):
+            _seg = _segment_at_time(lora_schedule, (_cs + _ce) / 2.0)
+            _lora = os.path.basename(_seg["lora_path"]) if (_seg and _seg.get("lora_path")) else "base"
+            _sd = int(_seg.get("seed", -1)) if _seg else -1
+            _vr = float(_seg.get("variance_strength", 0.0)) if _seg else 0.0
+            _pr = (_seg.get("prompt", "") if _seg else "")[:30]
+            logger.info(f"  c{_ci} [{_cs:.2f},{_ce:.2f}]s  lora={_lora}  "
+                        f"seed={'global' if _sd < 0 else _sd}  var={_vr:.2f}"
+                        + (f"  prompt={_pr!r}" if _pr else ""))
 
     # LoRA/prompt for a chunk is resolved by its KEEP-window centre (the segment
     # it represents) — the padded gen-window centre can fall in a neighbour.
@@ -1114,14 +1127,12 @@ def chunked_denoise_process(
         })
 
     # --- Precompute per-chunk LoRA assignment (by keep-window centre) ---
+    # (The per-chunk plan, incl. these LoRAs, is logged above when chunks build.)
     _chunk_lora_targets = [None] * len(chunks)
     if lora_schedule and _lora_base_state is not None:
         for c_idx, (cs, ce) in enumerate(chunks):
             _chunk_lora_targets[c_idx] = _segment_at_time(
                 lora_schedule, _resolve_center(c_idx, cs, ce))
-        lora_summary = [os.path.basename(s["lora_path"]) if (s and s.get("lora_path")) else "base"
-                        for s in _chunk_lora_targets]
-        logger.info(f"LoRA timeline per-chunk: {lora_summary}")
 
     # --- Denoising loop ---
     total_steps = len(timesteps) * len(chunks)

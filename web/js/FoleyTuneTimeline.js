@@ -498,13 +498,86 @@ class TimelineEditor {
         e.stopPropagation();
         const { x, y } = this._pointerPos(e);
         const hit = this._hitTest(x, y);
-        if (hit.idx >= 0) {
-            this.segments.splice(hit.idx, 1);
+        if (hit.idx < 0) { this._closeMenu(); return; }
+        // Select the zone and open a menu — deletion is a deliberate choice now.
+        this.selectedIdx = hit.idx;
+        this.render();
+        this._showContextMenu(e.clientX, e.clientY, hit.idx);
+    }
+
+    _closeMenu() {
+        if (this._menu) { this._menu.remove(); this._menu = null; }
+        if (this._menuClose) { window.removeEventListener("pointerdown", this._menuClose, true); this._menuClose = null; }
+        if (this._menuKey) { window.removeEventListener("keydown", this._menuKey, true); this._menuKey = null; }
+    }
+
+    _showContextMenu(clientX, clientY, idx) {
+        this._closeMenu();
+        const seg = this.segments[idx];
+        if (!seg) return;
+
+        const menu = document.createElement("div");
+        menu.style.cssText =
+            "position:fixed;z-index:10000;background:#23272e;border:1px solid #454c59;" +
+            "border-radius:5px;padding:4px 0;font:12px sans-serif;color:#dde;min-width:160px;" +
+            "box-shadow:0 3px 12px rgba(0,0,0,0.55);user-select:none;";
+
+        const addItem = (label, fn, opts = {}) => {
+            const it = document.createElement("div");
+            it.textContent = label;
+            it.style.cssText = "padding:5px 14px;white-space:nowrap;" +
+                (opts.header ? "color:#7e8696;font-size:11px;cursor:default;"
+                             : "cursor:pointer;") +
+                (opts.danger ? "color:#ff8b8b;" : "") +
+                (opts.active ? "color:#fff;font-weight:bold;" : "");
+            if (!opts.header) {
+                it.addEventListener("mouseenter", () => { it.style.background = "#39414f"; });
+                it.addEventListener("mouseleave", () => { it.style.background = ""; });
+                it.addEventListener("click", (ev) => { ev.stopPropagation(); this._closeMenu(); fn(); });
+            }
+            menu.appendChild(it);
+        };
+        const sep = () => {
+            const s = document.createElement("div");
+            s.style.cssText = "height:1px;background:#454c59;margin:4px 0;";
+            menu.appendChild(s);
+        };
+
+        if (this.entries.length > 1) {
+            addItem("Switch LoRA", null, { header: true });
+            const cur = this._entryIndexOf(seg);
+            this.entries.forEach((en, i) => {
+                addItem((i === cur ? "● " : "    ") + (en.label || `entry ${i}`),
+                        () => { this._assignEntry(seg, i); this._commitFlush(); this.render(); },
+                        { active: i === cur });
+            });
+            sep();
+        }
+        addItem("Delete zone", () => {
+            const at = this.segments.indexOf(seg);
+            if (at >= 0) this.segments.splice(at, 1);
             this.selectedIdx = -1;
-            this.drag = null;  // any in-flight drag now points at a stale index
+            this.drag = null;
             this._commitFlush();
             this.render();
-        }
+        }, { danger: true });
+
+        document.body.appendChild(menu);
+        // Keep on-screen.
+        const r = menu.getBoundingClientRect();
+        const left = Math.min(clientX, window.innerWidth - r.width - 4);
+        const top = Math.min(clientY, window.innerHeight - r.height - 4);
+        menu.style.left = Math.max(4, left) + "px";
+        menu.style.top = Math.max(4, top) + "px";
+        this._menu = menu;
+
+        // Dismiss on outside click / Escape (deferred so this event doesn't self-close it).
+        this._menuClose = (ev) => { if (!menu.contains(ev.target)) this._closeMenu(); };
+        this._menuKey = (ev) => { if (ev.key === "Escape") this._closeMenu(); };
+        setTimeout(() => {
+            window.addEventListener("pointerdown", this._menuClose, true);
+            window.addEventListener("keydown", this._menuKey, true);
+        }, 0);
     }
 
     // --- State sync ---
@@ -932,6 +1005,7 @@ class TimelineEditor {
     }
 
     destroy() {
+        this._closeMenu();
         this._resizeObserver?.disconnect();
         if (this._commitTimer) clearTimeout(this._commitTimer);
     }

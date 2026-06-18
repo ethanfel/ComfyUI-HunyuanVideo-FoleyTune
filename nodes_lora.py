@@ -1988,17 +1988,6 @@ class FoleyTuneLoRATimeline:
                     "tooltip": "Manual override for the thumbnail video path. Usually unnecessary if "
                                "video_features is connected. Type a path or connect a STRING.",
                 }),
-                "crossfade_frames": ("INT", {
-                    "default": 0, "min": 0, "max": 120, "step": 1,
-                    "tooltip": "Crossfade between sections, in video frames. 0 = hard cuts: keep "
-                               "windows tile the timeline exactly, razor-sharp segment edges "
-                               "(default). >0 = SaFa: cover the timeline with OVERLAPPING <=8s "
-                               "chunks (this many frames of overlap) and blend the seams during "
-                               "denoising — no window growth, so no quality loss past the model's "
-                               "8s window. Segment edges become soft (~half a chunk). Best for "
-                               "continuous video where you vary variance per section. ~6-30 frames "
-                               "is a good range; bigger overlap = smoother but more compute.",
-                }),
                 "base_prompt": ("STRING", {
                     "default": "", "multiline": True,
                     "tooltip": "Self-contained path only (features unconnected): the positive prompt "
@@ -2019,7 +2008,7 @@ class FoleyTuneLoRATimeline:
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
-    def build_schedule(self, entries, segments_json="[]", features=None, crossfade_frames=0,
+    def build_schedule(self, entries, segments_json="[]", features=None,
                        video_features=None, hunyuan_deps=None, video_path="",
                        base_prompt="", negative_prompt=""):
         try:
@@ -2031,13 +2020,12 @@ class FoleyTuneLoRATimeline:
             segments = []
 
         # fps (loader's video_features > features > 30 fallback) drives the
-        # frame-based ruler and converts crossfade_frames -> seconds.
+        # frame-based ruler.
         resolved_fps = 0.0
         if video_features and video_features.get("fps"):
             resolved_fps = float(video_features["fps"])
         elif features and features.get("fps"):
             resolved_fps = float(features["fps"])
-        crossfade_sec = crossfade_frames / (resolved_fps or 30.0)
 
         # Resolve a segment to its entry by STABLE id first (survives chain
         # reordering), falling back to positional entry_index for older graphs.
@@ -2098,19 +2086,34 @@ class FoleyTuneLoRATimeline:
             logger.info("LoRA timeline: built features from video_features "
                         "(self-contained, no FeatureExtractor)")
 
+        # "Zones are chunks": pack the sorted zones into a sequence from the first
+        # zone's start. A zone with safa=True pulls SAFA_OVERLAP_SEC left to OVERLAP
+        # its predecessor (the seam SaFa-blends); safa=False just touches (hard cut).
+        # We keep each zone's LENGTH and emit packed start/end — the sampler reads
+        # the overlaps straight off these positions. (Drawn gaps pack out.)
+        from .utils import SAFA_OVERLAP_SEC
         schedule = []
+        _prev_end = None
         for seg in sorted(segments, key=lambda s: s["start_sec"]):
             entry = _entry_for(seg)
             if entry is None:
                 continue
+            _len = float(seg["end_sec"]) - float(seg["start_sec"])
+            _safa = bool(seg.get("safa", False))
+            if _prev_end is None:
+                _ps = float(seg["start_sec"])
+            else:
+                _ps = _prev_end - (SAFA_OVERLAP_SEC if _safa else 0.0)
+            _pe = _ps + _len
+            _prev_end = _pe
             seg_out = {
                 "lora_path": entry["path"],
-                "start_sec": float(seg["start_sec"]),
-                "end_sec": float(seg["end_sec"]),
+                "start_sec": round(_ps, 6),
+                "end_sec": round(_pe, 6),
                 "strength": float(seg.get("strength", entry["strength"])),
                 "fade_in": float(seg.get("fade_in", 0.0)),
                 "fade_out": float(seg.get("fade_out", 0.0)),
-                "crossfade_sec": crossfade_sec,  # per-schedule; read by the sampler
+                "safa": _safa,  # this seam blends with the previous zone (read by the sampler)
                 "seed": int(entry.get("seed", -1)),                       # -1 = inherit global
                 "variance_strength": float(entry.get("variance_strength", 0.0)),
             }

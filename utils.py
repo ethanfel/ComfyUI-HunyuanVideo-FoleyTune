@@ -587,6 +587,26 @@ def compute_chunk_boundaries(duration: float, chunk_duration: float, overlap_sec
 
 
 _MIN_GEN_SEC = 5.0  # pad short segment chunks to >= this many seconds of context
+SAFA_OVERLAP_SEC = 1.5  # overlap pulled in at a SaFa seam (must match nodes_lora packing)
+
+
+def _schedule_to_chunks(schedule, window):
+    """Timeline chunks = the zones themselves (positions already packed by
+    build_schedule: touching = hard cut, overlapping = SaFa seam). Each zone is
+    one chunk; a zone longer than the model window is sub-split into overlapping
+    sub-chunks (SaFa-blended within). Returns [(start, end), ...] in order.
+    """
+    chunks = []
+    for s in sorted(schedule, key=lambda z: z["start_sec"]):
+        a, b = float(s["start_sec"]), float(s["end_sec"])
+        if (b - a) <= window + 1e-6:
+            chunks.append((round(a, 6), round(b, 6)))
+        else:
+            logger.warning(f"LoRA timeline: zone {a:.1f}-{b:.1f}s exceeds the {window:.0f}s "
+                           f"window — sub-splitting it into multiple chunks.")
+            for cs, ce in compute_chunk_boundaries(b - a, window, min(SAFA_OVERLAP_SEC, window * 0.5)):
+                chunks.append((round(a + cs, 6), round(a + ce, 6)))
+    return chunks
 
 
 def align_chunks_to_schedule(chunks, lora_schedule):
@@ -809,31 +829,21 @@ def chunked_denoise_process(
     Returns:
         (audio_waveform, sample_rate) tuple
     """
-    # Map the LoRA timeline onto chunks. Two modes:
-    #  • crossfade == 0: pad-and-trim. keep_windows tile the timeline exactly
-    #    (hard cuts on the chosen frames); gen windows are padded for context.
-    #  • crossfade  > 0: SaFa. Cover the timeline with OVERLAPPING <=window chunks
-    #    (like the normal chunker) and blend the seams with SaFa during denoising
-    #    — NOT by extending windows past the model's trained size. Per-chunk
-    #    LoRA/seed/variance/prompt is still resolved by chunk centre below, so
-    #    segment edges become soft (~half a chunk), which is what crossfade means.
+    # Timeline = "zones are chunks". build_schedule has already PACKED the zone
+    # positions: adjacent zones touch (hard cut) or overlap by SAFA_OVERLAP_SEC
+    # (a per-seam SaFa seam). Each zone is a chunk (a zone longer than the window
+    # is sub-split). Per-chunk LoRA/seed/variance/prompt is resolved by chunk
+    # centre. SaFa blends only the seams whose overlap > 0; the rest hard-concat.
+    # keep_windows stays None so _resolve_center uses chunk centres.
     keep_windows = None
-    timeline_crossfade_sec = (float(lora_schedule[0].get("crossfade_sec", 0.0))
-                              if lora_schedule else 0.0)
     if lora_schedule:
-        if timeline_crossfade_sec > 0:
-            _window = max((ce - cs for cs, ce in chunks), default=features["duration"])
-            _total = chunks[-1][1]
-            chunks = compute_chunk_boundaries(_total, _window, timeline_crossfade_sec)
-            crossfade_mode = "safa"  # blend the overlaps; don't grow the window
-            logger.info(f"LoRA timeline: SaFa crossfade — {len(chunks)} overlapping "
-                        f"{_window:.1f}s chunks, overlap {timeline_crossfade_sec:.2f}s. "
-                        f"chunks={[(round(a, 2), round(b, 2)) for a, b in chunks]}")
-        else:
-            chunks, keep_windows = align_chunks_to_schedule(chunks, lora_schedule)
-            logger.info(f"LoRA timeline: {len(chunks)} chunks (hard cuts). "
-                        f"gen={[(round(a, 2), round(b, 2)) for a, b in chunks]} "
-                        f"keep={[(round(a, 2), round(b, 2)) for a, b in keep_windows]}")
+        _window = max((ce - cs for cs, ce in chunks), default=features["duration"])
+        chunks = _schedule_to_chunks(lora_schedule, _window)
+        crossfade_mode = "safa"
+        _seams = sum(1 for i in range(len(lora_schedule) - 1)
+                     if lora_schedule[i + 1].get("safa"))
+        logger.info(f"LoRA timeline: {len(chunks)} chunks from {len(lora_schedule)} zone(s), "
+                    f"{_seams} SaFa seam(s). chunks={[(round(a, 2), round(b, 2)) for a, b in chunks]}")
 
     # LoRA/prompt for a chunk is resolved by its KEEP-window centre (the segment
     # it represents) — the padded gen-window centre can fall in a neighbour.
@@ -1224,9 +1234,17 @@ def chunked_denoise_process(
             dac_weight = next(model_dict.dac_model.parameters())
             latents_dec = full_latent.to(device=dac_weight.device, dtype=dac_weight.dtype)
             audio = model_dict.dac_model.decode(latents_dec)
-        total_duration = features["duration"]
-        audio = audio[:, :, :int(total_duration * sample_rate)]
-        return audio, sample_rate
+        # Place at the first chunk's absolute start (timeline packing may begin
+        # >0 and covers less than the full clip after seam overlaps) and pad the
+        # remainder with silence to the full duration. Normal mode: start=0,
+        # coverage≈duration, so this is just a trim.
+        total_samples = int(features["duration"] * sample_rate)
+        start_off = max(0, int(round(chunks[0][0] * sample_rate)))
+        placed = audio.new_zeros(audio.shape[0], audio.shape[1], total_samples)
+        n = min(audio.shape[-1], total_samples - start_off)
+        if n > 0:
+            placed[..., start_off:start_off + n] = audio[..., :n]
+        return placed, sample_rate
 
     elif crossfade_mode == "latent":
         full_latent = chunk_latents[0]

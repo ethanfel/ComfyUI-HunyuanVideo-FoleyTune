@@ -23,6 +23,7 @@ const MIN_SEG_FRAMES = 1;   // shortest segment, in frames
 const DEFAULT_FPS = 30;     // fallback when the video fps is unknown
 const SNAP_SEC = 8;         // magnetic grid for segment boundaries (hold Shift to disable)
 const SNAP_PX = 9;          // magnet range in px — beyond this, boundaries move freely
+const SAFA_OVERLAP_SEC = 1.5;  // overlap pulled in at a SaFa seam (must match utils.py)
 const PLAYHEAD_COLOR = "#ffcc00";
 
 class TimelineEditor {
@@ -56,16 +57,6 @@ class TimelineEditor {
                 || this.segWidget.element
                 || (this.segWidget.options && this.segWidget.options.element);
             if (el && el.style) el.style.display = "none";
-        }
-
-        // Re-render the crossfade band live when the crossfade_frames widget changes.
-        const xfWidget = node.widgets?.find(w => w.name === "crossfade_frames");
-        if (xfWidget) {
-            const prev = xfWidget.callback;
-            xfWidget.callback = (...args) => {
-                if (prev) prev.apply(xfWidget, args);
-                this.render();
-            };
         }
 
         this._buildDOM();
@@ -242,6 +233,16 @@ class TimelineEditor {
             return;
         }
 
+        // SaFa seam badge? Toggle it (blend this zone's left seam) instead of dragging.
+        for (const b of (this._seamBadges || [])) {
+            if ((x - b.x) ** 2 + (y - b.y) ** 2 <= (b.r + 2) ** 2) {
+                b.ref.safa = !b.ref.safa;
+                this._commitFlush();
+                this.render();
+                return;
+            }
+        }
+
         const hit = this._hitTest(x, y);
 
         if (hit.idx < 0) {
@@ -415,6 +416,7 @@ class TimelineEditor {
             start_sec: startSec,
             end_sec: endSec,
             strength: this.entries[entryIdx].strength,
+            safa: false,                          // SaFa-blend left seam (toggle via badge)
         });
         this.segments.sort((a, b) => a.start_sec - b.start_sec);
         this.selectedIdx = this.segments.length - 1;
@@ -524,139 +526,95 @@ class TimelineEditor {
         this._drawTrack(ctx, w);
         this._drawSegments(ctx, w);
         this._drawChunkPlan(ctx, w);
+        this._drawSeamBadges(ctx);
         this._drawPlayhead(ctx, w);
     }
 
-    _crossfadeFrames() {
-        const wgt = this.node?.widgets?.find(w => w.name === "crossfade_frames");
-        const v = wgt ? Number(wgt.value) : 0;
-        return Number.isFinite(v) && v > 0 ? v : 0;
-    }
-
-    // Hard-cut chunk plan (crossfade == 0) — mirrors align_chunks_to_schedule:
-    // boundaries are the clip ends + every segment edge, regions longer than the
-    // 8s window sub-split evenly. Returns [[cs, ce], ...].
-    _chunkPlan() {
-        const dur = this.duration;
-        if (!(dur > 0) || !this.segments.length) return [];
-        const W = SNAP_SEC;
-        const bset = new Set([0, dur]);
-        for (const s of this.segments) {
-            bset.add(Math.max(0, Math.min(dur, s.start_sec)));
-            bset.add(Math.max(0, Math.min(dur, s.end_sec)));
-        }
-        const bounds = [...bset].sort((a, b) => a - b);
-        const keep = [];
-        for (let i = 0; i < bounds.length - 1; i++) {
-            const cs = bounds[i], ce = bounds[i + 1];
-            const span = ce - cs;
-            if (span < 1e-3) continue;
-            if (span <= W + 1e-6) { keep.push([cs, ce]); continue; }
-            const n = Math.ceil(span / W), step = span / n;
-            for (let k = 0; k < n; k++) {
-                keep.push([cs + k * step, k === n - 1 ? ce : cs + (k + 1) * step]);
-            }
-        }
-        return keep;
-    }
-
-    // SaFa chunk plan (crossfade > 0) — mirrors compute_chunk_boundaries:
-    // overlapping <=8s chunks covering the clip, overlap = crossfade. The seams
-    // are SaFa-blended during denoising. Returns [[cs, ce], ...].
-    _overlapChunks() {
-        const dur = this.duration, W = SNAP_SEC;
-        if (!(dur > 0)) return [];
-        if (dur <= W + 1e-6) return [[0, dur]];
-        const ov = Math.min(this._crossfadeFrames() / this.fps, W * 0.5);
-        const n = Math.ceil((dur - W) / Math.max(1e-6, W - ov)) + 1;
-        const stride = (dur - W) / (n - 1);
+    // "Zones are chunks": pack the sorted zones into a sequence from the first
+    // zone's start. A zone with safa=true pulls SAFA_OVERLAP_SEC left to overlap
+    // its predecessor (SaFa seam); otherwise it just touches (hard cut). Mirrors
+    // build_schedule packing. Returns [{start, end, safa, ref}, ...].
+    _packedChunks() {
+        const segs = [...this.segments].sort((a, b) => a.start_sec - b.start_sec);
         const out = [];
-        for (let i = 0; i < n; i++) {
-            const s = i * stride;
-            out.push([s, Math.min(s + W, dur)]);
+        let prevEnd = null;
+        for (const s of segs) {
+            const L = s.end_sec - s.start_sec;
+            const start = prevEnd === null ? s.start_sec : prevEnd - (s.safa ? SAFA_OVERLAP_SEC : 0);
+            out.push({ start, end: start + L, safa: !!s.safa, ref: s });
+            prevEnd = start + L;
         }
         return out;
     }
 
-    _coveredBySegment(cs, ce) {
-        const mid = (cs + ce) / 2;
-        return this.segments.some(s => mid >= s.start_sec - 1e-6 && mid <= s.end_sec + 1e-6);
-    }
-
-    // Overlay the real generation chunk plan so what you see = what generates.
-    //  • crossfade == 0: dashed cut per chunk boundary, "cN" index, and a hatch
-    //    over GAP chunks (no segment — they still generate as base audio).
-    //  • crossfade  > 0: SaFa — overlapping chunks; shade the overlap (blend)
-    //    zones with an ✕ hatch and label each chunk at its centre.
+    // Overlay the packed chunk plan: ✕-hatch on SaFa seams (blended), a sharp
+    // dashed line on hard-cut seams, and a "cN" index per chunk at its centre.
     _drawChunkPlan(ctx, w) {
         if (!(this.duration > 0) || !this.segments.length) return;
-        const yTop = RULER_H, yBot = RULER_H + TRACK_H;
-
-        if (this._crossfadeFrames() > 0) {
-            const plan = this._overlapChunks();
-            ctx.save();
-            for (let i = 0; i < plan.length - 1; i++) {
-                const ovS = plan[i + 1][0], ovE = plan[i][1];   // SaFa-blended overlap
-                if (ovE - ovS < 1e-3) continue;
-                const x1 = this._secToX(ovS), x2 = this._secToX(ovE);
-                ctx.save();
-                ctx.globalAlpha = 0.5;
-                ctx.fillStyle = "rgba(120,170,255,0.55)";
-                ctx.fillRect(x1, yTop + 3, x2 - x1, yBot - yTop - 6);
-                ctx.strokeStyle = "#fff"; ctx.lineWidth = 1;
-                ctx.beginPath();
-                ctx.moveTo(x1, yTop + 3); ctx.lineTo(x2, yBot - 3);
-                ctx.moveTo(x1, yBot - 3); ctx.lineTo(x2, yTop + 3);
-                ctx.stroke();
-                ctx.restore();
-            }
-            ctx.fillStyle = "rgba(255,205,90,0.95)";
-            ctx.font = "bold 9px monospace";
-            ctx.textAlign = "center"; ctx.textBaseline = "top";
-            for (let i = 0; i < plan.length; i++) {
-                const [cs, ce] = plan[i];
-                ctx.fillText(`c${i}`, this._secToX((cs + ce) / 2), yTop + 2);
-            }
-            ctx.restore();
-            return;
-        }
-
-        const plan = this._chunkPlan();
+        const plan = this._packedChunks();
         if (!plan.length) return;
+        const yTop = RULER_H, yBot = RULER_H + TRACK_H;
         ctx.save();
-        for (let i = 0; i < plan.length; i++) {
-            const [cs, ce] = plan[i];
-            const x1 = this._secToX(cs), x2 = this._secToX(ce);
-            if (!this._coveredBySegment(cs, ce)) {
-                ctx.save();
-                ctx.beginPath();
-                ctx.rect(x1, yTop, x2 - x1, TRACK_H);
-                ctx.clip();
-                ctx.strokeStyle = "rgba(255,140,0,0.45)";
-                ctx.lineWidth = 1;
-                ctx.beginPath();
-                for (let xx = x1 - TRACK_H; xx < x2; xx += 7) {
-                    ctx.moveTo(xx, yBot); ctx.lineTo(xx + TRACK_H, yTop);
-                }
-                ctx.stroke();
-                ctx.restore();
-            }
-            ctx.fillStyle = "rgba(255,205,90,0.95)";
-            ctx.font = "bold 9px monospace";
-            ctx.textAlign = "left"; ctx.textBaseline = "top";
-            ctx.fillText(`c${i}`, x1 + 3, yTop + 2);
+        // SaFa seams: shaded ✕-hatch blend zone over the overlap.
+        for (let i = 1; i < plan.length; i++) {
+            if (!plan[i].safa) continue;
+            const x1 = this._secToX(plan[i].start), x2 = this._secToX(plan[i - 1].end);
+            if (x2 - x1 < 1) continue;
+            ctx.save();
+            ctx.globalAlpha = 0.5;
+            ctx.fillStyle = "rgba(120,170,255,0.55)";
+            ctx.fillRect(x1, yTop + 3, x2 - x1, yBot - yTop - 6);
+            ctx.strokeStyle = "#fff"; ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(x1, yTop + 3); ctx.lineTo(x2, yBot - 3);
+            ctx.moveTo(x1, yBot - 3); ctx.lineTo(x2, yTop + 3);
+            ctx.stroke();
+            ctx.restore();
         }
-        ctx.strokeStyle = "rgba(255,175,45,0.9)";
-        ctx.lineWidth = 1;
+        // Hard-cut seams: sharp dashed line.
+        ctx.strokeStyle = "rgba(255,175,45,0.9)"; ctx.lineWidth = 1;
         ctx.setLineDash([3, 3]);
         for (let i = 1; i < plan.length; i++) {
-            const x = this._secToX(plan[i][0]);
-            ctx.beginPath();
-            ctx.moveTo(x, yTop); ctx.lineTo(x, yBot);
-            ctx.stroke();
+            if (plan[i].safa) continue;
+            const x = this._secToX(plan[i].start);
+            ctx.beginPath(); ctx.moveTo(x, yTop); ctx.lineTo(x, yBot); ctx.stroke();
         }
         ctx.setLineDash([]);
+        // Chunk indices at packed centres.
+        ctx.fillStyle = "rgba(255,205,90,0.95)";
+        ctx.font = "bold 9px monospace";
+        ctx.textAlign = "center"; ctx.textBaseline = "top";
+        for (let i = 0; i < plan.length; i++) {
+            ctx.fillText(`c${i}`, this._secToX((plan[i].start + plan[i].end) / 2), yTop + 2);
+        }
         ctx.restore();
+    }
+
+    // A clickable badge near each zone's left edge toggles SaFa on that seam
+    // (blend with the previous zone). Stored in _seamBadges for hit-testing.
+    _drawSeamBadges(ctx) {
+        this._seamBadges = [];
+        if (!(this.duration > 0)) return;
+        const segs = [...this.segments].sort((a, b) => a.start_sec - b.start_sec);
+        const y = RULER_H + 12, r = 7;
+        for (let i = 1; i < segs.length; i++) {  // first zone has no left seam
+            const s = segs[i];
+            const left = this._secToX(s.start_sec), right = this._secToX(s.end_sec);
+            if (right - left < 36) continue;  // too narrow for a badge
+            const x = left + 14;               // inset past the resize-edge grab zone
+            const on = !!s.safa;
+            ctx.save();
+            ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.fillStyle = on ? "rgba(90,150,255,0.95)" : "rgba(35,39,51,0.95)";
+            ctx.fill();
+            ctx.lineWidth = 1.5; ctx.strokeStyle = on ? "#d6e6ff" : "#7a7f8c";
+            ctx.stroke();
+            ctx.fillStyle = on ? "#fff" : "#aab";
+            ctx.font = "bold 10px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+            ctx.fillText(on ? "≈" : "|", x, y + 0.5);
+            ctx.restore();
+            this._seamBadges.push({ x, y, r, ref: s });
+        }
     }
 
     _drawPlayhead(ctx) {

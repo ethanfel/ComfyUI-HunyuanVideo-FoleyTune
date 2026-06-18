@@ -2090,21 +2090,62 @@ Rendered `performer_a_blowjob_intensity_sfc20` @0.5k from 6k→9.5k. Two indepen
 
 The noisy training metrics had under-shot the keeper to 6.5k; the ear (and the brightness/dynamics maxima) pull it to **7k**. Keeper: `performer_a_blowjob_intensity_sfc20/adapter_step07000.pt` (6.5k kept as backup). Stop intensity runs at the peak.
 
+#### 0.1-denoise production run — no-BWE, TF32-off & the IO base (June 2026)
+The strength sweep above settled the DATA (0.1 + hum notch); this is the RUN trained on it and the two findings that came out of evaluating it. Run `datase_denoise_01_global_peak_features_1139clip_io_intensity_sfc20` (1139 clips, 0.1-denoise + 50 Hz notch source, **`all_blocks_sync_io`** base — the validated IO upgrade over `all_blocks_sync` — r32/α32/dropout0.05, Prodigy+ sfc20, intensity 0.5, b8, noff0.03, t 0.05–0.95, save_every 250). Eval battery (`metrics_history.json`, fable lens) — the window + the LATE brightness/HF peak:
+
+| step | MCD | PBC | centroid | hf×1k | verdict |
+|---|---|---|---|---|---|
+| 3500 | 6.54 | 0.65 | 2075 | 67 | PBC plateau begins |
+| 4000 | 6.27 | 0.63 | 2073 | 81 | early fit peak |
+| **5750** | 6.75 | 0.63 | **2127** | **91** | **← release: brightness/HF peak, PBC still 0.63** |
+| 6000 | 6.79 | 0.64 | **2222** | **102** | HF max (just past the moan sweet spot by ear) |
+| 6250 | 6.61 | 0.65 | 2153 | 97 | |
+| 6750 | 8.94 | 0.46 | 2091 | 83 | **hard collapse** |
+| 7000 | 9.56 | 0.46 | 2082 | 83 | over-trained |
+
+PBC holds 0.63–0.65 from ~3.25k, but **centroid + HF climb LATE (peak 5750–6250: centroid 2127→2222, hf 91→102)** then a sharp collapse at 6750 — the sfc20-long-holds-HF signature, now objective. **5750 sits exactly on the brightness/HF peak with PBC still 0.63**, matching the 5-video ear consensus (clarity HNR 6.03 @5750). Release: **`typeAC_globalpeak_denoise01_io_intensity_sfc20_5k75.safetensors`** (eval-averaged weights, source `…/adapter_step05750.pt`).
+
+**FINDING 1 — ships RAW, NO BWE.** Render-analysis of the raw 5750 output (no FoleyTuneBWE), across 5 seeds/clips: **%HF 6–8 %, HF-tail 11–15 kHz, fizz 0.0014–0.0036** — *brighter* than most of the BWE'd clips from earlier recipes. The sfc20-long late checkpoint holds enough native HF that BWE is redundant; skipping it drops the UniverSR dependency, the input_sr tuning, the fizz risk, and the speech-model-on-non-speech artifacts. (BWE input_sr A/Bs still recorded for recipes that DO need it — rule: set input_sr ≈ the content's native bandwidth edge — DARK content → **16k** synthesizes the missing highs; BRIGHT content → **24k** preserves native HF and cleanly extends only the top; lower settings *replace* good native HF with fizzier synthesis. The 0.1/sfc20-long model needs none of it.)
+
+**FINDING 2 — TF32 degrades inference HF; render with TF32 OFF.** Same checkpoint, same seed, TF32 the only variable: TF32-on (vid_02338) centroid 2436 / %HF 6.0 / tail 11110 / fizz .0014 vs **TF32-off (vid_02341) centroid 2560 / %HF 6.6 / tail 12005 / fizz .0014** — brighter on every HF axis at **identical fizz**, i.e. more real HF detail retained at *zero* grain cost. TF32 keeps only **10 mantissa bits** (vs FP32's 23); the lost precision hits the smallest-magnitude = high-frequency components first, and that HF is the same top-end BWE was patching → TF32-off fixes the *cause*. Not set in this repo (comes from ComfyUI/torch default; user toggles via a dedicated node). **Scope = INFERENCE only — keep TF32 ON for training** (precision loss averages out across gradients; FP32 matmul ~2–4× slower on Blackwell). Both findings are *additive*: TF32-off + late sfc20 = bright enough to ship raw.
+
+#### Sample-analysis method (the render-analysis lens)
+Throughout these June runs, checkpoint selection used a render-analysis battery computed on the RENDERED output (mp4 audio), kept SEPARATE from the training `metrics_history` and used to **back the ear, not replace it**. The procedure:
+
+**Extract** ffmpeg → mono 48 kHz wav. **Level-match (RMS-align) before any A/B** — otherwise loudness masquerades as quality. For a true A/B, render the SAME seed/clip; identical HNR + env + floor across two files is the tell they are one generation differing only in post-processing (the TF32 and BWE A/Bs above relied on exactly this — when HNR/env/floor matched to 2 decimals, the brightness delta was the *processing*, not render variance).
+
+The battery (each metric → the perceptual question it answers):
+- **HNR** (harmonic-to-noise ratio) — autocorrelation on the <2 kHz low-passed signal, voiced frames only (frame RMS > 0.3× clip RMS), f0 search 80–500 Hz. **= MOAN CLARITY / purity** — high = clear voiced tonal moan, low = noisy/mushy. The single best render metric for moaning and the perceptually dominant axis (a 4.6-HNR moan reads "clear", a 0.8-HNR moan "mushy").
+- **Spectral centroid** (Hz) + **%HF** (power fraction > 4 kHz) + **HF-tail** (freq below which 99.9 % of cumulative energy sits) — **= BRIGHTNESS / air**, three complementary views (spectral center-of-mass, high-band weight, spectral edge).
+- **Fizz** = HF spectral flatness (geo-/arith-mean ratio of power > 4 kHz) — **= clean air vs grainy "fizz"**; separates real top-end from synthesis grit. Brightness only counts if fizz stays flat (the TF32 win was *brighter at the SAME fizz* = real detail, not grain).
+- **Full-band spectral flatness** — overall tonality-vs-noise = **MUSH** indicator (washed/over-smoothed output reads as centroid↓ + flatness↑ together).
+- **Env dB-std** (std of per-frame log-energy) — **= macro-dynamics / punch**.
+- **Noise floor** (p10 of per-frame RMS, dB) — **background level**, for source/denoise diagnostics.
+- **Gap-band breath** = energy in 300–3000 Hz over the QUIETEST 25 % of frames — **the ONLY correct breath metric.** Total HF is dominated by the loud moans → gives a FALSE "breath preserved" reading (the −0.2 dB total-HF error that hid the real −2.1 dB gap-breath loss at strength 0.45); always measure breath in the gaps between moans.
+
+Rules learned the hard way: (1) **pick the band for the question** — moan clarity = HNR (not centroid), breath = gap-bands (not total HF), brightness = centroid + tail + %HF, cleanliness = fizz + full-band flatness. (2) **render lens ≠ `metrics_history` lens** — absolute values are NOT comparable across the two (different clips, different method/window); use each within its own frame. (3) **the ear is the arbiter** — the battery reliably catches over-smooth/wash and bright-vs-fizz, but NOT moaning-character drift (higher-pitch/thinner past the peak — no metric flags it), so the final call is always by ear, with these numbers as the supporting evidence.
+
 #### Updated production recipe
 ```
 DEDICATED single-content LoRA per sound type (do NOT combine distinct contents):
-  target all_blocks_sync + Prodigy+ schedulefree_c=20 + r32/alpha32/dropout0.05
+  target all_blocks_sync_io + Prodigy+ schedulefree_c=20 + r32/alpha32/dropout0.05
+    (IO base = validated upgrade: adds I/O-projection surfaces; cleaner/clearer, ~40% fewer steps)
   batch 8 (grad_accum 1), noise_offset 0.03, logit_normal_sigma 0.8 / curriculum 0.6
   t_min 0.05 / t_max 0.95 (sync), constant schedule, warmup 0
   intensity_bias 0.5 (single-content cleanliness+dynamics; converges early)
   dataset: global_peak normalized across ALL positions as one dir
-  run LONG, judge LATE by ear (MCD-turn locates the window), then FoleyTuneBWE
-  → blowjob keeper ~7k, single-performer sex ~7.5k (read the MCD turn per dataset)
+    (denoise CONTENT-SPECIFIC: blowjob strong 0.6–0.7; moaning MINIMAL 0.1 + hum notch or skip)
+  run LONG, judge LATE by ear (MCD-turn + render-analysis locate the window)
+  RENDER WITH TF32 OFF (TF32 quantizes inference HF; keep TF32 ON for training)
+  HF: late sfc20 checkpoints hold HF natively → SHIP RAW, skip BWE
+      (only dark/early recipes still need FoleyTuneBWE; input_sr ≈ native bandwidth edge)
+  → blowjob keeper ~7k, single-performer sex ~7.5k, denoised moaning ~5750 (read the MCD turn)
   merged to main (eval_state_dict + RMS-aligned metrics make ckpt selection trustworthy)
 
-Production checkpoints (each → FoleyTuneBWE cfg3.0/input_sr16000):
-  blowjob:  performer_a_blowjob_intensity_sfc20/adapter_step07000.pt  (6.5k = backup)
-  sex/moan: performer_a_globalpeak_intensity_sfc20/adapter_step07000.pt (7.5k alt)
+Production checkpoints (TF32-off render; BWE only where noted):
+  moan/sex (denoised): typeAC_globalpeak_denoise01_io_intensity_sfc20_5k75  (RAW, no BWE) ← current
+  blowjob:  performer_a_blowjob_intensity_sfc20/adapter_step07000.pt  (6.5k = backup; → BWE)
+  sex/moan: performer_a_globalpeak_intensity_sfc20/adapter_step07000.pt (7.5k alt; older all_blocks_sync)
   one-model fallback (compromise): performer_a_combined_sfc20  (non-intensity)
-  dataset-save now emits this recipe by default (nodes_dataset.py sweep.json template)
+  dataset-save emits the IO recipe by default (nodes_dataset.py sweep.json template)
 ```

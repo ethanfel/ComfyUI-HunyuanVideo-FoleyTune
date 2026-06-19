@@ -549,8 +549,12 @@ class FoleyTuneDatasetDeclipper:
     """Fix clipping two ways — REPAIR true flat-tops, and CURATE (drop) clips too clipped to fix.
 
     Clipping bakes distortion into the source that loudness normalization (global_peak)
-    CANNOT undo — it only scales; the model then learns to GENERATE that saturation. (Audit
-    of a 1319-clip set: ~23% clipped, peaks to +3 dBFS — concentrated in hot shoots + skin-slap.)
+    CANNOT undo — it only scales; the model then learns to GENERATE that saturation.
+    CAVEAT: measure clipping via the SAME decode the training pipeline uses (`-f wav`/pcm16),
+    NOT `ffmpeg -c:a pcm_f32le` — its float AAC decode adds a phantom +3 dB (×√2) and FALSELY
+    reports ~23% "clipped"/peaks +3 dBFS on clip-CLEAN data. The mp4 sources audited this way
+    were clip-clean (declipper found only a handful of 4-5-sample flat-tops). Still use this
+    node for genuine RAW/WAV clipping; AAC can't be repaired (lossy smears flat-tops) — curate.
 
     Two distinct cases, both handled:
     * REPAIR (repair_flat_tops) — for RAW/PCM clipping (true flat plateaus): reconstructs the
@@ -2612,8 +2616,8 @@ class FoleyTuneDatasetSaver:
     DESCRIPTION = (
         "Save every clip in a FOLEYTUNE_AUDIO_DATASET to output_dir as 24-bit FLAC. "
         "Writes .npz feature files and generates sweep.json (ready for the Scheduler node) "
-        "with the validated sfc20-long + intensity recipe (all_blocks_sync R32, Prodigy+ "
-        "ScheduleFree c=20, noise_offset0.03, t_min/t_max rescale, intensity_bias0.5)."
+        "with the validated IO + uncond recipe (all_blocks_sync_io R32, Prodigy+ "
+        "ScheduleFree c=20, noise_offset0.03, t_min/t_max rescale, p_uncond0.2, intensity OFF)."
     )
 
     def save(self, dataset, output_dir: str, json_only: bool = False, prompt: str = ""):
@@ -2690,16 +2694,18 @@ class FoleyTuneDatasetSaver:
             "dataset_json": str(out_path / "dataset.json"),
             "output_root": str(out_path.parent / "output"),
             "base": {
-                # Validated "IO + intensity" recipe (June 2026): all_blocks_sync_io
-                # (boundary-capacity LoRA: attention+MLP+sync+I/O projections) + Prodigy+
-                # ScheduleFree (c=20) constant + noise_offset0.03 + t_min/t_max rescale +
-                # dropout0.05 + intensity_bias0.5. IO is the validated upgrade over
-                # all_blocks_sync (cleaner/clearer/more-faithful, ~40% fewer steps) and it
-                # converges EARLY -> shorter run + fine save_every; audition LATE by ear
-                # (MCD-turn + render-analysis). Ship RAW + render TF32-OFF (late sfc20 holds
-                # HF natively -> skip BWE). DEFAULT = uncond20 (p_uncond=0.2, render @ CFG 4.5,
-                # the sync-lane tool). For the clean CFG-1.0 tool, add an experiment with
-                # p_uncond=0. p_uncond dose tracks render CFG: 0 @ CFG1, 0.1 @ ~2, 0.2 @ ~4.5.
+                # Validated recipe (June 2026): all_blocks_sync_io (boundary-capacity LoRA:
+                # attention+MLP+sync+I/O projections) + Prodigy+ ScheduleFree (c=20) constant +
+                # noise_offset0.03 + t_min/t_max rescale + dropout0.05. IO is the validated
+                # upgrade over all_blocks_sync (cleaner/clearer/more-faithful, ~40% fewer steps)
+                # and it converges EARLY -> shorter run + fine save_every; audition LATE by ear
+                # (MCD-turn + render-analysis). Ship RAW + render TF32-OFF (late sfc20 holds HF
+                # natively -> skip BWE). intensity_bias OFF (0.0): with uncond it's net-NEGATIVE
+                # (energy bias -> saturation + suppresses slap transients); 0.0 measured cleaner
+                # floor (+7dB) + clearer moans + slaps come through (0.0 > 0.3 > 0.5 for uncond).
+                # DEFAULT = uncond20 (p_uncond=0.2, render @ CFG 4.5, the
+                # sync-lane tool). For the clean CFG-1.0 tool, add an experiment with p_uncond=0.
+                # p_uncond dose tracks render CFG: 0 @ CFG1, 0.1 @ ~2, 0.2 @ ~4.5.
                 "target": "all_blocks_sync_io",
                 "rank": 32,
                 "alpha": 32,
@@ -2744,7 +2750,7 @@ class FoleyTuneDatasetSaver:
                 "gradient_checkpointing": False,
                 "resume_from": "",
                 "eval_negative_prompt": "noisy, harsh",
-                "intensity_bias": 0.5,
+                "intensity_bias": 0.0,
                 "intensity_metric": "energy",
                 "p_uncond": 0.2,
             },
@@ -2762,19 +2768,20 @@ class FoleyTuneDatasetSaver:
         sweep_json["experiments"] = [
             {
                 # DEFAULT = uncond20 sync-lane model (p_uncond=0.2 from base), render @ CFG 4.5.
-                "id": f"{tag}_io_intensity_sfc20_puncond20",
+                "id": f"{tag}_io_sfc20_puncond20",
                 "description": (
-                    "SYNC-LANE tool (render @ CFG 4.5). IO + intensity: all_blocks_sync_io "
-                    "R32 Prodigy+ ScheduleFree(c=20) constant, noise_offset0.03, "
-                    "t_min0.05/t_max0.95 rescale, dropout0.05, intensity_bias0.5 energy + "
-                    "p_uncond=0.2 = CFG conditioning dropout: trains the unconditional pass "
-                    "so high CFG stays CLEAN (at CFG 4.5 the 4.5x extrapolation is dominated "
-                    "by the uncond pass; untrained=drift/fizz+raised floor, trained=clean+tight). "
-                    "Dose tracks CFG: 0.2 for ~4.5 (0.1 for ~2). Drives the timeline "
-                    "CFG-automation lane in motion/thrust/sync zones. Checkpoint: clarity peaks "
-                    "EARLY (~5-5.5k by render-battery), NO hard collapse (gently washes) -> grab "
-                    "the early clarity/low-fizz point by ear (render @ CFG 4.5). Ship raw, render "
-                    "TF32-OFF. For the clean CFG-1.0 tool, add an experiment with p_uncond=0."
+                    "SYNC-LANE tool (render @ CFG 4.5). all_blocks_sync_io R32 Prodigy+ "
+                    "ScheduleFree(c=20) constant, noise_offset0.03, t_min0.05/t_max0.95 rescale, "
+                    "dropout0.05, intensity_bias OFF (0.0 — with uncond it's net-negative: "
+                    "saturation + suppresses slap transients; 0.0 = +7dB cleaner floor + clearer "
+                    "moans + slaps come through) + p_uncond=0.2 = CFG conditioning "
+                    "dropout: trains the unconditional pass so high CFG stays CLEAN (at CFG 4.5 the "
+                    "4.5x extrapolation is dominated by the uncond pass; untrained=drift/fizz+raised "
+                    "floor, trained=clean+tight). Dose tracks CFG: 0.2 for ~4.5 (0.1 for ~2). Drives "
+                    "the timeline CFG-automation lane in motion/thrust/sync zones. Checkpoint: clarity "
+                    "peaks EARLY (~5.5-6k by render-battery), grab the early clarity/low-fizz point by "
+                    "ear (render @ CFG 4.5). Ship raw, render TF32-OFF. For the clean CFG-1.0 tool, "
+                    "add an experiment with p_uncond=0."
                 ),
             },
         ]

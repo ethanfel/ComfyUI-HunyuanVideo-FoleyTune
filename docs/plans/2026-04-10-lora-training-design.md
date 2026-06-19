@@ -2196,3 +2196,52 @@ By ear + metrics, the uncond variants seem to *generate* moans and HF better tha
 
 #### "master" render node + enhancement modes (mild polish, NOT a core lever)
 A "master" render node: 14-pair A/B (sequential gen so per-pair includes seed drift) shows a systematic (sign-consistent) **mild brightening + dynamics lift** — centroid +60 Hz (14/14), env +0.16 (14/14), fizz −0.001 (13/14), HNR +0.08 (11/14) — at one cost, floor **+0.33 dB** (13/14, the flip side of brightening). Magnitude mild ("very slight on some, not all"); KEPT ON as a harmless finishing polish, but it's a 2nd brightness source alongside TF32-off → don't stack both cranked (over-bright + compounds the floor on nodenoise). Its enhancement MODES (Δ vs baseline, one clip): **balanced** = best clarity (HNR +0.63), the default for clean content; **moaning** = transparent (floor +0.0, keeps transients) → the nodenoise/floor-safe pick; **auto** ≈ balanced dialed back ~40% (gentler, cleaner floor); **strong/slap-boost** = audible BUT over-process (crest −2.0 = squash transients, floor +2–3 dB) — "slap-boost" actually COMPRESSES slap transients despite the name → special-purpose only, not a default. Real levers stay: checkpoint + p_uncond/CFG + TF32-off; master/modes are optional finishing.
+
+#### intensity_bias DROPPED for uncond — saturation + slap suppression
+With the uncond approach, `intensity_bias` (energy-weighted sampling) flips from a win to net-NEGATIVE. Two findings:
+1. **Saturation.** intensity skews the *unconditional* prior (the thing CFG leans on) toward loud clips → hot output at high CFG, worst LATE (a 6750+ loudness inflation: rms +4–8 dB, floor +4–10 dB, on ~3/7 clips).
+2. **It suppresses slaps.** Favoring loud moans drowns the sharper slap/clap transients (which come through once intensity is off).
+
+(NOT a clipping problem — a raw-mp4 audit briefly reported ~23% "hard-clipped" but that was a **decode artifact**: `ffmpeg -c:a pcm_f32le` float-decodes AAC with a phantom +3 dB (×√2), so every clip "peaked at +3.01 dBFS". The real training audio decoded the way the pipeline does it (`-f wav`/pcm16) is clip-CLEAN — +0.00 dBFS, declipper found only 13 clips with 4–5-sample flat-tops. LESSON: measure clipping via the SAME decode the training pipeline uses, never `pcm_f32le`. See [[project_cfg_study]].)
+
+Sweep on matched test clips (10 fixed clips × steps, same seed) — `intensity_bias` 0.5 / 0.3 / 0.0:
+
+| intensity | floor | HNR peak | late loudness inflation | slaps | verdict |
+|---|---|---|---|---|---|
+| 0.5 | ~−53 | — | 3/7 clips jump >3 dB @6750+ | suppressed | saturates |
+| 0.3 | −50 to −53 | 5.30 | **0/10** (inflation gone) | some | clean, but… |
+| **0.0** | **−57 to −60** (+7 dB) | **6.32** | 0/10 | **come through** | **best: cleaner floor + clearer moans + slaps** |
+
+**0.0 > 0.3 > 0.5 for uncond** — dropping intensity entirely gives a ~7 dB cleaner floor AND clearer moans AND lets the slaps through (uncond already supplies the dynamics intensity used to add, so it's pure downside now). **Template default set to `intensity_bias=0.0`.** Checkpoint for the 0.0 run: **5750–6000** (HNR peak 6.32, cleanest floor, most dynamic). "Train further?" is a TRADEOFF — per-clip, moan clarity peaks ~5750 then declines while slap transients keep sharpening through 7000 (crest rising) → extend only if slaps are the priority; for balanced moan+slap, grab 5750–6000.
+
+### Findings Cheat-Sheet — Current Production Recipe (June 2026)
+
+**Training knobs** (sweep/template defaults):
+
+| knob | setting | why |
+|---|---|---|
+| target | `all_blocks_sync_io` | IO base — adds I/O-projection surfaces; cleaner/clearer, ~40% fewer steps |
+| optimizer | Prodigy+ ScheduleFree `c=20` (sfc20) | shorter averaging window → runs LONG without over-smooth; holds HF |
+| rank/alpha/dropout | 32 / 32 / 0.05 | |
+| batch / grad_accum | 8 / 1 | b8 = gradient-noise sweet spot (b4 darker, b16 under-converged) |
+| noise_offset | 0.03 | |
+| t_min / t_max | 0.05 / 0.95 | sync |
+| **intensity_bias** | **0.0 (OFF)** | with uncond it's net-negative (saturation + suppresses slaps); 0.0 = +7 dB cleaner floor + clearer moans + slaps come through |
+| **p_uncond** | **0.2** (lane) / 0 (clean) | CFG conditioning dropout; trains the uncond pass so high CFG stays clean; **dose tracks CFG** (0 @1, 0.1 @~2, 0.2 @~4.5) |
+| schedule / warmup | constant / 0 | |
+| normalization | `global_peak` across ALL positions | un-clips loudest peak → −1; not global_lufs (too quiet) / not per-clip LUFS (promotes breath) |
+| denoise | content-specific | blowjob strong 0.6–0.7; moaning minimal 0.1 + hum-notch or skip (breath inseparable by blind methods) |
+| TF32 (training) | ON | precision loss averages out; FP32 matmul ~2–4× slower |
+
+**Render knobs:**
+
+| knob | setting | why |
+|---|---|---|
+| **CFG** | 1.0 (clean tool) / 4.5 (sync lane) | CFG = adherence dial; 1.0 skips uncond pass (purest), 4.5 = sync (needs uncond-trained model) |
+| **TF32 (inference)** | **OFF** | TF32's 10-bit mantissa quantizes fine HF; off = brighter at identical fizz |
+| BWE | SKIP (raw) | late sfc20 holds HF natively (%HF 6–8, tail 11–15 kHz); only dark/early recipes need it (input_sr ≈ native edge) |
+| checkpoint | EARLY for uncond (~5.5–6k) | clarity peaks early; late washes/saturates. MCD-turn + render-battery locate it |
+| master node | ON (mild polish); mode = balanced (clean) / moaning (nodenoise) | harmless brightening; don't stack hot with TF32-off; avoid strong/slap as default |
+| weights | eval_state_dict | mid-run prodigy_plus ckpts store eval-averaged weights → audition == load |
+
+**Two-tools production:** `nocond @ CFG 1.0` (tonal moaning zones) + `uncond20 @ CFG 4.5` (motion/sync zones, drives the timeline CFG-automation lane). **Selection lens:** render-analysis battery (HNR=clarity, gap-band=breath, fizz=grain, floor=noise, centroid/%HF/tail=brightness, env=dynamics) backing the ear — never PBC/MCD absolutes across runs.

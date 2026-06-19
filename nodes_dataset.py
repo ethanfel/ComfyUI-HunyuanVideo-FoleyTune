@@ -2494,8 +2494,11 @@ class FoleyTuneDatasetSaver:
                 # ScheduleFree (c=20) constant + noise_offset0.03 + t_min/t_max rescale +
                 # dropout0.05 + intensity_bias0.5. IO is the validated upgrade over
                 # all_blocks_sync (cleaner/clearer/more-faithful, ~40% fewer steps) and it
-                # converges EARLY -> shorter run + fine save_every. Audition ~3-4.5k by ear
-                # (small sets peak sooner), grab before over-train, then BWE.
+                # converges EARLY -> shorter run + fine save_every; audition LATE by ear
+                # (MCD-turn + render-analysis). Ship RAW + render TF32-OFF (late sfc20 holds
+                # HF natively -> skip BWE). DEFAULT = uncond20 (p_uncond=0.2, render @ CFG 4.5,
+                # the sync-lane tool). For the clean CFG-1.0 tool, add an experiment with
+                # p_uncond=0. p_uncond dose tracks render CFG: 0 @ CFG1, 0.1 @ ~2, 0.2 @ ~4.5.
                 "target": "all_blocks_sync_io",
                 "rank": 32,
                 "alpha": 32,
@@ -2542,6 +2545,7 @@ class FoleyTuneDatasetSaver:
                 "eval_negative_prompt": "noisy, harsh",
                 "intensity_bias": 0.5,
                 "intensity_metric": "energy",
+                "p_uncond": 0.2,
             },
             "experiments": [],  # filled below
         }
@@ -2556,14 +2560,20 @@ class FoleyTuneDatasetSaver:
         tag = f"{sweep_name}_{total_train}clip"
         sweep_json["experiments"] = [
             {
-                "id": f"{tag}_io_intensity_sfc20",
+                # DEFAULT = uncond20 sync-lane model (p_uncond=0.2 from base), render @ CFG 4.5.
+                "id": f"{tag}_io_intensity_sfc20_puncond20",
                 "description": (
-                    "IO + intensity: all_blocks_sync_io R32 Prodigy+ "
-                    "ScheduleFree(c=20) constant, noise_offset0.03, "
-                    "t_min0.05/t_max0.95 rescale, dropout0.05, intensity_bias0.5 "
-                    "energy. IO converges EARLY -> audition ~3-4.5k by ear (save 250; "
-                    "small sets peak sooner ~2.75-3k, larger ~4-4.5k), grab before "
-                    "over-train, then UniverSR/FoleyTuneBWE."
+                    "SYNC-LANE tool (render @ CFG 4.5). IO + intensity: all_blocks_sync_io "
+                    "R32 Prodigy+ ScheduleFree(c=20) constant, noise_offset0.03, "
+                    "t_min0.05/t_max0.95 rescale, dropout0.05, intensity_bias0.5 energy + "
+                    "p_uncond=0.2 = CFG conditioning dropout: trains the unconditional pass "
+                    "so high CFG stays CLEAN (at CFG 4.5 the 4.5x extrapolation is dominated "
+                    "by the uncond pass; untrained=drift/fizz+raised floor, trained=clean+tight). "
+                    "Dose tracks CFG: 0.2 for ~4.5 (0.1 for ~2). Drives the timeline "
+                    "CFG-automation lane in motion/thrust/sync zones. Checkpoint: clarity peaks "
+                    "EARLY (~5-5.5k by render-battery), NO hard collapse (gently washes) -> grab "
+                    "the early clarity/low-fizz point by ear (render @ CFG 4.5). Ship raw, render "
+                    "TF32-OFF. For the clean CFG-1.0 tool, add an experiment with p_uncond=0."
                 ),
             },
         ]

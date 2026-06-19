@@ -1328,8 +1328,8 @@ class FoleyTuneVideoLoader:
             },
         }
 
-    RETURN_TYPES = ("FOLEYTUNE_VIDEO_FEATURES",)
-    RETURN_NAMES = ("video_features",)
+    RETURN_TYPES = ("FOLEYTUNE_VIDEO_FEATURES", "STRING")
+    RETURN_NAMES = ("video_features", "filename")
     FUNCTION = "load_video"
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
@@ -1338,6 +1338,7 @@ class FoleyTuneVideoLoader:
         if not video_path or not os.path.isfile(video_path):
             raise FileNotFoundError(f"Video not found: {video_path}")
         features = _extract_video_features(video_path, hunyuan_deps, start_time, duration)
+        filename = os.path.basename(video_path)
 
         # Symlink video to temp dir for inline preview (zero-cost, no copy)
         temp_dir = folder_paths.get_temp_directory()
@@ -1351,7 +1352,7 @@ class FoleyTuneVideoLoader:
 
         return {"ui": {"gifs": [{"filename": temp_name, "subfolder": "", "type": "temp",
                                   "format": f"video/{ext.lstrip('.')}"}]},
-                "result": (features,)}
+                "result": (features, filename)}
 
     @classmethod
     def IS_CHANGED(cls, video_path, **kwargs):
@@ -1390,8 +1391,8 @@ class FoleyTuneVideoLoaderUpload:
             },
         }
 
-    RETURN_TYPES = ("FOLEYTUNE_VIDEO_FEATURES",)
-    RETURN_NAMES = ("video_features",)
+    RETURN_TYPES = ("FOLEYTUNE_VIDEO_FEATURES", "STRING")
+    RETURN_NAMES = ("video_features", "filename")
     FUNCTION = "load_video"
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
@@ -1399,6 +1400,7 @@ class FoleyTuneVideoLoaderUpload:
     def load_video(self, hunyuan_deps, video, start_time=0.0, duration=0.0, file_manager=None):
         video_path = folder_paths.get_annotated_filepath(video)
         features = _extract_video_features(video_path, hunyuan_deps, start_time, duration)
+        filename = os.path.basename(video_path)
 
         # Symlink to temp dir for preview (zero-cost, no copy)
         temp_dir = folder_paths.get_temp_directory()
@@ -1412,7 +1414,7 @@ class FoleyTuneVideoLoaderUpload:
 
         return {"ui": {"gifs": [{"filename": temp_name, "subfolder": "", "type": "temp",
                                   "format": f"video/{ext.lstrip('.')}"}]},
-                "result": (features,)}
+                "result": (features, filename)}
 
     @classmethod
     def IS_CHANGED(cls, video, **kwargs):

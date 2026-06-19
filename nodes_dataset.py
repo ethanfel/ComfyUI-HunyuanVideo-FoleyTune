@@ -489,6 +489,207 @@ class FoleyTuneDatasetHumNotch:
         return (out,)
 
 
+def _declip_channel(x, thr_frac=0.985, min_run=3, max_repair=1440,
+                    flat_range=1e-3, clamp_mult=1.6):
+    """Repair TRUE digital clipping (flat plateaus) in a 1-D signal via cubic-spline reconstruction.
+
+    The clipping signature is a near-peak run that is genuinely FLAT (a digital rail:
+    consecutive samples within flat_range*peak of each other). This is what discriminates
+    clipping from (a) clean tonal peaks — a sine sits near its peak for several samples but
+    CURVES, so its near-peak run spans > flat_range and is skipped — and (b) AAC/lossy-decoded
+    clipping, where the original flat-tops are already smeared into a wavy >0-dBFS band (no flat
+    plateau survives), which therefore cannot be declipped (only curated). So this only fires on
+    recoverable raw/PCM-style flat-tops, and leaves clean tonal content and unclipped clips
+    untouched. Each flat run is reconstructed by a natural cubic spline through the unclipped
+    shoulders (overshoots -> plausible peak), constrained to [ceiling, clamp_mult*peak]. Returns
+    (y, n_runs, n_clipped, max_run, n_long_runs).
+    """
+    from scipy.interpolate import CubicSpline
+    x = x.astype(np.float64)
+    pk = float(np.abs(x).max())
+    if pk < 1e-6:
+        return x, 0, 0, 0, 0
+    thr = thr_frac * pk
+    flat_tol = flat_range * pk
+    flagged = np.abs(x) >= thr
+    if not flagged.any():
+        return x, 0, 0, 0, 0
+    idx = np.where(flagged)[0]
+    runs = np.split(idx, np.where(np.diff(idx) > 1)[0] + 1)
+    y = x.copy()
+    N = len(x)
+    n_runs = n_clipped = max_run = n_long = 0
+    for run in runs:
+        L = len(run)
+        if L < min_run:
+            continue  # single/short peak = legit transient, not clipping
+        i0, i1 = int(run[0]), int(run[-1])
+        seg = x[i0:i1 + 1]
+        if (seg.max() - seg.min()) > flat_tol:
+            continue  # near-peak but CURVED (tonal peak / AAC-smeared) -> not a flat clip
+        n_runs += 1
+        n_clipped += L
+        max_run = max(max_run, L)
+        if L > max_repair:
+            n_long += 1
+        s = 1.0 if seg.mean() >= 0 else -1.0
+        W = int(min(max(8, L), 64))
+        anch = np.concatenate([np.arange(max(0, i0 - W), i0),
+                               np.arange(i1 + 1, min(N, i1 + 1 + W))])
+        anch = anch[~flagged[anch]]  # unclipped shoulders only
+        if len(anch) < 4:
+            continue  # not enough context to reconstruct
+        fill = CubicSpline(anch, x[anch])(np.arange(i0, i1 + 1))
+        proj = np.clip(s * fill, thr, clamp_mult * pk)  # stay beyond ceiling, cap overshoot
+        y[i0:i1 + 1] = s * proj
+    return y, n_runs, n_clipped, max_run, n_long
+
+
+class FoleyTuneDatasetDeclipper:
+    """Fix clipping two ways — REPAIR true flat-tops, and CURATE (drop) clips too clipped to fix.
+
+    Clipping bakes distortion into the source that loudness normalization (global_peak)
+    CANNOT undo — it only scales; the model then learns to GENERATE that saturation. (Audit
+    of a 1319-clip set: ~23% clipped, peaks to +3 dBFS — concentrated in hot shoots + skin-slap.)
+
+    Two distinct cases, both handled:
+    * REPAIR (repair_flat_tops) — for RAW/PCM clipping (true flat plateaus): reconstructs the
+      missing peaks via cubic spline. Auto-skips clean clips and clean TONAL content (a sine
+      peak curves; only genuine flat rails are touched).
+    * CURATE (drop_clip_ratio_pct) — for LOSSY/AAC sources (mp4): lossy decode smears the
+      original flat-tops into a wavy >0-dBFS band, so there are NO plateaus left to interpolate
+      and repair is impossible. The only fix is to DROP the clips that are too clipped to use,
+      identified by their fraction of at/over-full-scale samples (the audit metric). THIS is the
+      lever for mp4 datasets — set it (e.g. 0.5%) to cull the worst; repair is a no-op there.
+
+    detect_only reports the full clipping audit (peak dBFS + clip-ratio + worst offenders) without
+    changing anything. Apply BEFORE global_peak normalization / feature extraction.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "dataset": (FOLEYTUNE_AUDIO_DATASET,),
+                "drop_clip_ratio_pct": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 5.0, "step": 0.1,
+                    "tooltip": "CURATION (the lever for mp4/AAC sources): DROP any clip with more "
+                               "than this %% of samples at/over digital full-scale (clip_abs). "
+                               "Catches lossy/AAC clipping that REPAIR can't fix. 0 = drop nothing. "
+                               "~0.5 culls the badly-clipped clips; ~0.1 is aggressive (drops ~20%% "
+                               "on a hot dataset). Use detect_only first to see the distribution.",
+                }),
+                "repair_flat_tops": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Reconstruct TRUE flat-top (raw/PCM) clipping via cubic spline. "
+                               "No-op on AAC-smeared clipping (no plateaus survive lossy decode) "
+                               "and on clean clips, so it's safe to leave on.",
+                }),
+            },
+            "optional": {
+                "detect_only": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Audit only: report peak-dBFS + clip-ratio distribution + worst "
+                               "offenders, modify NOTHING. Use to scope a dataset first.",
+                }),
+                "clip_abs": ("FLOAT", {
+                    "default": 0.989, "min": 0.90, "max": 1.0, "step": 0.001,
+                    "tooltip": "Absolute full-scale threshold for the clip-ratio / curation metric. "
+                               "0.989 ~= within 0.1 dB of 0 dBFS (the audit value).",
+                }),
+                "threshold": ("FLOAT", {
+                    "default": 0.985, "min": 0.90, "max": 1.0, "step": 0.005,
+                    "tooltip": "[repair] Near-peak fraction (of the clip's own peak) for flat-top "
+                               "detection. Relative, so it works at any ceiling.",
+                }),
+                "min_run": ("INT", {
+                    "default": 3, "min": 2, "max": 64, "step": 1,
+                    "tooltip": "[repair] Minimum consecutive FLAT near-peak samples to count as a "
+                               "clip plateau. Distinguishes a digital rail from a tonal peak.",
+                }),
+                "max_repair_ms": ("FLOAT", {
+                    "default": 30.0, "min": 1.0, "max": 200.0, "step": 1.0,
+                    "tooltip": "[repair] Flat-tops longer than this are flagged 'severe' (cubic "
+                               "across a big gap is a guess). Reported; cull via drop_clip_ratio_pct.",
+                }),
+            },
+        }
+
+    RETURN_TYPES = (FOLEYTUNE_AUDIO_DATASET,)
+    RETURN_NAMES = ("dataset",)
+    FUNCTION = "declip"
+    CATEGORY = FOLEYTUNE_DS_CATEGORY
+    DESCRIPTION = (
+        "Fix clipping: REPAIR true flat-tops (cubic spline) AND/OR CURATE by dropping clips too "
+        "clipped to fix (the lever for lossy/AAC sources, where repair is impossible). global_peak "
+        "can't undo clipping — it only scales. Run before normalization/feature extraction. "
+        "detect_only audits (peak dBFS + clip-ratio) without changing anything."
+    )
+
+    def declip(self, dataset, drop_clip_ratio_pct=0.0, repair_flat_tops=True,
+               detect_only=False, clip_abs=0.989, threshold=0.985, min_run=3, max_repair_ms=30.0):
+        out = []
+        n_repaired = n_dropped = 0
+        peaks_db = []
+        clipped = []  # (hot_ratio%, peak_dBFS, max_flat_run, name)
+        for item in dataset:
+            throw_exception_if_processing_interrupted()
+            wav = item["waveform"][0]  # [C, L]
+            sr = int(item["sample_rate"])
+            x = wav.double().numpy()
+            n_ch, N = x.shape
+
+            ax = np.abs(x)
+            pk = float(ax.max())
+            peak_db = 20.0 * np.log10(pk + 1e-12)
+            peaks_db.append(peak_db)
+            hot_ratio = 100.0 * float((ax >= clip_abs).mean())  # audit clip-ratio (absolute full-scale)
+
+            chans, c_runs, c_maxrun = None, 0, 0
+            if repair_flat_tops:
+                chans, mr = [], int(max_repair_ms * 1e-3 * sr)
+                for ch in range(n_ch):
+                    y, nr_, _, mrn_, _ = _declip_channel(x[ch], threshold, min_run, mr)
+                    chans.append(y)
+                    c_runs += nr_
+                    c_maxrun = max(c_maxrun, mrn_)
+
+            if hot_ratio > 0.0 or c_runs > 0:
+                clipped.append((hot_ratio, peak_db, c_maxrun, item.get("name", "?")))
+
+            # CURATE: drop clips too hot to fix (lossy/AAC clipping repair can't recover)
+            if not detect_only and drop_clip_ratio_pct > 0.0 and hot_ratio > drop_clip_ratio_pct:
+                n_dropped += 1
+                continue
+            # REPAIR: reconstruct true flat-top runs
+            if not detect_only and repair_flat_tops and c_runs > 0:
+                y = np.stack(chans)
+                mx = float(np.abs(y).max())
+                if mx > 1.0:
+                    y = y / mx  # keep within [-1,1]; global_peak re-normalizes level downstream
+                new_item = dict(item)
+                new_item["waveform"] = torch.from_numpy(np.ascontiguousarray(y)).float().unsqueeze(0)
+                out.append(new_item)
+                n_repaired += 1
+                continue
+            out.append(item)  # clean / nothing to do / detect-only
+
+        pk_arr = np.array(peaks_db) if peaks_db else np.array([0.0])
+        clipped.sort(reverse=True)
+        thr_report = drop_clip_ratio_pct if drop_clip_ratio_pct > 0 else 0.1
+        n_over = sum(1 for c in clipped if c[0] > thr_report)
+        mode = "DETECT-ONLY (no changes)" if detect_only else "repair+curate"
+        print(f"[FoleyTuneDatasetDeclipper] {mode}: {len(dataset)} clips -> kept {len(out)} "
+              f"({n_repaired} flat-tops repaired, {n_dropped} dropped). "
+              f"peak dBFS: p50 {np.percentile(pk_arr, 50):+.1f} / p90 {np.percentile(pk_arr, 90):+.1f} / "
+              f"max {pk_arr.max():+.1f}; {int((pk_arr >= -0.1).sum())} clips at/over 0 dBFS. "
+              f"clip-ratio >{thr_report:.2f}%: {n_over} clips", flush=True)
+        for hr, pdb, mr, nm in clipped[:10]:
+            tag = "FLAT-TOP" if mr > 0 else "smeared"  # flat-run present => raw clipping (repairable)
+            print(f"    clip {hr:6.3f}% | peak {pdb:+6.2f} dBFS | {tag} run {mr:5d} | {nm}", flush=True)
+        return (out,)
+
+
 # ─── Node 5: Dataset Inspector ───────────────────────────────────────────────
 
 def _check_hf_shelf(wav: torch.Tensor, sr: int) -> bool:
@@ -3585,6 +3786,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneDatasetLUFSNormalizer": FoleyTuneDatasetLUFSNormalizer,
     "FoleyTuneDatasetCompressor": FoleyTuneDatasetCompressor,
     "FoleyTuneDatasetHumNotch": FoleyTuneDatasetHumNotch,
+    "FoleyTuneDatasetDeclipper": FoleyTuneDatasetDeclipper,
     "FoleyTuneDatasetInspector": FoleyTuneDatasetInspector,
     "FoleyTuneDenoiserSettings": FoleyTuneDenoiserSettings,
     "FoleyTuneFilterOptions": FoleyTuneFilterOptions,
@@ -3609,6 +3811,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneDatasetLUFSNormalizer": "FoleyTune Dataset LUFS Normalizer",
     "FoleyTuneDatasetCompressor": "FoleyTune Dataset Compressor",
     "FoleyTuneDatasetHumNotch": "FoleyTune Dataset Hum Notch",
+    "FoleyTuneDatasetDeclipper": "FoleyTune Dataset Declipper",
     "FoleyTuneDatasetInspector": "FoleyTune Dataset Inspector",
     "FoleyTuneDenoiserSettings": "FoleyTune Denoiser Settings",
     "FoleyTuneFilterOptions": "FoleyTune Filter Options",

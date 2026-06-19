@@ -21,6 +21,9 @@ import torch
 from scipy import signal as sps
 from loguru import logger
 
+# Shown on every FoleyTune audio node's `audio` input so the chain order is discoverable.
+_CHAIN = "Recommended FoleyTune chain: BWE → De-Harsh → Tilt → Saturate → Glue → Master (loudness/limiter always last)."
+
 
 # --------------------------------------------------------------------------- #
 # shared helpers                                                              #
@@ -155,7 +158,7 @@ class FoleyTuneDeHarsh:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "audio": ("AUDIO", {}),
+            "audio": ("AUDIO", {"tooltip": _CHAIN}),
             "mode": (["off", "auto", "manual", "subtle", "medium", "strong"], {"default": "auto",
                 "tooltip": "auto = scale by measured fizz/brightness. manual = use the sliders. subtle<medium<strong."}),
             "amount": ("FLOAT", {"default": 0.30, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "[manual] Depth of attenuation on protruding bins."}),
@@ -189,7 +192,7 @@ class FoleyTuneSaturate:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "audio": ("AUDIO", {}),
+            "audio": ("AUDIO", {"tooltip": _CHAIN}),
             "mode": (["off", "auto", "manual", "subtle", "medium", "strong"], {"default": "subtle",
                 "tooltip": "auto = more warmth on dull/thin clips. manual = sliders. subtle<medium<strong."}),
             "amount": ("FLOAT", {"default": 0.20, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "[manual] Saturation depth (drive + parallel mix)."}),
@@ -220,7 +223,7 @@ class FoleyTuneTilt:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "audio": ("AUDIO", {}),
+            "audio": ("AUDIO", {"tooltip": _CHAIN}),
             "mode": (["off", "auto", "manual", "darken", "darken_strong", "brighten"], {"default": "auto",
                 "tooltip": "auto = darken if bright/edgy, lift if dull. manual = sliders. darken/brighten = fixed tilts."}),
             "tilt_db": ("FLOAT", {"default": -0.5, "min": -4.0, "max": 4.0, "step": 0.1, "tooltip": "[manual] dB/octave tilt. Negative = darker (cut highs, lift lows); positive = brighter."}),
@@ -250,7 +253,7 @@ class FoleyTuneGlue:
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
-            "audio": ("AUDIO", {}),
+            "audio": ("AUDIO", {"tooltip": _CHAIN}),
             "mode": (["off", "auto", "manual", "subtle", "medium", "strong"], {"default": "subtle",
                 "tooltip": "auto = scale by crest (don't over-glue already-flat material). manual = slider. subtle<medium<strong."}),
             "amount": ("FLOAT", {"default": 0.20, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "[manual] Glue depth (ratio + drive). Gentle by design."}),

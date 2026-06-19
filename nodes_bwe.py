@@ -55,7 +55,8 @@ class FoleyTuneBWE:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "audio": ("AUDIO", {"tooltip": "Generated foley audio to brighten."}),
+                "audio": ("AUDIO", {"tooltip": "Generated foley audio to brighten. "
+                    "Recommended FoleyTune chain: BWE (this node, FIRST) → De-Harsh → Tilt → Saturate → Glue → Master (loudness/limiter last)."}),
                 "input_sr": ([8000, 12000, 16000, 24000], {
                     "default": 16000,
                     "tooltip": "Effective input bandwidth (Hz). The model treats content as valid up to input_sr/2 and regenerates above it. 16000 = regenerate only >8kHz (most natural). 8000 = regenerate >4kHz (brighter, more aggressive).",

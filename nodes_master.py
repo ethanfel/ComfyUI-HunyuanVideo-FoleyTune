@@ -270,7 +270,8 @@ class FoleyTuneMaster:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "audio": ("AUDIO", {"tooltip": "Foley audio to master (typically post-BWE, or raw)."}),
+                "audio": ("AUDIO", {"tooltip": "Foley audio to master (typically post-BWE, or raw). "
+                    "Recommended FoleyTune chain: BWE → De-Harsh → Tilt → Saturate → Glue → Master (this node LAST — loudness/limiter must be the final stage)."}),
                 "profile": (PROFILE_NAMES, {"default": "balanced",
                     "tooltip": "One-knob preset for the exciter+transient stages. 'manual' = use the connected "
                                "Settings node. 'auto' = measure the clip and adapt (darker->more exciter, "

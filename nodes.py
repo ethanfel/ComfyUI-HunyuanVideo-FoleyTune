@@ -1745,6 +1745,9 @@ class FoleyTuneLoRARangeTester:
                 "max_renders": ("INT", {"default": 0, "min": 0, "max": 200,
                     "tooltip": "Safety cap: evenly thin to at most this many checkpoints. 0 = no cap."}),
                 "lora_strength": ("FLOAT", {"default": 1.0, "min": -2.0, "max": 2.0, "step": 0.05}),
+                "include_base": ("BOOLEAN", {"default": False,
+                    "tooltip": "Also run the base model with NO LoRA (labeled 'base', first in the "
+                               "batch) as a baseline to compare every checkpoint against."}),
                 "filename_prefix": ("STRING", {"default": "",
                     "tooltip": "Output filename prefix. Empty = the lora_folder's name."}),
                 "label_with_step": ("BOOLEAN", {"default": True,
@@ -1770,7 +1773,7 @@ class FoleyTuneLoRARangeTester:
                   lora_folder, step_start, step_end, seed, steps, cfg_scale,
                   features=None, video_features=None, video_batch=None,
                   order="lora_first", append_filename=True,
-                  step_stride=0, max_renders=0, lora_strength=1.0,
+                  step_stride=0, max_renders=0, lora_strength=1.0, include_base=False,
                   filename_prefix="", label_with_step=True, sampler_options=None,
                   save_videos=True):
         import re
@@ -1818,16 +1821,23 @@ class FoleyTuneLoRARangeTester:
                 picks = sorted(set(round(i * stepf) for i in range(max_renders)))
             cand = [cand[i] for i in picks]
 
+        # Optional baseline: the base model with no LoRA (st = -1, path = None),
+        # first in the list so it leads the batch.
+        if include_base:
+            cand = [(-1, None)] + cand
+
         base_prefix = filename_prefix.strip() or os.path.basename(folder.rstrip("/"))
         sampler = FoleyTuneChunkedSampler()
         combiner = FoleyTuneVideoCombiner()
         multi = len(jobs) > 1 or video_batch is not None
         total = len(cand) * len(jobs)
+        n_ckpt = sum(1 for st, _ in cand if st >= 0)
 
         mode = "save+output" if save_videos else "audio-only output"
-        header = (f"LoRA range test: {len(cand)} checkpoint(s) × {len(jobs)} video(s) "
-                  f"= {total} gen(s) from {os.path.basename(folder.rstrip('/'))} "
-                  f"(seed {seed}, {mode}, order={order})")
+        header = (f"LoRA range test: {n_ckpt} checkpoint(s)"
+                  + (" +base" if include_base else "")
+                  + f" × {len(jobs)} video(s) = {total} gen(s) from "
+                  f"{os.path.basename(folder.rstrip('/'))} (seed {seed}, {mode}, order={order})")
         logger.info(header)
         lines = [header]
 
@@ -1837,8 +1847,12 @@ class FoleyTuneLoRARangeTester:
         results = []  # (lora_idx, vid_idx, st, vlabel, waveform, sample_rate)
         n = 0
         for li, (st, path) in enumerate(cand):
-            logger.info(f"[RangeTester] checkpoint {li + 1}/{len(cand)} — step {st} — {os.path.basename(path)}")
-            model, _prompts = FoleyTuneLoRALoaderPath._load(hunyuan_model, path, lora_strength)
+            is_base = path is None
+            sl = "base" if is_base else f"step{st:05d}"
+            logger.info(f"[RangeTester] {li + 1}/{len(cand)} — "
+                        + ("base model (no LoRA)" if is_base else f"step {st} — {os.path.basename(path)}"))
+            # Base = the shared base model (no _load, don't free it); else load the LoRA.
+            model = hunyuan_model if is_base else FoleyTuneLoRALoaderPath._load(hunyuan_model, path, lora_strength)[0]
             try:
                 for vi, (vfilename, vfeat, vvf) in enumerate(jobs):
                     n += 1
@@ -1849,13 +1863,13 @@ class FoleyTuneLoRARangeTester:
                         model, hunyuan_deps, vfeat, seed, steps, cfg_scale,
                         sampler_options=sampler_options,
                     )
-                    label = f"step{st:05d}" + (f"_{vname}" if (append_filename and vname) else "")
+                    label = sl + (f"_{vname}" if (append_filename and vname) else "")
                     results.append((li, vi, st, vname, audio_first["waveform"], audio_first["sample_rate"]))
-                    note = f"  step {st:>6}" + (f"  {vfilename}" if multi else "")
+                    note = f"  {sl:>9}" + (f"  {vfilename}" if multi else "")
                     if save_videos:
                         prefix = base_prefix
                         if label_with_step:
-                            prefix += f"_step{st:05d}"
+                            prefix += f"_{sl}"
                         if multi and append_filename and vname:
                             prefix += f"_{vname}"
                         res = combiner.combine(
@@ -1867,13 +1881,15 @@ class FoleyTuneLoRARangeTester:
                         note += f": {os.path.basename(out_path)}"
                     lines.append(note)
             finally:
-                del model
-                gc.collect()
-                mm.soft_empty_cache()
+                if not is_base:  # never free the shared base model
+                    del model
+                    gc.collect()
+                    mm.soft_empty_cache()
 
         # Order the batch: lora_first = (lora, video); video_first = (video, lora).
         results.sort(key=lambda r: (r[1], r[0]) if order == "video_first" else (r[0], r[1]))
-        labels = [f"step{st:05d}" + (f"_{vname}" if (append_filename and vname) else "")
+        labels = [("base" if st < 0 else f"step{st:05d}")
+                  + (f"_{vname}" if (append_filename and vname) else "")
                   for (_li, _vi, st, vname, _w, _sr) in results]
         sample_rate = results[0][5] if results else 48000
 

@@ -3,9 +3,13 @@ post-BWE audio research (docs/plans/2026-06-19-post-bwe-audio-mastering-research
 implemented in pure numpy/scipy (+ pyloudnorm) so there is NO native dependency
 (pedalboard is not required).
 
-Three stages, applied in the research-recommended internal order, each independently
-toggleable so you can A/B by ear:
+Two nodes:
+  - FoleyTuneMaster          — audio + a `profile` selector (one-knob). Optional
+                               `settings` input for detailed control.
+  - FoleyTuneMasterSettings  — all the detailed sliders (manual exciter/transient,
+                               loudness, limiter); plug into Master's `settings`.
 
+Three stages, applied in the research-recommended internal order:
   1. HARMONIC EXCITER  — HPF -> asymmetric soft-clip (tanh, +even) -> attenuate ->
      parallel mix. SYNTHESIZES harmonics from existing content (unlike BWE, which
      extrapolates a brand-new band), so it adds brightness/presence with a cleaner
@@ -18,9 +22,9 @@ toggleable so you can A/B by ear:
 
 PROFILES drive stages 1-2 without slider-fiddling: a safe->strong strength ladder,
 content-tuned presets (moaning / wet_oral / slaps_sex), an `auto` mode that measures
-the clip and adapts, and `manual` to use the sliders. Loudness + limiter sliders apply
-regardless of profile. Validation is by ear + the render-battery (HF flatness, HNR,
-gap-band breath, crest, LUFS) — PESQ/STOI are invalid for non-speech foley.
+the clip and adapts, and `manual` to use the settings node. Validation is by ear +
+the render-battery (HF flatness, HNR, gap-band breath, crest, LUFS) — PESQ/STOI are
+invalid for non-speech foley.
 """
 
 import numpy as np
@@ -199,14 +203,67 @@ def _auto_profile(x, sr):
 
 
 # --------------------------------------------------------------------------- #
-# Node                                                                        #
+# Settings — optional detailed-control node feeding FoleyTuneMaster            #
+# --------------------------------------------------------------------------- #
+_DEFAULT_SETTINGS = dict(
+    exciter_enable=True, exciter_amount=0.25, exciter_freq=4000.0, exciter_drive=2.0, exciter_even=0.0,
+    transient_enable=True, transient_attack=0.25, transient_sustain=0.0,
+    transient_attack_ms=3.0, transient_release_ms=80.0,
+    loudness_enable=False, target_lufs=-16.0,
+    limiter_enable=True, true_peak_db=-1.0, limiter_release_ms=60.0,
+)
+
+
+class FoleyTuneMasterSettings:
+    """Detailed knobs for FoleyTuneMaster — plug into its `settings` input.
+
+    The exciter/transient values are used only when the Master node's profile is
+    `manual`. The loudness + limiter values ALWAYS apply (this is where you set the
+    LUFS target and the true-peak ceiling). Leave unconnected to run profiles with
+    safe defaults (loudness off, limiter on @ -1 dBTP).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            # --- exciter (applies when profile=manual) ---
+            "exciter_enable": ("BOOLEAN", {"default": True, "tooltip": "[profile=manual] Stage 1: brightness via synthesized harmonics (cleaner than BWE fizz)."}),
+            "exciter_amount": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "[manual] Parallel harmonic blend. 0.2-0.3 = subtle air; >0.5 aggressive."}),
+            "exciter_freq": ("FLOAT", {"default": 4000.0, "min": 1000.0, "max": 12000.0, "step": 250.0, "tooltip": "[manual] HPF cutoff (Hz). Only content above this is excited."}),
+            "exciter_drive": ("FLOAT", {"default": 2.0, "min": 0.5, "max": 8.0, "step": 0.25, "tooltip": "[manual] Soft-clip drive = harmonic density. Higher = more but harsher."}),
+            "exciter_even": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "[manual] Asymmetry -> EVEN harmonics (warmth). 0 = pure odd."}),
+            # --- transient (applies when profile=manual) ---
+            "transient_enable": ("BOOLEAN", {"default": True, "tooltip": "[manual] Stage 2: punch slap attacks without pumping moans."}),
+            "transient_attack": ("FLOAT", {"default": 0.25, "min": -1.0, "max": 1.0, "step": 0.05, "tooltip": "[manual] Onset boost. +0.2-0.4 punchier; negative softens."}),
+            "transient_sustain": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.05, "tooltip": "[manual] Decay/body. + adds tail, - tightens."}),
+            "transient_attack_ms": ("FLOAT", {"default": 3.0, "min": 0.5, "max": 20.0, "step": 0.5, "tooltip": "[manual] Fast envelope time constant (ms)."}),
+            "transient_release_ms": ("FLOAT", {"default": 80.0, "min": 20.0, "max": 300.0, "step": 10.0, "tooltip": "[manual] Slow envelope time constant (ms)."}),
+            # --- loudness + limiter (ALWAYS apply) ---
+            "loudness_enable": ("BOOLEAN", {"default": False, "tooltip": "LUFS-normalize to target (a deliberate level change; off respects your global_peak pipeline)."}),
+            "target_lufs": ("FLOAT", {"default": -16.0, "min": -30.0, "max": -6.0, "step": 0.5, "tooltip": "Integrated loudness target (ITU-R BS.1770-4). -16 typical; -23 broadcast."}),
+            "limiter_enable": ("BOOLEAN", {"default": True, "tooltip": "True-peak safety limiter. Transparent unless peaks exceed the ceiling."}),
+            "true_peak_db": ("FLOAT", {"default": -1.0, "min": -3.0, "max": 0.0, "step": 0.1, "tooltip": "True-peak ceiling (dBTP). -1.0 leaves headroom for lossy encode."}),
+            "limiter_release_ms": ("FLOAT", {"default": 60.0, "min": 10.0, "max": 300.0, "step": 10.0, "tooltip": "Limiter gain release (ms). Shorter = louder/grabbier."}),
+        }}
+
+    RETURN_TYPES = ("FOLEY_MASTER_SETTINGS",)
+    RETURN_NAMES = ("settings",)
+    FUNCTION = "build"
+    CATEGORY = "FoleyTune"
+
+    def build(self, **kwargs):
+        return (dict(kwargs),)
+
+
+# --------------------------------------------------------------------------- #
+# Master node                                                                 #
 # --------------------------------------------------------------------------- #
 class FoleyTuneMaster:
     """Mastering chain for generated foley: exciter + transient shaper + loudness/limiter.
 
-    Drop in AFTER BWE (or instead of it, for the exciter-only brightness path). Use a
-    `profile` for one-knob operation, or `manual` to drive the sliders. Loudness +
-    limiter always follow their own sliders. Runs per-channel; stereo preserved.
+    Pick a `profile` for one-knob operation. For manual control / LUFS / limiter tweaks,
+    connect a FoleyTune Master Settings node into `settings`. Drop in AFTER BWE (or use
+    profile=moaning/exciter as a lighter brightness path). Runs per-channel; stereo kept.
     """
 
     @classmethod
@@ -214,45 +271,18 @@ class FoleyTuneMaster:
         return {
             "required": {
                 "audio": ("AUDIO", {"tooltip": "Foley audio to master (typically post-BWE, or raw)."}),
-
                 "profile": (PROFILE_NAMES, {"default": "balanced",
-                    "tooltip": "Preset for the exciter+transient stages. 'manual' = use the sliders below. "
-                               "'auto' = measure the clip and adapt (darker->more exciter, fizzy/noisy->less, "
-                               "flatter->more punch). safe<balanced<strong. moaning=tonal/breath-safe (no "
-                               "transient). wet_oral=gags/slurps (punchy). slaps_sex=slap-forward. "
-                               "Loudness+limiter sliders ALWAYS apply."}),
-
-                # --- Stage 1: harmonic exciter (used when profile=manual) ---
-                "exciter_enable": ("BOOLEAN", {"default": True, "tooltip": "[manual] Stage 1: brightness/presence via synthesized harmonics (cleaner than BWE fizz)."}),
-                "exciter_amount": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "[manual] Parallel blend of excited harmonics. 0.2-0.3 = subtle air; >0.5 aggressive."}),
-                "exciter_freq": ("FLOAT", {"default": 4000.0, "min": 1000.0, "max": 12000.0, "step": 250.0,
-                    "tooltip": "[manual] HPF cutoff (Hz). Only content above this is excited."}),
-                "exciter_drive": ("FLOAT", {"default": 2.0, "min": 0.5, "max": 8.0, "step": 0.25,
-                    "tooltip": "[manual] Soft-clip drive = harmonic density. Higher = more but harsher."}),
-                "exciter_even": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "[manual] Asymmetry -> EVEN harmonics (warmth). 0 = pure odd (tanh)."}),
-
-                # --- Stage 2: transient shaper (used when profile=manual) ---
-                "transient_enable": ("BOOLEAN", {"default": True, "tooltip": "[manual] Stage 2: punch slap attacks without pumping moans."}),
-                "transient_attack": ("FLOAT", {"default": 0.25, "min": -1.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "[manual] Onset boost. +0.2-0.4 punchier; negative softens."}),
-                "transient_sustain": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "[manual] Decay/body. + adds tail/room, - tightens. 0 = leave alone."}),
-                "transient_attack_ms": ("FLOAT", {"default": 3.0, "min": 0.5, "max": 20.0, "step": 0.5,
-                    "tooltip": "[manual] Fast envelope time constant (ms)."}),
-                "transient_release_ms": ("FLOAT", {"default": 80.0, "min": 20.0, "max": 300.0, "step": 10.0,
-                    "tooltip": "[manual] Slow envelope time constant (ms)."}),
-
-                # --- Stage 3: loudness + true-peak limiter (ALWAYS apply) ---
-                "loudness_enable": ("BOOLEAN", {"default": False, "tooltip": "Stage 3a: LUFS-normalize to target (a deliberate level change; off by default to respect your global_peak pipeline)."}),
-                "target_lufs": ("FLOAT", {"default": -16.0, "min": -30.0, "max": -6.0, "step": 0.5,
-                    "tooltip": "Integrated loudness target (ITU-R BS.1770-4). -16 typical for content; -23 broadcast."}),
-                "limiter_enable": ("BOOLEAN", {"default": True, "tooltip": "Stage 3b: true-peak safety limiter. Transparent unless peaks exceed the ceiling."}),
-                "true_peak_db": ("FLOAT", {"default": -1.0, "min": -3.0, "max": 0.0, "step": 0.1,
-                    "tooltip": "True-peak ceiling (dBTP). -1.0 leaves headroom for lossy encode."}),
-                "limiter_release_ms": ("FLOAT", {"default": 60.0, "min": 10.0, "max": 300.0, "step": 10.0,
-                    "tooltip": "Limiter gain release (ms). Shorter = louder/grabbier; longer = cleaner."}),
+                    "tooltip": "One-knob preset for the exciter+transient stages. 'manual' = use the connected "
+                               "Settings node. 'auto' = measure the clip and adapt (darker->more exciter, "
+                               "fizzy/noisy->less, flatter->more punch). safe<balanced<strong. moaning=tonal/"
+                               "breath-safe (no transient). wet_oral=gags/slurps. slaps_sex=slap-forward. "
+                               "Loudness+limiter come from the Settings node (or safe defaults)."}),
+            },
+            "optional": {
+                "settings": ("FOLEY_MASTER_SETTINGS", {
+                    "tooltip": "Optional FoleyTune Master Settings node. Its exciter/transient sliders apply when "
+                               "profile=manual; its loudness+limiter ALWAYS apply. Without it: profile drives the "
+                               "tone, limiter on @ -1 dBTP, loudness off."}),
             },
         }
 
@@ -260,10 +290,8 @@ class FoleyTuneMaster:
     FUNCTION = "master"
     CATEGORY = "FoleyTune"
 
-    def master(self, audio, profile,
-               exciter_enable, exciter_amount, exciter_freq, exciter_drive, exciter_even,
-               transient_enable, transient_attack, transient_sustain, transient_attack_ms, transient_release_ms,
-               loudness_enable, target_lufs, limiter_enable, true_peak_db, limiter_release_ms):
+    def master(self, audio, profile, settings=None):
+        s = settings if settings else _DEFAULT_SETTINGS
         wav = audio["waveform"]
         sr = int(audio["sample_rate"])
         if wav.dim() == 2:
@@ -272,9 +300,11 @@ class FoleyTuneMaster:
         B, C, T = arr.shape
         out = np.empty_like(arr)
 
-        manual_p = _prof(exciter_enable, exciter_amount, exciter_freq, exciter_drive, exciter_even,
-                         transient_enable, transient_attack, transient_sustain,
-                         transient_attack_ms, transient_release_ms)
+        manual_p = _prof(s["exciter_enable"], s["exciter_amount"], s["exciter_freq"], s["exciter_drive"], s["exciter_even"],
+                         s["transient_enable"], s["transient_attack"], s["transient_sustain"],
+                         s["transient_attack_ms"], s["transient_release_ms"])
+        loudness_enable = s["loudness_enable"]; target_lufs = s["target_lufs"]
+        limiter_enable = s["limiter_enable"]; true_peak_db = s["true_peak_db"]; limiter_release_ms = s["limiter_release_ms"]
 
         for b in range(B):
             # Resolve exciter+transient params for this clip.
@@ -320,11 +350,17 @@ class FoleyTuneMaster:
             if p["tr_en"] and (p["tr_atk"] or p["tr_sus"]): stages.append(f"transient(atk={p['tr_atk']})")
             if loudness_enable and _HAS_PYLN and lufs_in is not None: stages.append(f"lufs({lufs_in:.1f}->{target_lufs:.1f})")
             if limiter_enable: stages.append(f"tplimit({true_peak_db}dBTP)")
-            logger.info(f"FoleyTune Master[{profile}] item{b} {C}ch@{sr}Hz -> "
+            logger.info(f"FoleyTune Master[{profile}{'+settings' if settings else ''}] item{b} {C}ch@{sr}Hz -> "
                         f"[{' -> '.join(stages) or 'bypass'}]" + (f"  [{dbg}]" if dbg else ""))
 
         return ({"waveform": torch.from_numpy(out), "sample_rate": sr},)
 
 
-NODE_CLASS_MAPPINGS = {"FoleyTuneMaster": FoleyTuneMaster}
-NODE_DISPLAY_NAME_MAPPINGS = {"FoleyTuneMaster": "FoleyTune Master (Exciter / Transient / Loudness)"}
+NODE_CLASS_MAPPINGS = {
+    "FoleyTuneMaster": FoleyTuneMaster,
+    "FoleyTuneMasterSettings": FoleyTuneMasterSettings,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "FoleyTuneMaster": "FoleyTune Master (Exciter / Transient / Loudness)",
+    "FoleyTuneMasterSettings": "FoleyTune Master Settings",
+}

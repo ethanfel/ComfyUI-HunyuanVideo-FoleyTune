@@ -1603,6 +1603,108 @@ class FoleyTuneVideoCombiner:
 
         return {"ui": {"gifs": ui_entries}, "result": ("\n".join(saved_paths),)}
 
+
+class FoleyTuneMultiVideoLoader:
+    """Load several videos and extract features for each, for batch auditioning
+    in the LoRA Range Tester. One shared CLAP prompt across all videos; no
+    preview. Outputs a FOLEYTUNE_VIDEO_BATCH (a list of {features, video_features,
+    filename}) — feed it to the Range Tester's video_batch input.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        input_dir = folder_paths.get_input_directory()
+        avail = []
+        if os.path.isdir(input_dir):
+            for f in sorted(os.listdir(input_dir)):
+                if (os.path.isfile(os.path.join(input_dir, f))
+                        and f.rsplit(".", 1)[-1].lower() in _VIDEO_EXTENSIONS):
+                    avail.append(f)
+        hint = ("\n  ".join(avail)) if avail else "(no videos in the input dir)"
+        return {
+            "required": {
+                "hunyuan_deps": ("FOLEYTUNE_DEPS",),
+                "prompt": ("STRING", {"default": "", "multiline": True,
+                    "tooltip": "Shared CLAP prompt applied to EVERY video in the batch."}),
+                "video_paths": ("STRING", {"default": "", "multiline": True,
+                    "tooltip": "One video per line — a filename in the ComfyUI input dir, or an "
+                               "absolute path. Available input videos:\n  " + hint}),
+            },
+            "optional": {
+                "negative_prompt": ("STRING", {"default": "", "multiline": True}),
+                "start_time": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 0.1}),
+                "duration": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 36000.0, "step": 0.1,
+                    "tooltip": "Per-video duration in seconds (0 = full video)."}),
+            },
+        }
+
+    RETURN_TYPES = ("FOLEYTUNE_VIDEO_BATCH", "STRING")
+    RETURN_NAMES = ("video_batch", "report")
+    FUNCTION = "load"
+    CATEGORY = "FoleyTune"
+
+    def load(self, hunyuan_deps, prompt, video_paths, negative_prompt="",
+             start_time=0.0, duration=0.0):
+        input_dir = folder_paths.get_input_directory()
+        paths, missing = [], []
+        for line in (video_paths or "").splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            p = s if os.path.isabs(s) else os.path.join(input_dir, s)
+            if not os.path.isfile(p):
+                try:
+                    cand = folder_paths.get_annotated_filepath(s)
+                    if os.path.isfile(cand):
+                        p = cand
+                except Exception:
+                    pass
+            if os.path.isfile(p):
+                paths.append(p)
+            else:
+                missing.append(s)
+        if missing:
+            logger.warning(f"[MultiVideoLoader] skipped (not found): {missing}")
+        if not paths:
+            raise ValueError("MultiVideoLoader: no valid videos. List one input-dir filename "
+                             "or absolute path per line in video_paths.")
+
+        # Encode the shared prompt + negative prompt once (CLAP), reuse per video.
+        device = mm.get_torch_device()
+        offload = mm.unet_offload_device()
+        hunyuan_deps.clap_model.to(device)
+        try:
+            def _clap(text):
+                inp = hunyuan_deps.clap_tokenizer(
+                    [text], padding=True, truncation=True, max_length=100, return_tensors="pt").to(device)
+                out = hunyuan_deps.clap_model(**inp, output_hidden_states=True, return_dict=True)
+                return out.last_hidden_state.cpu()  # [1, seq, 768]
+            text_feat = _clap(prompt)
+            uncond_feat = _clap(negative_prompt)
+        finally:
+            hunyuan_deps.clap_model.to(offload)
+            torch.cuda.empty_cache()
+
+        batch = []
+        for p in paths:
+            vf = _extract_video_features(p, hunyuan_deps, start_time, duration)
+            feat = {
+                "clip_feat": vf["clip_feat"],
+                "sync_feat": vf["sync_feat"],
+                "text_feat": text_feat,
+                "uncond_text_feat": uncond_feat,
+                "duration": vf["duration"],
+                "fps": float(vf.get("fps", 25.0)),
+                "video_path": vf.get("video_path", p),
+            }
+            batch.append({"features": feat, "video_features": vf, "filename": os.path.basename(p)})
+            logger.info(f"[MultiVideoLoader] {os.path.basename(p)} — {vf['duration']:.1f}s")
+
+        report = (f"MultiVideoLoader: {len(batch)} video(s)\n"
+                  + "\n".join(f"  {b['filename']}  ({b['video_features']['duration']:.1f}s)" for b in batch))
+        return (batch, report)
+
+
 class FoleyTuneLoRARangeTester:
     """Audition every LoRA checkpoint in a step range on one video.
 
@@ -1619,10 +1721,6 @@ class FoleyTuneLoRARangeTester:
             "required": {
                 "hunyuan_model": ("FOLEYTUNE_MODEL",),
                 "hunyuan_deps": ("FOLEYTUNE_DEPS",),
-                "features": ("FOLEYTUNE_FEATURES", {
-                    "tooltip": "Generation features — connect the SAME source you feed the Chunked Sampler (has the prompt/text)."}),
-                "video_features": ("FOLEYTUNE_VIDEO_FEATURES", {
-                    "tooltip": "Video features for muxing — connect the SAME source you feed the Video Combiner (has the video path)."}),
                 "lora_folder": ("STRING", {
                     "default": "", "tooltip": "Training output dir containing adapter_step<NNNNN>.pt checkpoints."}),
                 "step_start": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 50}),
@@ -1632,6 +1730,16 @@ class FoleyTuneLoRARangeTester:
                 "cfg_scale": ("FLOAT", {"default": 4.5, "min": 1.0, "max": 10.0, "step": 0.1}),
             },
             "optional": {
+                "features": ("FOLEYTUNE_FEATURES", {
+                    "tooltip": "SINGLE-video mode: generation features (has the prompt/text). Ignored if video_batch is connected."}),
+                "video_features": ("FOLEYTUNE_VIDEO_FEATURES", {
+                    "tooltip": "SINGLE-video mode: video features for muxing (has the video path). Ignored if video_batch is connected."}),
+                "video_batch": ("FOLEYTUNE_VIDEO_BATCH", {
+                    "tooltip": "MULTI-video mode: connect a FoleyTune Multi-Video Loader. Every video is run with every checkpoint in the range."}),
+                "order": (["lora_first", "video_first"], {"default": "lora_first",
+                    "tooltip": "Output/batch order across the video×checkpoint grid. lora_first = all videos per checkpoint; video_first = all checkpoints per video. (LoRAs are always loaded once each regardless, for speed.)"}),
+                "append_filename": ("BOOLEAN", {"default": True,
+                    "tooltip": "Multi-video: append the video's name to each label / saved filename."}),
                 "step_stride": ("INT", {"default": 0, "min": 0, "max": 50000, "step": 50,
                     "tooltip": "Only test checkpoints whose step is a multiple of this (within the range). 0 = every checkpoint found."}),
                 "max_renders": ("INT", {"default": 0, "min": 0, "max": 200,
@@ -1642,7 +1750,7 @@ class FoleyTuneLoRARangeTester:
                 "label_with_step": ("BOOLEAN", {"default": True,
                     "tooltip": "Append _step<NNNNN> to each saved video's filename."}),
                 "save_videos": ("BOOLEAN", {"default": True,
-                    "tooltip": "Mux + save each generation onto the video directly. Turn OFF to only output the batched audio (+ labels) for downstream processing — e.g. UniverSR/BWE, then a Video Combiner. The audio_batch + labels outputs are produced either way."}),
+                    "tooltip": "Mux + save each generation onto its video directly. Turn OFF to only output the batched audio (+ labels) for downstream processing — e.g. UniverSR/BWE, then a Video Combiner (single-video only). The audio_batch + labels outputs are produced either way."}),
                 "sampler_options": ("FOLEYTUNE_SAMPLER_OPTIONS",),
             },
         }
@@ -1658,8 +1766,10 @@ class FoleyTuneLoRARangeTester:
     CATEGORY = "FoleyTune"
     OUTPUT_NODE = True
 
-    def run_range(self, hunyuan_model, hunyuan_deps, features, video_features,
+    def run_range(self, hunyuan_model, hunyuan_deps,
                   lora_folder, step_start, step_end, seed, steps, cfg_scale,
+                  features=None, video_features=None, video_batch=None,
+                  order="lora_first", append_filename=True,
                   step_stride=0, max_renders=0, lora_strength=1.0,
                   filename_prefix="", label_with_step=True, sampler_options=None,
                   save_videos=True):
@@ -1671,6 +1781,16 @@ class FoleyTuneLoRARangeTester:
         folder = lora_folder.strip()
         if not folder or not os.path.isdir(folder):
             raise FileNotFoundError(f"LoRA folder not found: {folder}")
+
+        # Build the per-video job list: multi (video_batch) or single (features+video_features).
+        if video_batch:
+            jobs = [(b.get("filename", f"vid{i}"), b["features"], b["video_features"])
+                    for i, b in enumerate(video_batch)]
+        elif features is not None and video_features is not None:
+            jobs = [("", features, video_features)]
+        else:
+            raise ValueError("Connect either features + video_features (single video) "
+                             "or video_batch from a Multi-Video Loader (multi).")
 
         # Scan for adapter_step<NNNNN>.pt, parse step, keep those in [start, end].
         cand = []
@@ -1701,54 +1821,77 @@ class FoleyTuneLoRARangeTester:
         base_prefix = filename_prefix.strip() or os.path.basename(folder.rstrip("/"))
         sampler = FoleyTuneChunkedSampler()
         combiner = FoleyTuneVideoCombiner()
+        multi = len(jobs) > 1 or video_batch is not None
+        total = len(cand) * len(jobs)
 
         mode = "save+output" if save_videos else "audio-only output"
-        header = (f"LoRA range test: {len(cand)} checkpoint(s) from "
-                  f"{os.path.basename(folder.rstrip('/'))} (seed {seed}, {mode})")
+        header = (f"LoRA range test: {len(cand)} checkpoint(s) × {len(jobs)} video(s) "
+                  f"= {total} gen(s) from {os.path.basename(folder.rstrip('/'))} "
+                  f"(seed {seed}, {mode}, order={order})")
         logger.info(header)
         lines = [header]
-        waveforms, labels, sample_rate = [], [], None
-        for i, (st, path) in enumerate(cand):
-            logger.info(f"[RangeTester] {i + 1}/{len(cand)} — step {st} — {os.path.basename(path)}")
+
+        # Generate grouped by LoRA (each checkpoint loaded ONCE, then run over every
+        # video) for speed; collect results tagged with (lora_idx, vid_idx) so the
+        # batch can be emitted in the requested order afterwards.
+        results = []  # (lora_idx, vid_idx, st, vlabel, waveform, sample_rate)
+        n = 0
+        for li, (st, path) in enumerate(cand):
+            logger.info(f"[RangeTester] checkpoint {li + 1}/{len(cand)} — step {st} — {os.path.basename(path)}")
             model, _prompts = FoleyTuneLoRALoaderPath._load(hunyuan_model, path, lora_strength)
             try:
-                audio_first, _ = sampler.generate_audio(
-                    model, hunyuan_deps, features, seed, steps, cfg_scale,
-                    sampler_options=sampler_options,
-                )
-                label = f"step{st:05d}"
-                waveforms.append(audio_first["waveform"])
-                sample_rate = audio_first["sample_rate"]
-                labels.append(label)
-                note = f"  step {st:>6}"
-                if save_videos:
-                    prefix = f"{base_prefix}_step{st:05d}" if label_with_step else base_prefix
-                    res = combiner.combine(
-                        video_features, audio_first, filename_prefix=prefix,
-                        save_output=True, save_metadata=False,
+                for vi, (vfilename, vfeat, vvf) in enumerate(jobs):
+                    n += 1
+                    vname = os.path.splitext(vfilename)[0]
+                    logger.info(f"[RangeTester]   gen {n}/{total}"
+                                + (f" — {vfilename}" if multi else ""))
+                    audio_first, _ = sampler.generate_audio(
+                        model, hunyuan_deps, vfeat, seed, steps, cfg_scale,
+                        sampler_options=sampler_options,
                     )
-                    out_path = (res["result"][0] if isinstance(res, dict)
-                                else res[0] if isinstance(res, tuple) else str(res))
-                    note += f": {os.path.basename(out_path)}"
-                lines.append(note)
+                    label = f"step{st:05d}" + (f"_{vname}" if (append_filename and vname) else "")
+                    results.append((li, vi, st, vname, audio_first["waveform"], audio_first["sample_rate"]))
+                    note = f"  step {st:>6}" + (f"  {vfilename}" if multi else "")
+                    if save_videos:
+                        prefix = base_prefix
+                        if label_with_step:
+                            prefix += f"_step{st:05d}"
+                        if multi and append_filename and vname:
+                            prefix += f"_{vname}"
+                        res = combiner.combine(
+                            vvf, audio_first, filename_prefix=prefix,
+                            save_output=True, save_metadata=False,
+                        )
+                        out_path = (res["result"][0] if isinstance(res, dict)
+                                    else res[0] if isinstance(res, tuple) else str(res))
+                        note += f": {os.path.basename(out_path)}"
+                    lines.append(note)
             finally:
                 del model
                 gc.collect()
                 mm.soft_empty_cache()
 
-        # Stack all generations into one batched AUDIO (same video -> same length;
-        # truncate to the shortest as a safety against any off-by-one).
-        if waveforms:
-            min_t = min(w.shape[-1] for w in waveforms)
-            batched = torch.cat([w[..., :min_t] for w in waveforms], dim=0)
-            audio_batch = {"waveform": batched, "sample_rate": sample_rate}
+        # Order the batch: lora_first = (lora, video); video_first = (video, lora).
+        results.sort(key=lambda r: (r[1], r[0]) if order == "video_first" else (r[0], r[1]))
+        labels = [f"step{st:05d}" + (f"_{vname}" if (append_filename and vname) else "")
+                  for (_li, _vi, st, vname, _w, _sr) in results]
+        sample_rate = results[0][5] if results else 48000
+
+        # Stack into one batched AUDIO. Videos may differ in length → pad to max
+        # (zeros) rather than truncate, so no clip's audio is mangled.
+        if results:
+            wavs = [r[4] for r in results]
+            max_t = max(w.shape[-1] for w in wavs)
+            padded = [torch.nn.functional.pad(w, (0, max_t - w.shape[-1])) if w.shape[-1] < max_t else w
+                      for w in wavs]
+            audio_batch = {"waveform": torch.cat(padded, dim=0), "sample_rate": sample_rate}
         else:
             audio_batch = {"waveform": torch.zeros(1, 1, 1), "sample_rate": 48000}
         labels_str = "\n".join(labels)
 
         report = "\n".join(lines)
-        logger.info(f"[RangeTester] done: {len(cand)} generation(s)"
-                    + (f", {len(cand)} video(s) saved" if save_videos else " (audio-only)"))
+        logger.info(f"[RangeTester] done: {total} generation(s)"
+                    + (f", {total} video(s) saved" if save_videos else " (audio-only)"))
         return {"ui": {"text": [report]}, "result": (audio_batch, labels_str, report)}
 
 
@@ -1769,6 +1912,7 @@ NODE_CLASS_MAPPINGS = {
     "FoleyTuneSamplerOptions": FoleyTuneSamplerOptions,
     "FoleyTuneVideoLoader": FoleyTuneVideoLoader,
     "FoleyTuneVideoLoaderUpload": FoleyTuneVideoLoaderUpload,
+    "FoleyTuneMultiVideoLoader": FoleyTuneMultiVideoLoader,
     "FoleyTuneVideoCombiner": FoleyTuneVideoCombiner,
     "FoleyTuneLoRARangeTester": FoleyTuneLoRARangeTester,
 }
@@ -1786,6 +1930,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "FoleyTuneSamplerOptions": "FoleyTune Sampler Options",
     "FoleyTuneVideoLoader": "FoleyTune Video Loader",
     "FoleyTuneVideoLoaderUpload": "FoleyTune Video Loader (Upload)",
+    "FoleyTuneMultiVideoLoader": "FoleyTune Multi-Video Loader",
     "FoleyTuneVideoCombiner": "FoleyTune Video Combiner",
     "FoleyTuneLoRARangeTester": "FoleyTune LoRA Range Tester",
 }

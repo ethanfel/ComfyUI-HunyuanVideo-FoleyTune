@@ -160,3 +160,6 @@ tmp*.*
 
 CLAUDE.md
 .worktrees/
+
+# HF release staging (large LoRA binaries — upload to HF, do not commit to code repo)
+hf_release/

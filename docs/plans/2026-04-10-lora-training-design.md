@@ -2153,6 +2153,8 @@ Production checkpoints (TF32-off render; BWE only where noted):
 
 ### CFG Conditioning Dropout (p_uncond) & the Two-Tools Render Strategy (June 2026)
 
+> **VERDICT (2026-06-20): uncond/p_uncond PARKED — production reverted to nocond @ CFG 1.0 + intensity_bias 0.5 + denoise 0.1.** The uncond models *saturate*, and it is NOT render-tunable: CFG-down AND LoRA-strength-down (0.6) both fail to clear it. Mechanism = **DAC HF-ceiling overrun**: the very thing that made uncond look better (a richer HF prior — the "bonus" below) generates more HF than the 48 kHz DAC can cleanly reconstruct, so the latents are past the decoder's distribution *before* any CFG/LoRA scaling — partial reduction never gets back under the wall. nocond @ CFG 1.0 stays under the ceiling = clean. **intensity_bias 0.5 is correct for nocond** (the "intensity saturates / 0.0 best" finding below was uncond-SPECIFIC — at CFG 1.0 there's no extrapolation to amplify the energy prior). The two-tools / dose-tracks-CFG analysis below is retained as the record of *why* high-CFG-uncond was pursued and where it hit the wall, not as the live recipe. **Live recipe = the cheat-sheet's production column.**
+
 CFG is an ADHERENCE dial (sync to motion), not a quality dial — but on this narrow fine-tune, high CFG was *fizzy* (uncond-path drift), so the project had retreated to **CFG 1.0 as a workaround** (cleanest moans, HNR 4.6 vs 0.75 @4.5) — accepting "holds sync, small mistakes" because the conditional pass was on-target. Root cause (confirmed in code): the LoRA is NEVER optimized on the unconditional pass (`lora/train.py` always conditions on real clip+sync+text; the empty-conditioning input lives only in the no-backprop eval fn), so its deltas there are uncontrolled extrapolation. At `guidance_scale > 1` the render does `cat([latents]*2)` and the uncond term is weighted `scale×` — so the drift scales with CFG. **FIX: `p_uncond` (CFG conditioning dropout)** — on a per-sample fraction, replace clip/sync with empty sequences + text with the neg-prompt embed (exact parity with the inference uncond branch), training the uncond pass. (Memory: [[project_cfg_study]].)
 
 #### The dose tracks CFG — and CFG 1.0 makes it moot
@@ -2226,8 +2228,8 @@ Sweep on matched test clips (10 fixed clips × steps, same seed) — `intensity_
 | batch / grad_accum | 8 / 1 | b8 = gradient-noise sweet spot (b4 darker, b16 under-converged) |
 | noise_offset | 0.03 | |
 | t_min / t_max | 0.05 / 0.95 | sync |
-| **intensity_bias** | **0.0 (OFF)** | with uncond it's net-negative (saturation + suppresses slaps); 0.0 = +7 dB cleaner floor + clearer moans + slaps come through |
-| **p_uncond** | **0.2** (lane) / 0 (clean) | CFG conditioning dropout; trains the uncond pass so high CFG stays clean; **dose tracks CFG** (0 @1, 0.1 @~2, 0.2 @~4.5) |
+| **intensity_bias** | **0.5** | favors loud/clean clips → cleaner moans (the original win, valid for nocond). The "0.0 best" result was uncond-ONLY (energy prior saturates only when CFG amplifies it) |
+| **p_uncond** | **0 (PARKED)** | uncond's richer HF prior overruns the DAC HF ceiling → saturation not fixable by CFG/LoRA-strength → parked; see the VERDICT banner |
 | schedule / warmup | constant / 0 | |
 | normalization | `global_peak` across ALL positions | un-clips loudest peak → −1; not global_lufs (too quiet) / not per-clip LUFS (promotes breath) |
 | denoise | content-specific | blowjob strong 0.6–0.7; moaning minimal 0.1 + hum-notch or skip (breath inseparable by blind methods) |
@@ -2237,11 +2239,11 @@ Sweep on matched test clips (10 fixed clips × steps, same seed) — `intensity_
 
 | knob | setting | why |
 |---|---|---|
-| **CFG** | 1.0 (clean tool) / 4.5 (sync lane) | CFG = adherence dial; 1.0 skips uncond pass (purest), 4.5 = sync (needs uncond-trained model) |
+| **CFG** | **1.0** | CFG = adherence dial; 1.0 skips the uncond pass (purest, stays under the DAC HF ceiling). High-CFG sync lane is parked with uncond |
 | **TF32 (inference)** | **OFF** | TF32's 10-bit mantissa quantizes fine HF; off = brighter at identical fizz |
 | BWE | SKIP (raw) | late sfc20 holds HF natively (%HF 6–8, tail 11–15 kHz); only dark/early recipes need it (input_sr ≈ native edge) |
 | checkpoint | EARLY for uncond (~5.5–6k) | clarity peaks early; late washes/saturates. MCD-turn + render-battery locate it |
 | master node | ON (mild polish); mode = balanced (clean) / moaning (nodenoise) | harmless brightening; don't stack hot with TF32-off; avoid strong/slap as default |
 | weights | eval_state_dict | mid-run prodigy_plus ckpts store eval-averaged weights → audition == load |
 
-**Two-tools production:** `nocond @ CFG 1.0` (tonal moaning zones) + `uncond20 @ CFG 4.5` (motion/sync zones, drives the timeline CFG-automation lane). **Selection lens:** render-analysis battery (HNR=clarity, gap-band=breath, fizz=grain, floor=noise, centroid/%HF/tail=brightness, env=dynamics) backing the ear — never PBC/MCD absolutes across runs.
+**Production (single tool):** `nocond @ CFG 1.0` on denoise-0.1 + intensity-0.5 data — render TF32-off, ship raw. (The `uncond20 @ CFG 4.5` sync-lane second tool is PARKED — DAC HF-ceiling saturation; see the VERDICT banner.) **Selection lens:** render-analysis battery (HNR=clarity, gap-band=breath, fizz=grain, floor=noise, centroid/%HF/tail=brightness, env=dynamics) backing the ear — never PBC/MCD absolutes across runs.

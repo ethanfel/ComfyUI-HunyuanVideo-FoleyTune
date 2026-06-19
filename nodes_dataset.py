@@ -2616,8 +2616,8 @@ class FoleyTuneDatasetSaver:
     DESCRIPTION = (
         "Save every clip in a FOLEYTUNE_AUDIO_DATASET to output_dir as 24-bit FLAC. "
         "Writes .npz feature files and generates sweep.json (ready for the Scheduler node) "
-        "with the validated IO + uncond recipe (all_blocks_sync_io R32, Prodigy+ "
-        "ScheduleFree c=20, noise_offset0.03, t_min/t_max rescale, p_uncond0.2, intensity OFF)."
+        "with the validated IO production recipe (all_blocks_sync_io R32, Prodigy+ "
+        "ScheduleFree c=20, noise_offset0.03, t_min/t_max rescale, intensity_bias0.5, render @ CFG 1.0)."
     )
 
     def save(self, dataset, output_dir: str, json_only: bool = False, prompt: str = ""):
@@ -2694,18 +2694,17 @@ class FoleyTuneDatasetSaver:
             "dataset_json": str(out_path / "dataset.json"),
             "output_root": str(out_path.parent / "output"),
             "base": {
-                # Validated recipe (June 2026): all_blocks_sync_io (boundary-capacity LoRA:
-                # attention+MLP+sync+I/O projections) + Prodigy+ ScheduleFree (c=20) constant +
-                # noise_offset0.03 + t_min/t_max rescale + dropout0.05. IO is the validated
-                # upgrade over all_blocks_sync (cleaner/clearer/more-faithful, ~40% fewer steps)
-                # and it converges EARLY -> shorter run + fine save_every; audition LATE by ear
-                # (MCD-turn + render-analysis). Ship RAW + render TF32-OFF (late sfc20 holds HF
-                # natively -> skip BWE). intensity_bias OFF (0.0): with uncond it's net-NEGATIVE
-                # (energy bias -> saturation + suppresses slap transients); 0.0 measured cleaner
-                # floor (+7dB) + clearer moans + slaps come through (0.0 > 0.3 > 0.5 for uncond).
-                # DEFAULT = uncond20 (p_uncond=0.2, render @ CFG 4.5, the
-                # sync-lane tool). For the clean CFG-1.0 tool, add an experiment with p_uncond=0.
-                # p_uncond dose tracks render CFG: 0 @ CFG1, 0.1 @ ~2, 0.2 @ ~4.5.
+                # Validated PRODUCTION recipe (June 2026): all_blocks_sync_io (boundary-capacity
+                # LoRA: attention+MLP+sync+I/O projections) + Prodigy+ ScheduleFree (c=20) constant
+                # + noise_offset0.03 + t_min/t_max rescale + dropout0.05 + intensity_bias0.5. IO is
+                # the validated upgrade over all_blocks_sync (cleaner/clearer, ~40% fewer steps); it
+                # converges EARLY -> shorter run + fine save_every; audition LATE by ear (MCD-turn +
+                # render-analysis). RENDER @ CFG 1.0, TF32-OFF, ship RAW (late sfc20 holds HF; skip BWE).
+                # NOTE: the p_uncond "sync-lane" experiment was PARKED -- uncond's richer HF prior
+                # overruns the DAC's HF reconstruction ceiling -> decoder SATURATION that is NOT
+                # render-tunable (CFG-down AND LoRA-strength-down both fail). nocond @ CFG 1.0 stays
+                # under the ceiling = clean. intensity_bias=0.5 is correct for nocond (the "intensity
+                # saturates" finding was uncond-specific -- no CFG amplification to feed at CFG 1.0).
                 "target": "all_blocks_sync_io",
                 "rank": 32,
                 "alpha": 32,
@@ -2750,9 +2749,9 @@ class FoleyTuneDatasetSaver:
                 "gradient_checkpointing": False,
                 "resume_from": "",
                 "eval_negative_prompt": "noisy, harsh",
-                "intensity_bias": 0.0,
+                "intensity_bias": 0.5,
                 "intensity_metric": "energy",
-                "p_uncond": 0.2,
+                "p_uncond": 0.0,
             },
             "experiments": [],  # filled below
         }
@@ -2767,21 +2766,17 @@ class FoleyTuneDatasetSaver:
         tag = f"{sweep_name}_{total_train}clip"
         sweep_json["experiments"] = [
             {
-                # DEFAULT = uncond20 sync-lane model (p_uncond=0.2 from base), render @ CFG 4.5.
-                "id": f"{tag}_io_sfc20_puncond20",
+                # PRODUCTION = nocond, render @ CFG 1.0 (intensity_bias0.5 from base).
+                "id": f"{tag}_io_intensity_sfc20",
                 "description": (
-                    "SYNC-LANE tool (render @ CFG 4.5). all_blocks_sync_io R32 Prodigy+ "
-                    "ScheduleFree(c=20) constant, noise_offset0.03, t_min0.05/t_max0.95 rescale, "
-                    "dropout0.05, intensity_bias OFF (0.0 — with uncond it's net-negative: "
-                    "saturation + suppresses slap transients; 0.0 = +7dB cleaner floor + clearer "
-                    "moans + slaps come through) + p_uncond=0.2 = CFG conditioning "
-                    "dropout: trains the unconditional pass so high CFG stays CLEAN (at CFG 4.5 the "
-                    "4.5x extrapolation is dominated by the uncond pass; untrained=drift/fizz+raised "
-                    "floor, trained=clean+tight). Dose tracks CFG: 0.2 for ~4.5 (0.1 for ~2). Drives "
-                    "the timeline CFG-automation lane in motion/thrust/sync zones. Checkpoint: clarity "
-                    "peaks EARLY (~5.5-6k by render-battery), grab the early clarity/low-fizz point by "
-                    "ear (render @ CFG 4.5). Ship raw, render TF32-OFF. For the clean CFG-1.0 tool, "
-                    "add an experiment with p_uncond=0."
+                    "Production recipe (render @ CFG 1.0). IO + intensity: all_blocks_sync_io "
+                    "R32 Prodigy+ ScheduleFree(c=20) constant, noise_offset0.03, t_min0.05/"
+                    "t_max0.95 rescale, dropout0.05, intensity_bias0.5 energy. IO converges EARLY "
+                    "-> audition LATE by ear via the MCD turn + render-analysis (save 250), grab "
+                    "before over-train. SHIP RAW + render TF32-OFF (late sfc20 holds HF; skip BWE). "
+                    "Best tonal cleanliness at CFG 1.0. (uncond/p_uncond sync-lane variant PARKED: "
+                    "its richer HF prior overruns the DAC HF ceiling -> saturation not fixable by "
+                    "CFG or LoRA strength; see the training log.)"
                 ),
             },
         ]

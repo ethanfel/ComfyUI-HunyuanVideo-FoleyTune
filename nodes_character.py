@@ -225,14 +225,14 @@ class FoleyTuneSaturate:
 class FoleyTuneTilt:
     """Zero-phase spectral tilt EQ — darken (tame edge) or brighten around a pivot."""
 
-    _PRE = {"darken": -1.0, "darken_strong": -2.0, "brighten": 0.8}
+    _PRE = {"darken_mild": -0.5, "darken": -1.0, "darken_strong": -2.0, "brighten": 0.8}
 
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
             "audio": ("AUDIO", {"tooltip": _CHAIN}),
-            "mode": (["off", "auto", "manual", "darken", "darken_strong", "brighten"], {"default": "auto",
-                "tooltip": "auto = darken if bright/edgy, lift if dull. manual = sliders. darken/brighten = fixed tilts."}),
+            "mode": (["off", "auto", "manual", "darken_mild", "darken", "darken_strong", "brighten"], {"default": "auto",
+                "tooltip": "auto = darken if bright/edgy, lift if dull. manual = sliders. darken_mild (-0.5) = the tonal-recovery sweet spot: tames a CFG-4.5 render's edge back toward CFG-1.0 tonality while the exciter keeps the air (lifts HNR, keeps brightness). darken (-1.0)/darken_strong (-2.0) go progressively muffled."}),
             "tilt_db": ("FLOAT", {"default": -0.5, "min": -4.0, "max": 4.0, "step": 0.1, "tooltip": "[manual] dB/octave tilt. Negative = darker (cut highs, lift lows); positive = brighter."}),
             "pivot": ("FLOAT", {"default": 1000.0, "min": 250.0, "max": 6000.0, "step": 50.0, "tooltip": "[manual] Pivot frequency (Hz) — gain is 0 here, tilts away from it."}),
         }}

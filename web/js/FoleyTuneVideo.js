@@ -335,11 +335,96 @@ function addFileManagerWidgets(nodeType) {
     };
 }
 
+// Multi-Video Loader: a checkbox picker over the input-dir videos that drives
+// the node's `video_paths` (one filename per line). The textarea stays for
+// manual/absolute paths; checked input videos are kept in sync with it.
+function addMultiVideoPicker(nodeType) {
+    const onNodeCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+        onNodeCreated?.apply(this, arguments);
+        const node = this;
+        const pathsWidget = node.widgets?.find(w => w.name === "video_paths");
+
+        const container = document.createElement("div");
+        container.style.cssText = "width:100%;display:flex;flex-direction:column;gap:3px;";
+        const head = document.createElement("div");
+        head.style.cssText = "display:flex;justify-content:space-between;align-items:center;"
+            + "font:11px sans-serif;color:#bbb;";
+        const title = document.createElement("span");
+        title.textContent = "Input videos — check to include";
+        const refresh = document.createElement("button");
+        refresh.textContent = "↻";
+        refresh.title = "Re-scan the input directory";
+        refresh.style.cssText = "cursor:pointer;background:#333;color:#ccc;border:1px solid #555;"
+            + "border-radius:3px;font-size:11px;line-height:1.4;padding:0 7px;";
+        head.appendChild(title); head.appendChild(refresh);
+        const list = document.createElement("div");
+        list.style.cssText = "max-height:150px;overflow-y:auto;background:#16161e;border:1px solid #444;"
+            + "border-radius:4px;padding:4px;font:11px sans-serif;color:#ddd;user-select:none;";
+        container.appendChild(head); container.appendChild(list);
+
+        const linesOf = () => (pathsWidget?.value || "").split("\n").map(s => s.trim()).filter(Boolean);
+        const setLines = (lines) => {
+            if (!pathsWidget) return;
+            pathsWidget.value = lines.join("\n");
+            pathsWidget.callback?.(pathsWidget.value);
+            node.graph?.setDirtyCanvas(true, true);
+        };
+
+        let videos = [], boxes = [];
+        const commit = () => {
+            const vset = new Set(videos);
+            const manual = linesOf().filter(l => !vset.has(l));   // keep absolute/typed paths
+            const sel = boxes.filter(b => b.cb.checked).map(b => b.name);
+            setLines([...sel, ...manual]);
+        };
+        const rebuild = () => {
+            list.innerHTML = ""; boxes = [];
+            const checked = new Set(linesOf());
+            if (!videos.length) {
+                const e = document.createElement("div");
+                e.style.cssText = "color:#888;padding:4px;";
+                e.textContent = "(no videos in the input dir — upload some, then ↻)";
+                list.appendChild(e); return;
+            }
+            for (const v of videos) {
+                const row = document.createElement("label");
+                row.style.cssText = "display:flex;align-items:center;gap:6px;padding:1px 2px;cursor:pointer;white-space:nowrap;";
+                const cb = document.createElement("input");
+                cb.type = "checkbox"; cb.checked = checked.has(v);
+                cb.addEventListener("change", commit);
+                const span = document.createElement("span"); span.textContent = v;
+                row.appendChild(cb); row.appendChild(span);
+                list.appendChild(row);
+                boxes.push({ name: v, cb });
+            }
+        };
+        const fetchVideos = async () => {
+            try {
+                const r = await api.fetchApi("/foleytune/input_videos");
+                videos = (await r.json()).videos || [];
+            } catch (_) { videos = []; }
+            rebuild();
+        };
+        refresh.addEventListener("click", (e) => { e.preventDefault(); fetchVideos(); });
+
+        node.addDOMWidget("video_picker", "foleytune_multivideo", container, {
+            serialize: false,
+            getMinHeight: () => 184,
+            getHeight: () => 184,
+        });
+        fetchVideos();
+    };
+}
+
 app.registerExtension({
     name: "FoleyTune.VideoNodes",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData?.name === "FoleyTuneVideoLoader") {
             addVideoPreview(nodeType);
+        }
+        if (nodeData?.name === "FoleyTuneMultiVideoLoader") {
+            addMultiVideoPicker(nodeType);
         }
         if (nodeData?.name === "FoleyTuneVideoLoaderUpload") {
             addVideoPreview(nodeType);

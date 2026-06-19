@@ -2306,6 +2306,19 @@ try:
 
         return web.FileResponse(cache_path, headers={"Content-Type": "image/jpeg"})
 
+    @PromptServer.instance.routes.get("/foleytune/input_videos")
+    async def input_videos(request):
+        """List video files in the ComfyUI input directory — for the Multi-Video
+        Loader's checkbox picker."""
+        input_dir = folder_paths.get_input_directory()
+        vids = []
+        if os.path.isdir(input_dir):
+            for f in sorted(os.listdir(input_dir)):
+                if (os.path.isfile(os.path.join(input_dir, f))
+                        and os.path.splitext(f)[1].lower() in _VIDEO_EXTS):
+                    vids.append(f)
+        return web.json_response({"videos": vids})
+
 except ImportError:
     pass  # Running outside ComfyUI server context
 

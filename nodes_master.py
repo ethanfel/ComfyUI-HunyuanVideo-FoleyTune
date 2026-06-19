@@ -16,8 +16,11 @@ toggleable so you can A/B by ear:
      (opt-in level change) followed by a 4x-oversampled true-peak limiter (safety,
      on by default; transparent unless peaks exceed the ceiling).
 
-Validation is by ear + the render-battery (HF flatness, HNR, gap-band breath, crest,
-LUFS) — PESQ/STOI are invalid for non-speech foley.
+PROFILES drive stages 1-2 without slider-fiddling: a safe->strong strength ladder,
+content-tuned presets (moaning / wet_oral / slaps_sex), an `auto` mode that measures
+the clip and adapts, and `manual` to use the sliders. Loudness + limiter sliders apply
+regardless of profile. Validation is by ear + the render-battery (HF flatness, HNR,
+gap-band breath, crest, LUFS) — PESQ/STOI are invalid for non-speech foley.
 """
 
 import numpy as np
@@ -133,13 +136,77 @@ def _true_peak_limit(x, sr, ceiling_db, release_ms, lookahead_ms, oversample=4):
 
 
 # --------------------------------------------------------------------------- #
+# Profiles — resolve exciter + transient params without slider-fiddling       #
+# Each entry: exciter (enable, amount, freq, drive, even) + transient          #
+# (enable, attack, sustain, attack_ms, release_ms). Content-tuned.            #
+# --------------------------------------------------------------------------- #
+def _prof(ex_en, amt, freq, drive, even, tr_en, atk, sus, ams, rms):
+    return dict(ex_en=ex_en, ex_amt=amt, ex_freq=freq, ex_drive=drive, ex_even=even,
+                tr_en=tr_en, tr_atk=atk, tr_sus=sus, tr_ams=ams, tr_rms=rms)
+
+PROFILE_NAMES = ["manual", "auto", "safe", "balanced", "strong", "moaning", "wet_oral", "slaps_sex"]
+
+PROFILES = {
+    # strength ladder
+    "safe":      _prof(True, 0.15, 4500.0, 1.5, 0.00, True,  0.15,  0.00, 3.0, 80.0),
+    "balanced":  _prof(True, 0.25, 4000.0, 2.0, 0.00, True,  0.25,  0.00, 3.0, 80.0),
+    "strong":    _prof(True, 0.40, 3500.0, 2.5, 0.10, True,  0.40,  0.05, 2.0, 70.0),
+    # content-tuned (I know the material)
+    "moaning":   _prof(True, 0.18, 5000.0, 1.5, 0.00, False, 0.00,  0.00, 3.0, 80.0),  # tonal/breath-safe: just air, NO transient
+    "wet_oral":  _prof(True, 0.28, 4000.0, 2.0, 0.05, True,  0.35,  0.00, 2.0, 70.0),  # gags/slurps are transient-rich
+    "slaps_sex": _prof(True, 0.22, 3500.0, 2.0, 0.00, True,  0.45, -0.05, 1.5, 60.0),  # punch slaps, slightly tighten tails
+}
+
+
+def _measure(x, sr):
+    """Quick descriptors on a 1-D signal for the auto profile."""
+    n, hop = 2048, 512
+    if len(x) < n:
+        return dict(cent=2000.0, hf=3.0, fizz=0.01, crest=18.0, floor=-50.0)
+    win = np.hanning(n)
+    P = np.stack([np.abs(np.fft.rfft(x[i:i + n] * win)) ** 2 for i in range(0, len(x) - n, hop)], 1) + 1e-10
+    f = np.fft.rfftfreq(n, 1 / sr)
+    cent = float(((f[:, None] * P).sum(0) / P.sum(0)).mean())
+    hf = float(P[f > 4000].sum() / P.sum() * 100)
+    Phf = P[f > 4000] + 1e-12
+    fizz = float((np.exp(np.log(Phf).mean(0)) / (Phf.mean(0) + 1e-12)).mean())
+    peak = float(np.abs(x).max()); rms = float(np.sqrt(np.mean(x ** 2))) + 1e-9
+    crest = float(20 * np.log10(peak / rms))
+    fr = np.array([np.sqrt(np.mean(c ** 2)) for c in np.array_split(x, 100) if len(c)])
+    floor = float(20 * np.log10(np.percentile(fr, 10) + 1e-9))
+    return dict(cent=cent, hf=hf, fizz=fizz, crest=crest, floor=floor)
+
+
+def _auto_profile(x, sr):
+    """Measure the clip and pick exciter+transient settings adaptively.
+
+    Exciter amount scales with DARKNESS (low centroid -> more), is pulled back when the
+    HF is already FIZZY (don't add grain) or the NOISE FLOOR is high (don't amplify hiss).
+    Transient attack scales with the PUNCH deficit (low crest -> more).
+    """
+    m = _measure(x, sr)
+    amt = 0.32 if m["cent"] < 1500 else (0.20 if m["cent"] < 2200 else 0.10)
+    drive, freq = 2.0, 4000.0
+    if m["fizz"] > 0.020:          # already grainy -> gentler, only the very top
+        amt *= 0.5; drive = 1.5; freq = 5000.0
+    if m["floor"] > -45.0:         # noisy -> don't excite the hiss
+        amt *= 0.6
+    atk = 0.35 if m["crest"] < 18 else (0.20 if m["crest"] < 24 else 0.10)
+    p = _prof(True, round(amt, 3), freq, drive, 0.0, atk > 0.0, atk, 0.0, 2.5, 80.0)
+    p["_dbg"] = (f"cent{m['cent']:.0f} hf{m['hf']:.1f} fizz{m['fizz']:.3f} "
+                 f"crest{m['crest']:.1f} floor{m['floor']:.0f} -> ex{p['ex_amt']} atk{atk}")
+    return p
+
+
+# --------------------------------------------------------------------------- #
 # Node                                                                        #
 # --------------------------------------------------------------------------- #
 class FoleyTuneMaster:
     """Mastering chain for generated foley: exciter + transient shaper + loudness/limiter.
 
-    Drop in AFTER BWE (or instead of it, for the exciter-only brightness path). Each
-    stage toggles independently so you can ear-A/B. Runs per-channel; stereo preserved.
+    Drop in AFTER BWE (or instead of it, for the exciter-only brightness path). Use a
+    `profile` for one-knob operation, or `manual` to drive the sliders. Loudness +
+    limiter always follow their own sliders. Runs per-channel; stereo preserved.
     """
 
     @classmethod
@@ -148,35 +215,42 @@ class FoleyTuneMaster:
             "required": {
                 "audio": ("AUDIO", {"tooltip": "Foley audio to master (typically post-BWE, or raw)."}),
 
-                # --- Stage 1: harmonic exciter (darkness / wash) ---
-                "exciter_enable": ("BOOLEAN", {"default": True, "tooltip": "Stage 1: add brightness/presence via synthesized harmonics (cleaner than BWE fizz)."}),
+                "profile": (PROFILE_NAMES, {"default": "balanced",
+                    "tooltip": "Preset for the exciter+transient stages. 'manual' = use the sliders below. "
+                               "'auto' = measure the clip and adapt (darker->more exciter, fizzy/noisy->less, "
+                               "flatter->more punch). safe<balanced<strong. moaning=tonal/breath-safe (no "
+                               "transient). wet_oral=gags/slurps (punchy). slaps_sex=slap-forward. "
+                               "Loudness+limiter sliders ALWAYS apply."}),
+
+                # --- Stage 1: harmonic exciter (used when profile=manual) ---
+                "exciter_enable": ("BOOLEAN", {"default": True, "tooltip": "[manual] Stage 1: brightness/presence via synthesized harmonics (cleaner than BWE fizz)."}),
                 "exciter_amount": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Parallel blend of the excited harmonics. 0.2-0.3 = subtle air; >0.5 gets aggressive."}),
+                    "tooltip": "[manual] Parallel blend of excited harmonics. 0.2-0.3 = subtle air; >0.5 aggressive."}),
                 "exciter_freq": ("FLOAT", {"default": 4000.0, "min": 1000.0, "max": 12000.0, "step": 250.0,
-                    "tooltip": "HPF cutoff (Hz). Only content above this is excited. Lower = brighten lower-mids too."}),
+                    "tooltip": "[manual] HPF cutoff (Hz). Only content above this is excited."}),
                 "exciter_drive": ("FLOAT", {"default": 2.0, "min": 0.5, "max": 8.0, "step": 0.25,
-                    "tooltip": "Soft-clip drive = harmonic density. Higher = more harmonics but harsher; keep low on moans."}),
+                    "tooltip": "[manual] Soft-clip drive = harmonic density. Higher = more but harsher."}),
                 "exciter_even": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Asymmetry -> EVEN harmonics (warmth/tube-like). 0 = pure odd (tanh). Small values add body."}),
+                    "tooltip": "[manual] Asymmetry -> EVEN harmonics (warmth). 0 = pure odd (tanh)."}),
 
-                # --- Stage 2: transient shaper (slaps) ---
-                "transient_enable": ("BOOLEAN", {"default": True, "tooltip": "Stage 2: punch up skin-slap attacks without pumping the moans."}),
+                # --- Stage 2: transient shaper (used when profile=manual) ---
+                "transient_enable": ("BOOLEAN", {"default": True, "tooltip": "[manual] Stage 2: punch slap attacks without pumping moans."}),
                 "transient_attack": ("FLOAT", {"default": 0.25, "min": -1.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Onset boost. +0.2-0.4 = punchier slaps; negative softens attacks."}),
+                    "tooltip": "[manual] Onset boost. +0.2-0.4 punchier; negative softens."}),
                 "transient_sustain": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "Decay/body. +adds tail/room, -tightens. 0 = leave sustain alone."}),
+                    "tooltip": "[manual] Decay/body. + adds tail/room, - tightens. 0 = leave alone."}),
                 "transient_attack_ms": ("FLOAT", {"default": 3.0, "min": 0.5, "max": 20.0, "step": 0.5,
-                    "tooltip": "Fast envelope time constant (ms). Smaller = sharper transient detection."}),
+                    "tooltip": "[manual] Fast envelope time constant (ms)."}),
                 "transient_release_ms": ("FLOAT", {"default": 80.0, "min": 20.0, "max": 300.0, "step": 10.0,
-                    "tooltip": "Slow envelope time constant (ms). The attack/sustain split is fast vs this."}),
+                    "tooltip": "[manual] Slow envelope time constant (ms)."}),
 
-                # --- Stage 3: loudness + true-peak limiter ---
+                # --- Stage 3: loudness + true-peak limiter (ALWAYS apply) ---
                 "loudness_enable": ("BOOLEAN", {"default": False, "tooltip": "Stage 3a: LUFS-normalize to target (a deliberate level change; off by default to respect your global_peak pipeline)."}),
                 "target_lufs": ("FLOAT", {"default": -16.0, "min": -30.0, "max": -6.0, "step": 0.5,
                     "tooltip": "Integrated loudness target (ITU-R BS.1770-4). -16 typical for content; -23 broadcast."}),
-                "limiter_enable": ("BOOLEAN", {"default": True, "tooltip": "Stage 3b: true-peak safety limiter. Transparent unless peaks exceed the ceiling (catches exciter/transient overshoot)."}),
+                "limiter_enable": ("BOOLEAN", {"default": True, "tooltip": "Stage 3b: true-peak safety limiter. Transparent unless peaks exceed the ceiling."}),
                 "true_peak_db": ("FLOAT", {"default": -1.0, "min": -3.0, "max": 0.0, "step": 0.1,
-                    "tooltip": "True-peak ceiling (dBTP). -1.0 leaves headroom for lossy encode; 0 = brickwall at full-scale."}),
+                    "tooltip": "True-peak ceiling (dBTP). -1.0 leaves headroom for lossy encode."}),
                 "limiter_release_ms": ("FLOAT", {"default": 60.0, "min": 10.0, "max": 300.0, "step": 10.0,
                     "tooltip": "Limiter gain release (ms). Shorter = louder/grabbier; longer = cleaner."}),
             },
@@ -186,7 +260,8 @@ class FoleyTuneMaster:
     FUNCTION = "master"
     CATEGORY = "FoleyTune"
 
-    def master(self, audio, exciter_enable, exciter_amount, exciter_freq, exciter_drive, exciter_even,
+    def master(self, audio, profile,
+               exciter_enable, exciter_amount, exciter_freq, exciter_drive, exciter_even,
                transient_enable, transient_attack, transient_sustain, transient_attack_ms, transient_release_ms,
                loudness_enable, target_lufs, limiter_enable, true_peak_db, limiter_release_ms):
         wav = audio["waveform"]
@@ -196,27 +271,39 @@ class FoleyTuneMaster:
         arr = wav.detach().cpu().float().numpy()          # [B, C, T]
         B, C, T = arr.shape
         out = np.empty_like(arr)
-        lufs_in = lufs_out = None
+
+        manual_p = _prof(exciter_enable, exciter_amount, exciter_freq, exciter_drive, exciter_even,
+                         transient_enable, transient_attack, transient_sustain,
+                         transient_attack_ms, transient_release_ms)
 
         for b in range(B):
-            # Stages 1 & 2 run per-channel.
+            # Resolve exciter+transient params for this clip.
+            if profile == "manual":
+                p, dbg = manual_p, ""
+            elif profile == "auto":
+                p = _auto_profile(arr[b].mean(axis=0).astype(np.float64), sr)
+                dbg = p.get("_dbg", "")
+            else:
+                p, dbg = PROFILES[profile], ""
+
+            # Stages 1 & 2 per-channel.
             chans = []
             for c in range(C):
                 x = arr[b, c].astype(np.float64)
-                if exciter_enable:
-                    x = _exciter(x, sr, exciter_freq, exciter_drive, exciter_amount, exciter_even)
-                if transient_enable:
-                    x = _transient(x, sr, transient_attack, transient_sustain,
-                                   transient_attack_ms, transient_release_ms)
+                if p["ex_en"]:
+                    x = _exciter(x, sr, p["ex_freq"], p["ex_drive"], p["ex_amt"], p["ex_even"])
+                if p["tr_en"]:
+                    x = _transient(x, sr, p["tr_atk"], p["tr_sus"], p["tr_ams"], p["tr_rms"])
                 chans.append(x)
             y = np.stack(chans, axis=0)                   # [C, T]
 
-            # Stage 3a: LUFS across channels (perceptual loudness is a whole-signal measure).
+            # Stage 3a: LUFS across channels.
+            lufs_in = None
             if loudness_enable:
                 if not _HAS_PYLN:
                     logger.warning("FoleyTune Master: loudness_enable but pyloudnorm missing; skipping.")
                 else:
-                    y2d, lufs_in = _lufs_normalize(y.T, sr, target_lufs)   # [T, C]
+                    y2d, lufs_in = _lufs_normalize(y.T, sr, target_lufs)
                     y = np.ascontiguousarray(np.asarray(y2d).T)
 
             # Stage 3b: true-peak limiter per-channel.
@@ -224,17 +311,17 @@ class FoleyTuneMaster:
                 y = np.stack([_true_peak_limit(y[c], sr, true_peak_db, limiter_release_ms, 1.5)
                               for c in range(C)], axis=0)
             else:
-                y = np.clip(y, -1.0, 1.0)                  # avoid downstream hard-clip artifacts
+                y = np.clip(y, -1.0, 1.0)
 
             out[b] = np.nan_to_num(y, nan=0.0, posinf=1.0, neginf=-1.0).astype(np.float32)
 
-        stages = []
-        if exciter_enable:   stages.append(f"exciter(a={exciter_amount},f={exciter_freq:.0f})")
-        if transient_enable: stages.append(f"transient(atk={transient_attack})")
-        if loudness_enable and _HAS_PYLN and lufs_in is not None:
-            stages.append(f"lufs({lufs_in:.1f}->{target_lufs:.1f})")
-        if limiter_enable:   stages.append(f"tplimit({true_peak_db}dBTP)")
-        logger.info(f"FoleyTune Master: {B}x{C}@{sr}Hz -> [{' -> '.join(stages) or 'bypass'}]")
+            stages = []
+            if p["ex_en"] and p["ex_amt"] > 0: stages.append(f"exciter(a={p['ex_amt']},f={p['ex_freq']:.0f})")
+            if p["tr_en"] and (p["tr_atk"] or p["tr_sus"]): stages.append(f"transient(atk={p['tr_atk']})")
+            if loudness_enable and _HAS_PYLN and lufs_in is not None: stages.append(f"lufs({lufs_in:.1f}->{target_lufs:.1f})")
+            if limiter_enable: stages.append(f"tplimit({true_peak_db}dBTP)")
+            logger.info(f"FoleyTune Master[{profile}] item{b} {C}ch@{sr}Hz -> "
+                        f"[{' -> '.join(stages) or 'bypass'}]" + (f"  [{dbg}]" if dbg else ""))
 
         return ({"waveform": torch.from_numpy(out), "sample_rate": sr},)
 

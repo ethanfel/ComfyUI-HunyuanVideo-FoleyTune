@@ -133,7 +133,12 @@ def _tilt(x, sr, tilt_db, pivot):
 
 
 def _glue(x, sr, amount):
-    """Gentle glue compressor: adaptive threshold, low ratio, smoothed gain reduction."""
+    """Gentle glue compressor: adaptive threshold, low ratio, smoothed gain reduction.
+
+    RMS-matched to the input — glue changes DYNAMICS (cohesion), not level. (Auto-makeup
+    from the gain-reduction signal under-compensates because GR is mostly zero, so the
+    peak reduction would otherwise drop the level a few dB.)
+    """
     if amount <= 0.0:
         return x
     ratio = 1.0 + amount * 3.0
@@ -142,8 +147,10 @@ def _glue(x, sr, amount):
     over = np.clip(det_db - thresh, 0.0, None)
     gr_db = -over * (1.0 - 1.0 / ratio)
     gr_db = _onepole(gr_db, 0.080, sr)                                # 80 ms smoothing
-    makeup = -float(np.median(gr_db)) * 0.6                           # partial auto makeup
-    return x * (10.0 ** ((gr_db + makeup) / 20.0))
+    y = x * (10.0 ** (gr_db / 20.0))
+    pre = float(np.sqrt(np.mean(x ** 2)))
+    post = float(np.sqrt(np.mean(y ** 2))) + 1e-9
+    return y * (pre / post)                                           # restore input RMS
 
 
 # --------------------------------------------------------------------------- #

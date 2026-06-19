@@ -2147,5 +2147,52 @@ Production checkpoints (TF32-off render; BWE only where noted):
   blowjob:  performer_a_blowjob_intensity_sfc20/adapter_step07000.pt  (6.5k = backup; → BWE)
   sex/moan: performer_a_globalpeak_intensity_sfc20/adapter_step07000.pt (7.5k alt; older all_blocks_sync)
   one-model fallback (compromise): performer_a_combined_sfc20  (non-intensity)
+  sex/moan SYNC-LANE (CFG 4.5): typeAC_globalpeak_nodenoise_io_intensity_sfc20_puncond20_5k  ← p_uncond pair
   dataset-save emits the IO recipe by default (nodes_dataset.py sweep.json template)
 ```
+
+### CFG Conditioning Dropout (p_uncond) & the Two-Tools Render Strategy (June 2026)
+
+CFG is an ADHERENCE dial (sync to motion), not a quality dial — but on this narrow fine-tune, high CFG was *fizzy* (uncond-path drift), so the project had retreated to **CFG 1.0 as a workaround** (cleanest moans, HNR 4.6 vs 0.75 @4.5) — accepting "holds sync, small mistakes" because the conditional pass was on-target. Root cause (confirmed in code): the LoRA is NEVER optimized on the unconditional pass (`lora/train.py` always conditions on real clip+sync+text; the empty-conditioning input lives only in the no-backprop eval fn), so its deltas there are uncontrolled extrapolation. At `guidance_scale > 1` the render does `cat([latents]*2)` and the uncond term is weighted `scale×` — so the drift scales with CFG. **FIX: `p_uncond` (CFG conditioning dropout)** — on a per-sample fraction, replace clip/sync with empty sequences + text with the neg-prompt embed (exact parity with the inference uncond branch), training the uncond pass. (Memory: [[project_cfg_study]].)
+
+#### The dose tracks CFG — and CFG 1.0 makes it moot
+The benefit of `p_uncond` SCALES with render CFG, because the uncond term's weight in `uncond + scale·(cond−uncond)` does:
+
+```
+CFG ~1.0  → nocond (p=0)   uncond pass is SKIPPED entirely → dropout unused; and nocond
+                           trained 100% on the conditional → BEST conditional model for CFG 1.0
+CFG ~2.0  → uncond10 (p=0.1)
+CFG ~4.5  → uncond20 (p=0.2)
+CFG ~6-7+ → uncond30 (p=0.3)   (only if pushing CFG this far; else it overshoots)
+```
+
+Overshooting the dose for a given CFG makes it WORSE, not better — measured on the d01 (denoised) sweep **@ CFG 2.0** (3 seeds): nocond shows the drift signature (%HF **16–18%** = 2× the validated 6–8% raw range + mushy moans HNR ~0 = CFG over-extrapolating excess HF through the untrained uncond pass); uncond10 fixes it (%HF back to 6–8%, HNR 0→1.09 @5500, fizz .0045); **uncond20 OVERSHOOTS at this CFG** — same clarity (1.06) but fizzier (.0072). 10% is the right dose for CFG 2. By the same logic uncond30 would overshoot CFG 4.5.
+
+#### CFG 4.5 result — uncond20 wins; the tell is the noise floor
+3-way at **CFG 4.5** (render-analysis lens, single clip): nocond's "brightness" is amplified hiss, not air —
+
+| variant | HNR | centroid | %HF | floor | flat | verdict |
+|---|---|---|---|---|---|---|
+| uncond10 | 6.86 | 1787 | 2.0 | **−47.0** | .0012 | quietest bg, but darker/less clear |
+| nocond | 8.25 | 2329 | 3.6 | **−39.6** | .0014 | "brightest" but **+7 dB noisier floor** (CFG pumps broadband incl. noise) |
+| **uncond20** | **8.51** | 1722 | 2.0 | −43.8 | **.0010** | **best clarity + most tonal**, floor stays down ← CFG-4.5 driver |
+
+At CFG 4.5 the heavier uncond weighting rewards the MORE-trained uncond20 (vs uncond10 which was enough at CFG 2). **Two-tools, both ear-confirmed:** `nocond @ CFG 1.0` = tonal-purity king (sustained moaning, low motion); `uncond20 @ CFG 4.5` = clean AND tight (motion/thrust/sync zones, drives the timeline CFG-automation lane). uncond20 is darker (tail 10k vs nocond 13.5k) but that's the TF32-off-recoverable kind, not the noisy kind. **This was the GOAL** — high CFG for adherence, finally clean; CFG 1.0 was only ever the workaround for broken high-CFG.
+
+#### Nodenoise + uncond = uncond cleans the high-CFG render WITHOUT source denoise
+Trained the sex/moaning uncond20 on the **nodenoise** set and rendered @ CFG 4.5 (render-battery, 4 tonal videos; non-tonal seed 00002 dropped — it uniformly lowered means without changing ranking). Despite no source denoise, fizz stays low (.003–.004) and HNR hits 8 — **the trained uncond pass keeps the high-CFG render clean, substituting for source denoise** (floor ~−44 vs the denoised model's ~−50; ~6–10 dB noisier but acceptable by ear). Checkpoint trajectory is **U-shaped** (unlike the denoised uncond20's monotonic decline):
+
+| step | HNR | floor | %HF | env | note |
+|---|---|---|---|---|---|
+| 4000–4500 | 4.2–5.7 | −37 to −39 | — | 9–11 | underbaked: quiet, noisy floor, flat (earlier ≠ better) |
+| **5000** | **6.4** | **−44.9** | 4.1 | **12.6** | **★ early peak: cleanest floor of run + most dynamic + clear** |
+| 6000–6500 | 3.5–5.8 | −40 | 4.7 | 11–12 | brighter but moans MUSHY (the dip) — avoid |
+| 7000 | 7.3–8.1 | −41.6 | 2.1 | 12 | HNR max BUT darkest (cent 1582) + noisier floor than 5k |
+
+**5000 = the sweet spot** (best-balanced: clarity + cleanest floor + most dynamic + bright), NOT the HNR-max 7000 (dark + noisier). No hard collapse late (uncond20 gently washes, doesn't break — the dropout regularizes late training); extending past 7000 just chases HNR deeper into the dark mode. **Released: `typeAC_globalpeak_nodenoise_io_intensity_sfc20_puncond20_5k`** (raw, render @ CFG 4.5 TF32-off).
+
+#### Bonus: conditioning dropout improves moan/HF GENERATION (candidate HF lever)
+By ear + metrics, the uncond variants seem to *generate* moans and HF better than nocond — mechanistically sensible: on dropout steps the model can't lean on conditioning shortcuts, so it must build a real UNCONDITIONAL audio prior (moan texture + HF), and HF is exactly the thing the video→audio map under-fits (the HF-collapse problem). So `p_uncond` is a **candidate new training-side HF lever** — one the old "all training-side HF fixes failed" verdict ([[project_hf_loss_problem]]) never tested (that was spectral/waveform/cos-sim losses; p_uncond came later). It reconciles with "nocond best @ CFG1" as a tradeoff: uncond = better audio PRIOR (generation), nocond = better conditioning FIT (sync, 100% conditional steps). NOT yet isolated — clean test = nocond vs uncond20 BOTH @ CFG 1.0 (uncond pass skipped → any moan/HF edge is purely dropout improving the conditional weights); if it survives, reconsider p_uncond=0.1–0.2 as a DEFAULT (watch sync cost of 20% fewer conditional steps).
+
+#### "master" render node + enhancement modes (mild polish, NOT a core lever)
+A "master" render node: 14-pair A/B (sequential gen so per-pair includes seed drift) shows a systematic (sign-consistent) **mild brightening + dynamics lift** — centroid +60 Hz (14/14), env +0.16 (14/14), fizz −0.001 (13/14), HNR +0.08 (11/14) — at one cost, floor **+0.33 dB** (13/14, the flip side of brightening). Magnitude mild ("very slight on some, not all"); KEPT ON as a harmless finishing polish, but it's a 2nd brightness source alongside TF32-off → don't stack both cranked (over-bright + compounds the floor on nodenoise). Its enhancement MODES (Δ vs baseline, one clip): **balanced** = best clarity (HNR +0.63), the default for clean content; **moaning** = transparent (floor +0.0, keeps transients) → the nodenoise/floor-safe pick; **auto** ≈ balanced dialed back ~40% (gentler, cleaner floor); **strong/slap-boost** = audible BUT over-process (crest −2.0 = squash transients, floor +2–3 dB) — "slap-boost" actually COMPRESSES slap transients despite the name → special-purpose only, not a default. Real levers stay: checkpoint + p_uncond/CFG + TF32-off; master/modes are optional finishing.

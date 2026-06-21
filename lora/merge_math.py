@@ -429,10 +429,20 @@ def extract_lora_svd(delta, rank=0, energy_threshold=0.99, rank_mode="auto"):
             U, S, Vh = torch.linalg.svd(Wd, full_matrices=False)
         U, S, Vh = U.cpu(), S.cpu(), Vh.cpu()
     except Exception:
+        # GPU SVD can fail to converge (notably ROCm/MAGMA). Retry on CPU LAPACK,
+        # then with a tiny jitter to separate repeated singular values.
+        Wc = W.detach().to("cpu", torch.float32)
         try:
-            U, S, Vh = torch.linalg.svd(W.cpu().float(), full_matrices=False)
+            U, S, Vh = torch.linalg.svd(Wc, full_matrices=False)
         except Exception:
-            return None
+            try:
+                scale = Wc.abs().mean()
+                if scale > 0:
+                    g = torch.Generator().manual_seed(0)
+                    Wc = Wc + (scale * 1e-6) * torch.randn(Wc.shape, generator=g, dtype=Wc.dtype)
+                U, S, Vh = torch.linalg.svd(Wc, full_matrices=False)
+            except Exception:
+                return None
 
     if rank_mode == "fixed" and rank > 0:
         r = min(rank, max_rank)
